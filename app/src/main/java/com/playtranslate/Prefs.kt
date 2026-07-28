@@ -783,6 +783,42 @@ class Prefs internal constructor(
         get() = sp.getBoolean(KEY_ANKI_GAME_AUDIO, false)
         set(v) = sp.edit { putBoolean(KEY_ANKI_GAME_AUDIO, v) }
 
+    // ── Bunpro (Japanese SRS) ──────────────────────────────────────────────
+    // Sibling of the Anki integration: Anki is a local AnkiDroid
+    // ContentProvider export, Bunpro is an authenticated REST read of the
+    // user's own SRS standing. See docs/features/bunpro-integration.md.
+
+    /**
+     * Bunpro **frontend session token** — the `frontend_api_token` cookie from
+     * a logged-in bunpro.jp session, NOT the account API key in Bunpro's
+     * settings (that key is rejected by this API). Encrypted, like every other
+     * credential. Deliberately absent from [migrateSecretsToEncrypted]: that is
+     * a one-time upgrade path for keys older versions wrote in plaintext, and
+     * this one never had a plaintext form.
+     */
+    var bunproToken: String
+        get() = readSecret(KEY_BUNPRO_TOKEN, "")
+        set(v) = writeSecret(KEY_BUNPRO_TOKEN, v)
+
+    /** User's explicit "use Bunpro?" toggle, independent of token presence so
+     *  the feature can be silenced without discarding a working token. Bunpro
+     *  UI gates on this AND a non-blank [bunproToken]. */
+    var bunproEnabled: Boolean
+        get() = sp.getBoolean(KEY_BUNPRO_ENABLED, false)
+        set(v) = sp.edit { putBoolean(KEY_BUNPRO_ENABLED, v) }
+
+    /**
+     * Set when a Bunpro call came back 401/403 — the session token expired.
+     * Unlike every other credential here the Bunpro token is ephemeral with no
+     * refresh path, so validity decays after a successful save. Rather than
+     * ping on every settings open, the app reacts to a real rejection: this
+     * flag drives the "token expired" settings cell and is cleared when a fresh
+     * token validates.
+     */
+    var bunproTokenRejected: Boolean
+        get() = sp.getBoolean(KEY_BUNPRO_TOKEN_REJECTED, false)
+        set(v) = sp.edit { putBoolean(KEY_BUNPRO_TOKEN_REJECTED, v) }
+
     var showTransliteration: Boolean
         get() = sp.getBoolean(KEY_SHOW_TRANSLITERATION, false)
         set(v) = sp.edit { putBoolean(KEY_SHOW_TRANSLITERATION, v) }
@@ -1506,6 +1542,10 @@ class Prefs internal constructor(
         const val KEY_DEEPSEEK_KEY                  = "deepseek_api_key"
         const val KEY_DEEPSEEK_ENABLED              = "deepseek_enabled"
         const val KEY_DEEPSEEK_MODEL                = "deepseek_model"
+        // Public: the Bunpro settings ViewModel observes these by key.
+        const val KEY_BUNPRO_TOKEN                  = "bunpro_token"
+        const val KEY_BUNPRO_ENABLED                = "bunpro_enabled"
+        const val KEY_BUNPRO_TOKEN_REJECTED         = "bunpro_token_rejected"
         const val KEY_LLM_SYSTEM_PROMPT             = "llm_system_prompt"
         const val KEY_LLM_TRANSLATION_PROMPT        = "llm_translation_prompt"
         const val KEY_LLM_BATCH_PROMPT              = "llm_batch_prompt"

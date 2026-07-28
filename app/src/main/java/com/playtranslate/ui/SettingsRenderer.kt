@@ -204,6 +204,8 @@ class SettingsRenderer(
         /** Tap on the Anki CONFIGURE cell when AnkiDroid is installed + granted
          *  — open [AnkiSettingsActivity]. */
         fun openAnkiSettings()
+        /** Tap on the Bunpro CONFIGURE cell — open [BunproSettingsActivity]. */
+        fun openBunproSettings()
         fun openLanguageSetup(mode: String)
         /** Tap on the TTS "Voice" cell — open the per-language voice picker. */
         fun openTtsVoicePicker()
@@ -985,6 +987,7 @@ class SettingsRenderer(
             ),
         )
         bindAnkiCell(state.anki)
+        bindBunproCell(state.bunpro)
         bindHubCell(
             root.findViewById(R.id.rowConfigYomitan),
             HubCell(
@@ -1049,6 +1052,36 @@ class SettingsRenderer(
             )
         }
         bindHubCell(root.findViewById(R.id.rowConfigAnki), cell)
+    }
+
+    /** Bunpro cell: add-token CTA / expired warning / on·off. Every branch
+     *  opens the same sub-page — unlike Anki there is no app to install or
+     *  permission to grant, so the token field is always the destination. */
+    private fun bindBunproCell(state: RootSettingsViewModel.BunproCell) {
+        val summary = when (state) {
+            RootSettingsViewModel.BunproCell.NotConnected ->
+                R.string.settings_bunpro_not_connected_summary
+            RootSettingsViewModel.BunproCell.Expired ->
+                R.string.settings_bunpro_expired_summary
+            is RootSettingsViewModel.BunproCell.Configured ->
+                if (state.enabled) R.string.settings_bunpro_on_summary
+                else R.string.settings_bunpro_off_summary
+        }
+        bindHubCell(
+            root.findViewById(R.id.rowConfigBunpro),
+            HubCell(
+                iconRes = R.drawable.ic_offline_star_filled,
+                title = ctx.getString(R.string.settings_cell_bunpro),
+                // Expired is the one state the user must act on to restore a
+                // feature they already set up, so the title carries the
+                // warning tone (the update row's treatment).
+                titleTint = if (state is RootSettingsViewModel.BunproCell.Expired) {
+                    R.attr.ptWarning
+                } else null,
+                summary = ctx.getString(summary),
+                onClick = { callbacks.openBunproSettings() },
+            ),
+        )
     }
 
     /** TTS cell (no sub-page): engine available → "engine · voice" + voice

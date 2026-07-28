@@ -443,6 +443,9 @@
                             android:id="@+id/rowConfigAnki" />
 
                         <include layout="@layout/settings_row_hub"
+                            android:id="@+id/rowConfigBunpro" />
+
+                        <include layout="@layout/settings_row_hub"
                             android:id="@+id/rowConfigYomitan" />
 
                         <include layout="@layout/settings_row_hub"

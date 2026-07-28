@@ -275,6 +275,13 @@
             android:parentActivityName=".MainActivity"
             android:theme="@style/Theme.PlayTranslate" />
 
+        <!-- Bunpro SRS sub-page (session token + enable), launched from Settings → Configure. -->
+        <activity
+            android:name=".ui.BunproSettingsActivity"
+            android:exported="false"
+            android:parentActivityName=".MainActivity"
+            android:theme="@style/Theme.PlayTranslate" />
+
         <!-- Translation services sub-page (online + offline backends), launched from Settings → Configure. -->
         <activity
             android:name=".ui.TranslationServicesActivity"

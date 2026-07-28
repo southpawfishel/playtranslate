@@ -111,6 +111,19 @@ class RootSettingsViewModel(app: Application) : AndroidViewModel(app) {
         data class Navigate(val deckName: String, val cardName: String) : AnkiCell
     }
 
+    /** Bunpro CONFIGURE cell: no-token → expired → on/off. Unlike [AnkiCell]
+     *  none of these need a permission or an installed app — the whole gate is
+     *  the stored session token. */
+    sealed interface BunproCell {
+        /** No token saved — tapping opens the sub-page to add one. */
+        object NotConnected : BunproCell
+        /** A call came back 401/403: the session token expired. Surfaced from
+         *  the persisted flag rather than a probe — see `Prefs.bunproTokenRejected`. */
+        object Expired : BunproCell
+        /** Token present and not known-stale; [enabled] is the user's toggle. */
+        data class Configured(val enabled: Boolean) : BunproCell
+    }
+
     /** TTS CONFIGURE cell (no sub-page; behaves like the old TTS row). */
     sealed interface TtsCell {
         /** Engine availability not resolved yet (async check in flight). */
@@ -133,6 +146,7 @@ class RootSettingsViewModel(app: Application) : AndroidViewModel(app) {
         val appearanceSummary: String,
         val captureSummary: String,
         val anki: AnkiCell,
+        val bunpro: BunproCell,
         val tts: TtsCell,
         /** Yomitan CONFIGURE cell digest: import prompt when empty,
          *  dictionary count otherwise. Null until the first [refresh]
@@ -179,6 +193,7 @@ class RootSettingsViewModel(app: Application) : AndroidViewModel(app) {
         val (online, offline) = translationDigests()
         _state.value = _state.value.copy(
             anki = resolveAnkiCell(),
+            bunpro = resolveBunproCell(),
             translationOnline = online,
             translationOffline = offline,
             captureSummary = captureDigest(),
@@ -212,6 +227,7 @@ class RootSettingsViewModel(app: Application) : AndroidViewModel(app) {
             appearanceSummary = appearanceDigest(),
             captureSummary = captureDigest(),
             anki = resolveAnkiCell(),
+            bunpro = resolveBunproCell(),
             tts = TtsCell.Loading,
         )
     }
@@ -322,6 +338,15 @@ class RootSettingsViewModel(app: Application) : AndroidViewModel(app) {
                 cardName = prefs.ankiModelName.ifBlank { str(R.string.settings_anki_default) },
             )
         }
+    }
+
+    /** Pure pref read — no network. The Bunpro session token expires, but the
+     *  app learns that from a real 401 (recorded in `bunproTokenRejected`)
+     *  rather than probing on every settings open. */
+    private fun resolveBunproCell(): BunproCell = when {
+        prefs.bunproToken.isBlank() -> BunproCell.NotConnected
+        prefs.bunproTokenRejected -> BunproCell.Expired
+        else -> BunproCell.Configured(prefs.bunproEnabled)
     }
 
     private suspend fun resolveTtsCell(): TtsCell {

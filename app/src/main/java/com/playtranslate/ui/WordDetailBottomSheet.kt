@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.drop
 import com.playtranslate.AnkiManager
 import com.playtranslate.Prefs
 import com.playtranslate.audio.AudioRequest
+import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.audio.PlayOutcome
 import com.playtranslate.audio.PronunciationPlayer
 import com.playtranslate.translation.ChineseScriptConverter
@@ -665,6 +666,7 @@ class WordDetailBottomSheet : DialogFragment() {
      *  fields; null on a cold lookup. */
     private var readingHint: String? = null
     private val deckPillTag = "anki_deck_pill"
+    private val bunproPillTag = "bunpro_srs_pill"
 
     /** In-flight TTS request from the header speak chip — cancelled when the
      *  view is torn down so a tapped pronunciation doesn't outlive the sheet. */
@@ -1058,6 +1060,7 @@ class WordDetailBottomSheet : DialogFragment() {
         headerBadgeFlow = badgeRow
         headerWord = written
         maybeAddAnkiDeckBadge(badgeRow, written)
+        maybeAddBunproBadge(badgeRow, written)
 
         parent.addView(block)
     }
@@ -1155,6 +1158,45 @@ class WordDetailBottomSheet : DialogFragment() {
         }
         unit.addView(chip)
         return unit
+    }
+
+    /**
+     * Asynchronously checks whether [word] is in the user's Bunpro reviews
+     * and, if so, appends a passive SRS pill to [badgeRow]. Silent when the
+     * feature is off, no token is saved, the word isn't Bunpro vocab, or the
+     * user hasn't studied it — see [BunproLookup.statusFor], which also
+     * absorbs an expired token.
+     */
+    private fun maybeAddBunproBadge(badgeRow: FlowLayout, word: String) {
+        val ctx = requireContext()
+        if (!BunproLookup.isEnabled(Prefs(ctx.applicationContext))) return
+        viewLifecycleOwner.lifecycleScope.launch {
+            val status = BunproLookup.statusFor(ctx, word) ?: return@launch
+            if (!isAdded) return@launch
+            // Idempotent across refreshes: drop any prior pill before re-adding.
+            for (i in badgeRow.childCount - 1 downTo 0) {
+                if (badgeRow.getChildAt(i).tag == bunproPillTag) badgeRow.removeViewAt(i)
+            }
+            val pill = BunproBadge.buildPill(
+                ctx = ctx,
+                srs = status.srs,
+                textColor = ctx.themeColor(R.attr.ptAccent),
+                background = AppCompatResources.getDrawable(ctx, R.drawable.bg_word_common_pill)
+                    ?: return@launch,
+                textSizeSp = 11f,
+                horizontalPadPx = dp(10),
+                verticalPadPx = dp(3),
+            )
+            if (pill != null) {
+                pill.tag = bunproPillTag
+                pill.layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).also { it.marginStart = dp(6) }
+                badgeRow.addView(pill)
+            }
+            badgeRow.isVisible = badgeRow.isNotEmpty()
+        }
     }
 
     /**

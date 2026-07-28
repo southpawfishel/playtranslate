@@ -1465,6 +1465,51 @@
     <string name="deepl_settings_about"><xliff:g id="brand_deepl" example="DeepL">DeepL</xliff:g> is a translation service known for high-quality output, especially in European languages.</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
+         BUNPRO — Japanese SRS integration settings sub-page.
+         ═══════════════════════════════════════════════════════════════ -->
+
+    <!-- Toolbar title.  Brand name, not translated. -->
+    <string name="bunpro_settings_title" translatable="false">Bunpro</string>
+
+    <!-- Content description for the toolbar X (discards edits). -->
+    <string name="bunpro_settings_close_cd">Close without saving</string>
+
+    <!-- Label above the session-token entry field. -->
+    <string name="bunpro_token_field_label">Session token</string>
+
+    <!-- Placeholder in the empty session-token field. -->
+    <string name="hint_bunpro_token">frontend_api_token</string>
+
+    <!-- Switch turning the Bunpro integration on/off, independent of whether
+         a token is saved. -->
+    <string name="bunpro_enabled_row_title">Show Bunpro status</string>
+    <string name="bunpro_enabled_row_subtitle">Look up your SRS progress for Japanese words</string>
+
+    <!-- Description cell explaining the integration and the token caveat. -->
+    <string name="bunpro_settings_about"><xliff:g id="brand_bunpro" example="Bunpro">Bunpro</xliff:g> is a Japanese grammar and vocabulary SRS. This uses your browser session token, which expires periodically — you\'ll need to paste in a fresh one when it does.</string>
+
+    <!-- Alert shown when the entered token is rejected by Bunpro. -->
+    <string name="bunpro_invalid_token_alert_title">Token not accepted</string>
+    <string name="bunpro_invalid_token_alert_message">Bunpro rejected this token. Session tokens expire, so a previously working one may simply be stale — copy a current one from a logged-in bunpro.jp session and try again.</string>
+    <string name="bunpro_invalid_token_alert_button">OK</string>
+
+    <!-- Bunpro word badge: shown beside the Common pill when the user has
+         this word in their Bunpro reviews. -->
+    <string name="word_bunpro_mastered">Bunpro · Mastered</string>
+    <!-- %1$d is the user's current review streak for the word. -->
+    <string name="word_bunpro_streak_fmt">Bunpro · Streak <xliff:g id="streak" example="5">%1$d</xliff:g></string>
+    <string name="word_bunpro_studied" translatable="false">Bunpro</string>
+    <!-- Accessibility label; %1$s is the visible badge text. -->
+    <string name="word_bunpro_badge_cd">In your Bunpro reviews: <xliff:g id="badge" example="Bunpro · Streak 5">%1$s</xliff:g></string>
+
+    <!-- Bunpro hub-cell digests. -->
+    <string name="settings_cell_bunpro" translatable="false">Bunpro</string>
+    <string name="settings_bunpro_not_connected_summary">Add a session token to see your SRS progress</string>
+    <string name="settings_bunpro_expired_summary">Session token expired — tap to update</string>
+    <string name="settings_bunpro_off_summary">Off</string>
+    <string name="settings_bunpro_on_summary">Showing your SRS progress</string>
+
+    <!-- ═══════════════════════════════════════════════════════════════
          OPENAI / GEMINI / DEEPSEEK — brand display names and per-backend
          sub-screen titles.  All brand names; not translated.
          ═══════════════════════════════════════════════════════════════ -->
