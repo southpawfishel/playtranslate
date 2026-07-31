@@ -168,7 +168,7 @@ object ApkUpdateManager {
      *  included). ACTION_VIEW rather than ACTION_INSTALL_PACKAGE — the latter
      *  is deprecated from API 29, our minSdk. */
     fun installIntent(context: Context, apk: File): Intent {
-        val uri = FileProvider.getUriForFile(context, "com.playtranslate.fileprovider", apk)
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", apk)
         return Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)

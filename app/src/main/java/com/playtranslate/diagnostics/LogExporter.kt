@@ -17,7 +17,6 @@ import java.util.Locale
 object LogExporter {
 
     const val CRASH_REPORT_EMAIL = "support@playtranslate.com"
-    private const val FILE_PROVIDER_AUTHORITY = "com.playtranslate.fileprovider"
     private const val LOGS_DIR = "logs"
     private const val LOGCAT_LINES = "5000"
 
@@ -147,8 +146,11 @@ object LogExporter {
         appendLine()
     }
 
+    /** Authority is derived from the installed app id (the manifest declares
+     *  `${'$'}{applicationId}.fileprovider`), never hardcoded — this fork's id
+     *  differs from upstream's. */
     private fun fileToUri(context: Context, file: File): Uri =
-        FileProvider.getUriForFile(context, FILE_PROVIDER_AUTHORITY, file)
+        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
 
     private fun buildSendIntent(uris: List<Uri>): Intent {
         return if (uris.size == 1) {

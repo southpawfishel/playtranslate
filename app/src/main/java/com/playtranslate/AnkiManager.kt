@@ -43,7 +43,6 @@ class AnkiManager(private val context: Context) {
         const val PERMISSION = "com.ichi2.anki.permission.READ_WRITE_DATABASE"
 
         private const val AUTHORITY = "com.ichi2.anki.flashcards"
-        private const val FILE_PROVIDER_AUTHORITY = "com.playtranslate.fileprovider"
         // Bumped v004 → v005 to add the TargetWord field (the dragged/looked-up
         // headword) so sentence cards persist their target word and the
         // "already in Anki" detector can match it. Existing v004 cards keep
@@ -449,7 +448,11 @@ class AnkiManager(private val context: Context) {
      */
     fun addMediaFromFile(file: File): String? {
         return try {
-            val fileUri = FileProvider.getUriForFile(context, FILE_PROVIDER_AUTHORITY, file)
+            // Derived from the installed app id, NOT hardcoded — the manifest
+            // declares ${applicationId}.fileprovider, and this fork's id
+            // differs from upstream's.
+            val fileUri =
+                FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
             context.grantUriPermission(
                 "com.ichi2.anki", fileUri,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION

@@ -14,7 +14,14 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.playtranslate"
+        // Fork identity: distinct from upstream's com.playtranslate so this
+        // build installs ALONGSIDE the released app rather than colliding with
+        // it (they are signed by different keys, so an in-place update is
+        // impossible anyway). `namespace` above deliberately stays
+        // com.playtranslate — that is the code package / R class, not the
+        // installed identity. Anything deriving an authority or a path from
+        // the app id must use ${applicationId} / context.packageName.
+        applicationId = "com.davesies.translate"
         minSdk = 29
         targetSdk = 36
         versionCode = 16
