@@ -124,6 +124,23 @@ data class BunproReview(
     @SerialName("reviewable_type") val reviewableType: String? = null,   // "Vocab" | "GrammarPoint"
 )
 
+// ── Add-to-reviews ──────────────────────────────────────────────────────────
+
+/**
+ * Response to the add-to-reviews call. Each element is the newly created
+ * `review`, in exactly the side-loaded shape [BunproIncluded] already models —
+ * so the SRS standing for a just-added word parses with no new types.
+ *
+ * Verified against live traffic: a fresh review comes back with `streak: 0`,
+ * `times_studied: 0`, `accuracy: null` and — note — **`complete: true`**.
+ * `complete` therefore does NOT mean "mastered"; [BunproSrsStatus] reads
+ * `is_recurring_mastered` for that, and must keep doing so.
+ */
+@Serializable
+data class BunproAddResponse(
+    val data: List<BunproIncluded> = emptyList(),
+)
+
 // ── Call outcome ────────────────────────────────────────────────────────────
 
 /**
@@ -141,39 +158,91 @@ sealed interface BunproResult<out T> {
     data object Failed : BunproResult<Nothing>
 }
 
+// ── SRS stage ───────────────────────────────────────────────────────────────
+
+/**
+ * Bunpro's named SRS buckets. The NAMES are confirmed — they are the keys of
+ * `GET /user_stats/srs_level_overview` (`{beginner, adept, seasoned, expert,
+ * master, ghost, self_study}`, verified live).
+ */
+enum class BunproStage { BEGINNER, ADEPT, SEASONED, EXPERT, MASTER }
+
+/**
+ * A streak resolved to its stage and step, e.g. streak 5 → Adept 2.
+ *
+ * **Thresholds are inferred, not verified.** Only the anchor is observed: a
+ * freshly added item has `streak: 0` and Bunpro displays it as "Beginner 0"
+ * (confirmed against the app). The rest of [fromStreak]'s table is the
+ * user-supplied hypothesis — 4 beginner steps (0-3), then 3/3/2, then Master
+ * at 12.
+ *
+ * Falsification test if it's ever in doubt: `GET /user_stats/srs_level_overview`
+ * returns per-bucket COUNTS. Bucket the user's own reviews by streak with this
+ * table; if the histogram disagrees with those counts, the thresholds are wrong.
+ * Adjust [fromStreak] alone — nothing else encodes the boundaries.
+ */
+data class BunproLevel(val stage: BunproStage, val step: Int?) {
+    companion object {
+        /** Streak at which an item is Master; also what [BunproSrsStatus.mastered] keys on. */
+        const val MASTER_STREAK = 12
+
+        fun fromStreak(streak: Int): BunproLevel = when {
+            streak >= MASTER_STREAK -> BunproLevel(BunproStage.MASTER, null)
+            streak >= 10 -> BunproLevel(BunproStage.EXPERT, streak - 9)    // 10,11 → 1,2
+            streak >= 7 -> BunproLevel(BunproStage.SEASONED, streak - 6)   // 7..9  → 1..3
+            streak >= 4 -> BunproLevel(BunproStage.ADEPT, streak - 3)      // 4..6  → 1..3
+            else -> BunproLevel(BunproStage.BEGINNER, streak.coerceAtLeast(0)) // 0..3 → 0..3
+        }
+    }
+}
+
 // ── Derived, UI-facing status ───────────────────────────────────────────────
 
 /**
  * Flattened SRS standing for one item, derived from a [BunproReview].
  *
- * NOTE: a named level bucket (beginner/adept/seasoned/expert/master) is
- * deliberately not derived here — Bunpro's streak→bucket thresholds are not
- * yet known. Add the mapping once confirmed; callers have the raw [streak]
- * and flags in the meantime.
+ * Two fields here are easy to get wrong, and the API invites both mistakes:
+ *
+ *  - **[mastered] comes from the streak, NOT `is_recurring_mastered`.** That
+ *    flag is the user's opt-in "Master+" setting (keep reviewing already-
+ *    mastered content) — a preference, not a stage. Live proof: the captured
+ *    `ということは` review is `streak: 5` (Adept 2) with
+ *    `is_recurring_mastered: true`.
+ *  - **`complete` is not mastery either.** A brand-new review comes back
+ *    `streak: 0, times_studied: 0` with `complete: true`.
  */
 data class BunproSrsStatus(
     val studied: Boolean,
     val streak: Int?,
+    /** [streak] resolved to a named stage; null when the streak is unknown. */
+    val level: BunproLevel?,
     val timesStudied: Int?,
     val accuracy: Int?,
     val mastered: Boolean,
+    /** The user's Master+ opt-in for this item — informational only, and
+     *  deliberately NOT used to decide [mastered]. */
+    val recurringMastered: Boolean,
     val ghost: Boolean,
     val nextReview: String?,
 ) {
     companion object {
         val UNSTUDIED = BunproSrsStatus(
-            studied = false, streak = null, timesStudied = null,
-            accuracy = null, mastered = false, ghost = false, nextReview = null,
+            studied = false, streak = null, level = null, timesStudied = null,
+            accuracy = null, mastered = false, recurringMastered = false,
+            ghost = false, nextReview = null,
         )
 
         fun from(review: BunproReview?): BunproSrsStatus {
             if (review == null) return UNSTUDIED
+            val streak = review.streak
             return BunproSrsStatus(
                 studied = true,
-                streak = review.streak,
+                streak = streak,
+                level = streak?.let(BunproLevel::fromStreak),
                 timesStudied = review.timesStudied,
                 accuracy = review.accuracy,
-                mastered = review.isRecurringMastered == true,
+                mastered = (streak ?: 0) >= BunproLevel.MASTER_STREAK,
+                recurringMastered = review.isRecurringMastered == true,
                 ghost = (review.ghostCount ?: 0) > 0,
                 nextReview = review.nextReview,
             )

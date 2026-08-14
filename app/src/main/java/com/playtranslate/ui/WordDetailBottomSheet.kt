@@ -1161,31 +1161,35 @@ class WordDetailBottomSheet : DialogFragment() {
     }
 
     /**
-     * Asynchronously checks whether [word] is in the user's Bunpro reviews
-     * and, if so, appends a passive SRS pill to [badgeRow]. Silent when the
-     * feature is off, no token is saved, the word isn't Bunpro vocab, or the
-     * user hasn't studied it — see [BunproLookup.statusFor], which also
-     * absorbs an expired token.
+     * Asynchronously resolves [word] against Bunpro and appends a passive
+     * status pill to [badgeRow] — studied (with streak), in-Bunpro-but-not-
+     * started, or not-in-Bunpro. Silent ONLY when we couldn't ask: feature
+     * off, no token, non-Japanese source, expired token, or a failed call.
+     * See [BunproLookup.outcomeFor].
      */
     private fun maybeAddBunproBadge(badgeRow: FlowLayout, word: String) {
         val ctx = requireContext()
         if (!BunproLookup.isEnabled(Prefs(ctx.applicationContext))) return
         viewLifecycleOwner.lifecycleScope.launch {
-            val status = BunproLookup.statusFor(ctx, word) ?: return@launch
+            val outcome = BunproLookup.outcomeFor(ctx, word)
             if (!isAdded) return@launch
             // Idempotent across refreshes: drop any prior pill before re-adding.
+            // Runs BEFORE the Unavailable check so a stale pill from an earlier
+            // render can't outlive a lookup that now has nothing to say.
             for (i in badgeRow.childCount - 1 downTo 0) {
                 if (badgeRow.getChildAt(i).tag == bunproPillTag) badgeRow.removeViewAt(i)
             }
             val pill = BunproBadge.buildPill(
                 ctx = ctx,
-                srs = status.srs,
-                textColor = ctx.themeColor(R.attr.ptAccent),
+                outcome = outcome,
+                studiedColor = ctx.themeColor(R.attr.ptAccent),
+                mutedColor = ctx.themeColor(R.attr.ptTextHint),
                 background = AppCompatResources.getDrawable(ctx, R.drawable.bg_word_common_pill)
                     ?: return@launch,
                 textSizeSp = 11f,
                 horizontalPadPx = dp(10),
                 verticalPadPx = dp(3),
+                onClick = { onBunproPillTapped(badgeRow, word, outcome) },
             )
             if (pill != null) {
                 pill.tag = bunproPillTag
@@ -1196,6 +1200,69 @@ class WordDetailBottomSheet : DialogFragment() {
                 badgeRow.addView(pill)
             }
             badgeRow.isVisible = badgeRow.isNotEmpty()
+        }
+    }
+
+    /**
+     * Pill tap: inspect the near misses, or confirm-then-add an unstudied word.
+     * The add is the app's only write to Bunpro, so it is always behind an
+     * explicit confirmation — never a single accidental tap on a badge.
+     */
+    private fun onBunproPillTapped(
+        badgeRow: FlowLayout,
+        word: String,
+        outcome: BunproLookup.Outcome,
+    ) {
+        val ctx = requireContext()
+        when (outcome) {
+            is BunproLookup.Outcome.Inconclusive -> {
+                val lines = BunproBadge.candidateLines(ctx, outcome)
+                if (lines.isEmpty()) return
+                OverlayAlert.Builder(ctx)
+                    .setTitle(getString(R.string.word_bunpro_maybe_dialog_title))
+                    .setMessage(
+                        getString(R.string.word_bunpro_maybe_dialog_intro, word) +
+                            "\n\n" + lines.joinToString("\n")
+                    )
+                    .addCancelButton(getString(R.string.word_bunpro_maybe_dialog_close))
+                    .show()
+            }
+            is BunproLookup.Outcome.Found -> {
+                if (outcome.status.srs.studied) return
+                OverlayAlert.Builder(ctx)
+                    .setTitle(getString(R.string.word_bunpro_add_title))
+                    .setMessage(getString(R.string.word_bunpro_add_message, word))
+                    .addButton(
+                        label = getString(R.string.word_bunpro_add_confirm),
+                        color = ctx.themeColor(R.attr.ptAccent),
+                    ) { performBunproAdd(badgeRow, word, outcome.status) }
+                    .addCancelButton(getString(R.string.word_bunpro_add_cancel))
+                    .show()
+            }
+            else -> Unit
+        }
+    }
+
+    /** Runs the add and re-renders the badge row from the updated cache. */
+    private fun performBunproAdd(
+        badgeRow: FlowLayout,
+        word: String,
+        status: BunproLookup.WordStatus,
+    ) {
+        val ctx = requireContext()
+        viewLifecycleOwner.lifecycleScope.launch {
+            val ok = BunproLookup.addToReviews(ctx, word, status)
+            if (!isAdded) return@launch
+            Toast.makeText(
+                ctx,
+                getString(
+                    if (ok) R.string.word_bunpro_add_done else R.string.word_bunpro_add_failed
+                ),
+                Toast.LENGTH_SHORT,
+            ).show()
+            // Re-run the lookup: on success it now reads the rewritten cache
+            // entry and renders the studied pill, with no network call.
+            if (ok) maybeAddBunproBadge(badgeRow, word)
         }
     }
 

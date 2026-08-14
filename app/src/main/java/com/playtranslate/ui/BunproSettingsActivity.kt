@@ -1,5 +1,6 @@
 package com.playtranslate.ui
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -7,6 +8,7 @@ import android.view.View
 import android.widget.EditText
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.isGone
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
@@ -42,6 +44,12 @@ import kotlinx.coroutines.launch
  * because Bunpro session tokens expire with no refresh path, and a freshly
  * validated token is by definition not stale. See
  * `docs/features/bunpro-integration.md`.
+ *
+ * That same expiry is why the field has a [BunproLoginActivity] button beside
+ * it: re-entry is a recurring chore, and reading the cookie by hand needs
+ * desktop DevTools. The button only *fills* the field — Save still validates and
+ * commits — so a capture behaves exactly like a paste, and the toolbar X
+ * discards it like any other edit.
  */
 class BunproSettingsActivity : SettingsSubPageActivity() {
 
@@ -53,12 +61,29 @@ class BunproSettingsActivity : SettingsSubPageActivity() {
     private lateinit var progressSave: ProgressBar
     private lateinit var switchEnabled: MaterialSwitch
 
+    /** Receives a freshly captured token and drops it in the field. Treated as
+     *  a paste, not a save: the user still commits it, so a bad capture can't
+     *  silently replace a working token. */
+    private val bunproLogin = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != Activity.RESULT_OK) return@registerForActivityResult
+        val token = result.data?.getStringExtra(BunproLoginActivity.EXTRA_TOKEN).orEmpty()
+        if (token.isBlank()) return@registerForActivityResult
+        etToken.setText(token)
+        etToken.setSelection(etToken.text.length)
+    }
+
     override fun onContentCreated(savedInstanceState: Bundle?) {
         prefs = Prefs(this)
 
         etToken = findViewById(R.id.etBunproToken)
         etToken.setText(prefs.bunproToken)
         etToken.setSelection(etToken.text.length)
+
+        findViewById<MaterialButton>(R.id.btnBunproLogin).setOnClickListener {
+            bunproLogin.launch(BunproLoginActivity.newIntent(this))
+        }
 
         wireEnabledRow(findViewById(R.id.rowBunproEnabled))
 

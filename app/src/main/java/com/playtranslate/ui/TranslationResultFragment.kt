@@ -26,6 +26,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.playtranslate.AnkiManager
 import com.playtranslate.CaptureService
 import com.playtranslate.Prefs
+import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.R
 import com.playtranslate.model.OcrProvenance
 import com.playtranslate.model.TranslationResult
@@ -36,7 +37,10 @@ import com.playtranslate.ocr.registry.OcrModelManager
 import com.playtranslate.ocr.registry.selectionToken
 import com.playtranslate.themeColor
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.drop
 import androidx.core.graphics.drawable.toDrawable
@@ -656,6 +660,10 @@ class TranslationResultFragment : Fragment() {
          *  [WordResultCell.DEFAULT_SCALE] (the "large" factor reserved for the
          *  full-screen dictionary results page) so the rows read denser here. */
         const val WORD_CELL_SCALE = 1.0f
+        /** Max concurrent Bunpro lookups from the words list. Bunpro has no
+         *  batch endpoint, so a capture costs one request per distinct word;
+         *  this keeps a large capture from opening a socket per word. */
+        const val SEM_PERMITS = 4
     }
 
     /** 1dp ptDivider line inset from the start by pt_row_h_padding, matching
@@ -1321,6 +1329,7 @@ class TranslationResultFragment : Fragment() {
         }
         lastRenderedCells = cellsByWord
         loadAnkiDeckBadges(rows.map { it.displayWord }, cellsByWord)
+        loadBunproBadges(rows.map { it.displayWord }, cellsByWord)
     }
 
     override fun onResume() {
@@ -1376,6 +1385,40 @@ class TranslationResultFragment : Fragment() {
                 ankiDecksByWord[w] = decks
                 if (decks.isEmpty()) continue
                 cellsByWord[w]?.forEach { it.updateAnkiDecks(decks) }
+            }
+        }
+    }
+
+    /**
+     * Bunpro counterpart to [loadAnkiDeckBadges], and deliberately NOT a
+     * batched one: Anki answers a whole word list in a single local
+     * ContentProvider query, whereas Bunpro's search takes ONE query string —
+     * there is no batch endpoint — so this is one HTTPS request per distinct
+     * word. [SEM_PERMITS] bounds how many are in flight so a large capture
+     * can't open a socket per word; [BunproLookup]'s process-wide cache
+     * (including negative results) makes every repeat free, which is what
+     * keeps the steady-state cost near zero as vocabulary recurs.
+     *
+     * Cells update as each word resolves rather than after a barrier, so the
+     * common words don't wait on the slowest lookup.
+     */
+    private fun loadBunproBadges(
+        words: List<String>,
+        cellsByWord: Map<String, List<WordResultCell>>,
+    ) {
+        val ctx = requireContext()
+        if (!BunproLookup.isEnabled(Prefs(ctx.applicationContext))) return
+        val distinct = words.distinct()
+        if (distinct.isEmpty()) return
+        viewLifecycleOwner.lifecycleScope.launch {
+            val gate = Semaphore(SEM_PERMITS)
+            distinct.map { word ->
+                async { word to gate.withPermit { BunproLookup.outcomeFor(ctx, word) } }
+            }.forEach { deferred ->
+                val (word, outcome) = deferred.await()
+                if (!isAdded) return@launch
+                if (outcome == BunproLookup.Outcome.Unavailable) return@forEach
+                cellsByWord[word]?.forEach { it.updateBunpro(outcome) }
             }
         }
     }

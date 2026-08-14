@@ -19,6 +19,7 @@ import androidx.core.view.isGone
 import androidx.core.view.isInvisible
 import androidx.core.view.isVisible
 import com.playtranslate.R
+import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.dictionary.Deinflector
 import com.playtranslate.language.InflectedForm
 import com.playtranslate.model.ReadingRow
@@ -313,6 +314,17 @@ class WordResultCell @JvmOverloads constructor(
     fun updateAnkiDecks(decks: List<String>) {
         val data = boundData ?: return
         val next = data.copy(ankiDecks = decks)
+        boundData = next
+        definitionsView.bind(next, label = null, scale = boundScale)
+    }
+
+    /** Re-render the body with a resolved Bunpro standing (the async lookup
+     *  lands after the row is first bound). Mirrors [updateAnkiDecks]; both
+     *  copy from [boundData] so whichever resolves second keeps the other's
+     *  badge. */
+    fun updateBunpro(outcome: BunproLookup.Outcome) {
+        val data = boundData ?: return
+        val next = data.copy(bunpro = outcome)
         boundData = next
         definitionsView.bind(next, label = null, scale = boundScale)
     }

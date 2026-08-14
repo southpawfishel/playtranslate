@@ -9,6 +9,13 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -33,6 +40,17 @@ object BunproClient {
 
     private const val TAG = "BunproClient"
     private const val BASE_URL = "https://api.bunpro.jp/api/frontend"
+
+    /**
+     * Path for the add/remove-reviews call, relative to [BASE_URL] — verified
+     * against real traffic as
+     * `PATCH https://api.bunpro.jp/api/frontend/reviews/update_via_action_type`.
+     *
+     * Note the method is PATCH, not POST: the call *updates* the user's review
+     * set via [addToReviewsBody]'s `action_type`, rather than creating a
+     * resource at this path.
+     */
+    private const val ADD_TO_REVIEWS_PATH = "reviews/update_via_action_type"
     private val JSON = "application/json".toMediaType()
 
     /**
@@ -121,6 +139,72 @@ object BunproClient {
                 BunproResult.Failed
             }
         }
+
+    /**
+     * Adds vocab to the user's review queue — the app's only WRITE.
+     *
+     * Body shape captured from real traffic; note it is a BULK, multi-action
+     * endpoint (`action_type` also takes "remove"), and `reviewables` is an
+     * array of `[type, id]` tuples rather than objects. We only ever send
+     * `"add"`, and only ever one item, but the wire format is the server's.
+     *
+     * Returns the created [BunproReview] so the caller can render the new SRS
+     * standing without a re-search. A 401 yields [BunproResult.Unauthorized] so
+     * the expired-token path stays uniform with the reads.
+     */
+    suspend fun addToReviews(token: String, vocabId: Long): BunproResult<BunproReview> =
+        withContext(Dispatchers.IO) {
+            if (token.isBlank()) return@withContext BunproResult.Failed
+            val req = Request.Builder()
+                .url("$BASE_URL/$ADD_TO_REVIEWS_PATH")
+                .addHeader("Authorization", "Bearer $token")
+                .addHeader("Accept", "application/json")
+                .patch(addToReviewsBody(listOf(vocabId)).toRequestBody(JSON))
+                .build()
+            try {
+                client.newCall(req).execute().use { resp ->
+                    when {
+                        resp.code == 401 || resp.code == 403 -> {
+                            Log.d(TAG, "addToReviews($vocabId): token rejected (${resp.code})")
+                            BunproResult.Unauthorized
+                        }
+                        !resp.isSuccessful -> {
+                            Log.d(TAG, "addToReviews($vocabId): HTTP ${resp.code}")
+                            BunproResult.Failed
+                        }
+                        else -> {
+                            val review = PtJson.lenient
+                                .decodeFromString<BunproAddResponse>(resp.body.string())
+                                .data.firstOrNull()?.attributes
+                            if (review == null) BunproResult.Failed else BunproResult.Ok(review)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "addToReviews($vocabId) failed: ${e.message}")
+                BunproResult.Failed
+            }
+        }
+
+    /**
+     * Encoded add-to-reviews body. Built as raw JSON rather than a
+     * `@Serializable` DTO because `reviewables` holds heterogeneous
+     * `[String, Long]` tuples, which kotlinx can't express as a data class
+     * without a custom serializer. Extracted for testability.
+     */
+    internal fun addToReviewsBody(vocabIds: List<Long>): String = buildJsonObject {
+        put("action_type", JsonPrimitive("add"))
+        // Explicit null, not omitted — matches the captured request.
+        put("deck_id", JsonNull)
+        putJsonArray("reviewables") {
+            vocabIds.forEach { id ->
+                addJsonArray {
+                    add(JsonPrimitive("Vocab"))
+                    add(JsonPrimitive(id))
+                }
+            }
+        }
+    }.toString()
 
     /** Encoded `search/reviewables_v1_1` request body. Extracted for testability
      *  so the exact wire shape (full `options`, both flags) can be asserted. */

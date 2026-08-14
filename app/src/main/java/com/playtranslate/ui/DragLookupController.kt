@@ -11,6 +11,7 @@ import android.os.Looper
 import android.util.Log
 import android.util.TypedValue
 import com.playtranslate.AnkiManager
+import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.CaptureService
 import com.playtranslate.R
 import com.playtranslate.capture.CaptureBackendResolver
@@ -912,10 +913,14 @@ class DragLookupController(
                 // are up, so the Anki query never delays them. Runs in this
                 // lookupJob (a new lookup cancels it) and is isolated so an
                 // Anki failure can't dismiss an already-shown lens.
+                // Deck names survive past the Anki block so the Bunpro fill can
+                // re-render WITH them — a second setDefinitions built from a
+                // bare toLensData() would wipe the deck pill that just landed.
+                var decks: List<String> = emptyList()
                 try {
                     val anki = AnkiManager(context)
                     if (anki.isAnkiDroidInstalled() && anki.hasPermission()) {
-                        val decks = withContext(Dispatchers.IO) {
+                        decks = withContext(Dispatchers.IO) {
                             anki.decksByWord(listOf(popupData.word))[popupData.word].orEmpty()
                         }
                         if (decks.isNotEmpty()) withContext(Dispatchers.Main) {
@@ -928,6 +933,25 @@ class DragLookupController(
                     throw e
                 } catch (e: Exception) {
                     Log.w(TAG, "Lens deck badge fill failed: ${e.message}")
+                }
+                // Bunpro status, same contract as the deck badge above: filled
+                // after the definitions are up so the network round trip never
+                // delays them, and isolated so a failure can't dismiss the
+                // lens. One word per lift, so no fan-out concern here.
+                try {
+                    val outcome = BunproLookup.outcomeFor(context, popupData.word)
+                    if (outcome != BunproLookup.Outcome.Unavailable) {
+                        withContext(Dispatchers.Main) {
+                            magnifier.setDefinitions(
+                                popupData.toLensData().copy(ankiDecks = decks, bunpro = outcome),
+                                label,
+                            )
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Lens Bunpro badge fill failed: ${e.message}")
                 }
             } catch (e: CancellationException) {
                 throw e

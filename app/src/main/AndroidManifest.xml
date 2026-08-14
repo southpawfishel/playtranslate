@@ -282,6 +282,17 @@
             android:parentActivityName=".MainActivity"
             android:theme="@style/Theme.PlayTranslate" />
 
+        <!-- Bunpro login WebView, launched for-result from the sub-page above to
+             capture a fresh session token. configChanges so a rotation can't
+             recreate it mid-login and throw away a half-typed password. -->
+        <activity
+            android:name=".ui.BunproLoginActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.BunproSettingsActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.PlayTranslate" />
+
         <!-- Translation services sub-page (online + offline backends), launched from Settings → Configure. -->
         <activity
             android:name=".ui.TranslationServicesActivity"

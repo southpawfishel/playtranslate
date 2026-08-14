@@ -14,6 +14,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.view.isNotEmpty
 import com.playtranslate.R
+import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.themeColor
 
 /**
@@ -41,6 +42,11 @@ class WordDefinitionsView @JvmOverloads constructor(
 
     private val density = resources.displayMetrics.density
     private fun dp(v: Float): Int = (v * density).toInt()
+
+    /** Overrides how the "Maybe in Bunpro" near-miss list is presented. Set by
+     *  surfaces that can't use the foreground-activity path — see
+     *  [showBunproCandidates]. */
+    var onBunproPillClick: ((WordDefinitionData) -> Unit)? = null
 
     private val primaryText = context.themeColor(R.attr.ptText)
     private val secondaryText = context.themeColor(R.attr.ptTextMuted)
@@ -87,8 +93,12 @@ class WordDefinitionsView @JvmOverloads constructor(
     fun bind(data: WordDefinitionData, label: String?, scale: Float, showMisc: Boolean = true) {
         removeAllViews()
 
+        // Keyed on "does Bunpro actually render something" rather than on a
+        // specific outcome — Unavailable AND Inconclusive both draw nothing,
+        // and an empty meta row would otherwise take up space.
         val hasMetaContent = data.isCommon || data.freqScore > 0 ||
-            data.frequencies.isNotEmpty() || data.ankiDecks.isNotEmpty()
+            data.frequencies.isNotEmpty() || data.ankiDecks.isNotEmpty() ||
+            BunproBadge.label(context, data.bunpro) != null
 
         if (hasMetaContent) addView(buildMetaRow(data, scale), fullWidth())
 
@@ -215,7 +225,44 @@ class WordDefinitionsView @JvmOverloads constructor(
                 verticalPadPx = dp(2f * scale),
             )?.let { add(it) }
         }
+        // Bunpro status. buildPill returns null for Unavailable, so a surface
+        // that never resolved a lookup (or has the feature off) adds nothing.
+        BunproBadge.buildPill(
+            ctx = context,
+            outcome = data.bunpro,
+            studiedColor = secondaryText,
+            mutedColor = hintText,
+            background = metaChipBackground(),
+            textSizeSp = 11.5f * scale,
+            horizontalPadPx = dp(8f * scale),
+            verticalPadPx = dp(2f * scale),
+            onClick = { showBunproCandidates(data) },
+        )?.let { add(it) }
         return row
+    }
+
+    /**
+     * Shows the near-miss list behind a "Maybe in Bunpro" pill.
+     *
+     * Defaults to the activity path ([OverlayAlert.Builder.show]), which is
+     * correct for the results list, dictionary lookup, and the word-detail
+     * sheet — it auto-detects a showing DialogFragment. It is WRONG for the
+     * magnifying lens, which draws over a game with no PlayTranslate activity
+     * foregrounded, so `show()` would defer the alert indefinitely. That
+     * surface sets [onBunproPillClick] to present via its own OverlayHost.
+     */
+    private fun showBunproCandidates(data: WordDefinitionData) {
+        onBunproPillClick?.let { it(data); return }
+        val lines = BunproBadge.candidateLines(context, data.bunpro)
+        if (lines.isEmpty()) return
+        OverlayAlert.Builder(context)
+            .setTitle(context.getString(R.string.word_bunpro_maybe_dialog_title))
+            .setMessage(
+                context.getString(R.string.word_bunpro_maybe_dialog_intro, data.word) +
+                    "\n\n" + lines.joinToString("\n")
+            )
+            .addCancelButton(context.getString(R.string.word_bunpro_maybe_dialog_close))
+            .show()
     }
 
     /** [metaChipFill] as the lightly-rounded data-chip shape (the

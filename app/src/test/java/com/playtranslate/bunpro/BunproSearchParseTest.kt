@@ -38,7 +38,11 @@ class BunproSearchParseTest {
         assertTrue("should be marked studied", status.studied)
         assertEquals(5, status.streak)
         assertEquals(5, status.timesStudied)
-        assertTrue("streak carries mastered flag", status.mastered)
+        // streak 5 = Adept 2. The review carries is_recurring_mastered=true,
+        // but that is the Master+ opt-in, not a mastery stage.
+        assertEquals(BunproLevel(BunproStage.ADEPT, 2), status.level)
+        assertFalse("Adept 2 is not mastered", status.mastered)
+        assertTrue(status.recurringMastered)
         assertFalse(status.ghost)
     }
 
@@ -71,7 +75,79 @@ class BunproSearchParseTest {
         assertTrue("options included", json.contains("\"only_bookmarks\":false"))
     }
 
+    // ── Add to reviews (write path) ─────────────────────────────────────
+
+    @Test
+    fun `add body matches the captured wire format exactly`() {
+        // Captured from real traffic. reviewables is an array of [type, id]
+        // TUPLES, not objects, and deck_id is an explicit null rather than
+        // omitted — both are easy to get subtly wrong.
+        assertEquals(
+            """{"action_type":"add","deck_id":null,"reviewables":[["Vocab",7759]]}""",
+            BunproClient.addToReviewsBody(listOf(7759L)),
+        )
+    }
+
+    @Test
+    fun `add response parses the created review`() {
+        val review = PtJson.lenient
+            .decodeFromString<BunproAddResponse>(ADD_RESPONSE_JSON)
+            .data.first().attributes
+        assertEquals(7759L, review.reviewableId)
+        assertEquals("Vocab", review.reviewableType)
+        assertEquals(0, review.streak)
+        assertEquals(0, review.timesStudied)
+    }
+
+    @Test
+    fun `a freshly added word is studied but NOT mastered`() {
+        // Regression guard: the real response sets complete=true on a brand new
+        // review with streak 0. Deriving `mastered` from `complete` would make
+        // every just-added word render as "Mastered".
+        val review = PtJson.lenient
+            .decodeFromString<BunproAddResponse>(ADD_RESPONSE_JSON)
+            .data.first().attributes
+        val srs = BunproSrsStatus.from(review)
+        assertTrue("must count as studied", srs.studied)
+        assertTrue("the API really does say complete=true here", review.complete == true)
+        assertFalse("but it is NOT mastered", srs.mastered)
+    }
+
     private companion object {
+        val ADD_RESPONSE_JSON = """
+        {
+          "data": [
+            {
+              "id": "63189678",
+              "type": "review",
+              "attributes": {
+                "id": 63189678,
+                "streak": 0,
+                "next_review": "2026-08-03T17:48:01.367Z",
+                "complete": true,
+                "is_fsrs": false,
+                "is_recurring_mastered": false,
+                "review_misses": 0,
+                "started_studying_at": "2026-08-03T17:48:01.367Z",
+                "reviewable_id": 7759,
+                "reviewable_type": "Vocab",
+                "default_input_type": "Cloze",
+                "user_synonyms": "",
+                "created_at": "2026-08-03T17:48:01.375Z",
+                "updated_at": "2026-08-03T17:48:01.375Z",
+                "accuracy": null,
+                "times_studied": 0,
+                "ghost_count": 0
+              },
+              "relationships": {
+                "study_question": { "data": { "id": "110127", "type": "study_question" } },
+                "reviewable": { "data": { "id": "7759", "type": "vocab" } }
+              }
+            }
+          ]
+        }
+        """.trimIndent()
+
         // Real response trimmed to one studied grammar point + one unstudied vocab.
         val SAMPLE_JSON = """
         {

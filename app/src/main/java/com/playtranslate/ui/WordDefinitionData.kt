@@ -1,5 +1,6 @@
 package com.playtranslate.ui
 
+import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.model.FrequencyTag
 import com.playtranslate.model.ReadingRow
 
@@ -22,6 +23,12 @@ data class WordDefinitionData(
     /** Names of Anki decks already containing this word; renders a passive
      *  deck pill in the meta row when non-empty. */
     val ankiDecks: List<String> = emptyList(),
+    /** Bunpro standing for this word; renders a passive status pill in the
+     *  meta row. Defaults to [com.playtranslate.bunpro.BunproLookup.Outcome.Unavailable]
+     *  — "we have nothing to say" — so every existing construction site keeps
+     *  its current behaviour and only surfaces that actually resolve a lookup
+     *  show the pill. */
+    val bunpro: BunproLookup.Outcome = BunproLookup.Outcome.Unavailable,
     /** Pitch-accent downstep variants for [reading], empty when unknown.
      *  [WordResultCell] draws the contour over its reading when non-empty. */
     val pitch: List<Int> = emptyList(),

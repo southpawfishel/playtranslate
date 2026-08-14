@@ -2,6 +2,7 @@ package com.playtranslate.bunpro
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -13,13 +14,82 @@ import org.junit.Test
  */
 class BunproBadgeLabelTest {
 
-    // ── Pill visibility ─────────────────────────────────────────────────
+    // ── Outcome distinctions the badge depends on ───────────────────────
+
+    // ── Tolerant search vs. exact matching ──────────────────────────────
 
     @Test
-    fun `unstudied status suppresses the pill`() {
-        // buildPill returns null for !studied; assert the precondition the
-        // badge keys on rather than inflating a View in a unit test.
-        assertFalse(BunproSrsStatus.UNSTUDIED.studied)
+    fun `a superstring hit is Inconclusive, never Absent`() {
+        // Real captured behaviour: querying ということ returns と言うことは —
+        // Bunpro appended は. Exact matching rejects it, but Bunpro clearly
+        // has RELATED vocab, so claiming "not in Bunpro" would be false.
+        val section = BunproSection(
+            data = listOf(
+                BunproItem(
+                    id = "111831",
+                    type = "vocab",
+                    attributes = BunproItemAttributes(
+                        id = 111831, title = "と言うことは",
+                        kana = "ということは", slug = "と言うことは",
+                    ),
+                )
+            )
+        )
+        val outcome = BunproLookup.resolve(section, "ということ")
+        assertTrue(
+            "superstring hit must not be reported as absent",
+            outcome is BunproLookup.Outcome.Inconclusive,
+        )
+        // The near miss is carried so the "Maybe in Bunpro" pill can list it.
+        val candidates = (outcome as BunproLookup.Outcome.Inconclusive).candidates
+        assertEquals(1, candidates.size)
+        assertEquals("と言うことは", candidates.first().title)
+    }
+
+    @Test
+    fun `an empty result set is genuinely Absent`() {
+        assertEquals(
+            BunproLookup.Outcome.Absent as Any,
+            BunproLookup.resolve(BunproSection(), "ホゲホゲ") as Any,
+        )
+    }
+
+    @Test
+    fun `an exact kana hit still resolves to Found`() {
+        val section = BunproSection(
+            data = listOf(
+                BunproItem(
+                    id = "1", type = "vocab",
+                    attributes = BunproItemAttributes(id = 1, title = "肺", kana = "はい"),
+                )
+            )
+        )
+        assertTrue(BunproLookup.resolve(section, "はい") is BunproLookup.Outcome.Found)
+        assertTrue(BunproLookup.resolve(section, "肺") is BunproLookup.Outcome.Found)
+    }
+
+    @Test
+    fun `absent and unavailable are different values`() {
+        // The whole point of the split: "not in Bunpro" is a claim we may only
+        // make when a search answered. If these ever collapse, an expired token
+        // or a dropped connection would render as confident absence.
+        assertNotEquals(
+            BunproLookup.Outcome.Absent as Any,
+            BunproLookup.Outcome.Unavailable as Any,
+        )
+    }
+
+    @Test
+    fun `a found-but-unstudied word is still Found, not Absent`() {
+        val found = BunproLookup.Outcome.Found(
+            BunproLookup.WordStatus(
+                vocabId = 1, slug = null, jmdictId = null, srs = BunproSrsStatus.UNSTUDIED,
+            )
+        )
+        // Bunpro HAS the word; the user just hasn't started it. Reporting this
+        // as Absent would tell the user the word doesn't exist in Bunpro.
+        assertFalse(found.status.srs.studied)
+        assertNotEquals(BunproLookup.Outcome.Absent as Any, found as Any)
     }
 
     @Test
@@ -30,12 +100,43 @@ class BunproBadgeLabelTest {
         assertFalse("no mastered flag set", srs.mastered)
     }
 
+    // ── Streak → stage mapping ──────────────────────────────────────────
+
     @Test
-    fun `mastered outranks streak`() {
+    fun `streaks map to their Bunpro stages`() {
+        fun stage(streak: Int) = BunproLevel.fromStreak(streak)
+        assertEquals(BunproLevel(BunproStage.BEGINNER, 0), stage(0))
+        assertEquals(BunproLevel(BunproStage.BEGINNER, 3), stage(3))
+        assertEquals(BunproLevel(BunproStage.ADEPT, 1), stage(4))
+        assertEquals(BunproLevel(BunproStage.ADEPT, 3), stage(6))
+        assertEquals(BunproLevel(BunproStage.SEASONED, 1), stage(7))
+        assertEquals(BunproLevel(BunproStage.SEASONED, 3), stage(9))
+        assertEquals(BunproLevel(BunproStage.EXPERT, 1), stage(10))
+        assertEquals(BunproLevel(BunproStage.EXPERT, 2), stage(11))
+        assertEquals(BunproLevel(BunproStage.MASTER, null), stage(12))
+        // Beyond Master stays Master rather than inventing further steps.
+        assertEquals(BunproLevel(BunproStage.MASTER, null), stage(20))
+    }
+
+    @Test
+    fun `is_recurring_mastered is Master-plus opt-in, NOT mastery`() {
+        // The captured ということは review: streak 5 (Adept 2) WITH
+        // is_recurring_mastered = true. Deriving mastery from that flag — as an
+        // earlier version did — rendered this item as "Mastered".
         val srs = BunproSrsStatus.from(
-            BunproReview(id = 1, streak = 9, isRecurringMastered = true)
+            BunproReview(id = 1, streak = 5, isRecurringMastered = true)
         )
-        assertTrue(srs.mastered)
+        assertFalse("streak 5 is Adept 2, not Master", srs.mastered)
+        assertTrue("the flag is still surfaced, just not as mastery", srs.recurringMastered)
+        assertEquals(BunproLevel(BunproStage.ADEPT, 2), srs.level)
+    }
+
+    @Test
+    fun `mastery comes from the streak alone`() {
+        val srs = BunproSrsStatus.from(
+            BunproReview(id = 1, streak = 12, isRecurringMastered = false)
+        )
+        assertTrue("streak 12 is Master even with Master+ off", srs.mastered)
     }
 
     @Test

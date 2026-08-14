@@ -1480,27 +1480,64 @@
     <!-- Placeholder in the empty session-token field. -->
     <string name="hint_bunpro_token">frontend_api_token</string>
 
+    <!-- Button that opens the Bunpro login WebView and fills the field above
+         with the token it captures. -->
+    <string name="bunpro_login_button">Log in to fetch token</string>
+
+    <!-- Toolbar title on the login WebView. -->
+    <string name="bunpro_login_title">Log in to Bunpro</string>
+
+    <!-- Content description for the login WebView's toolbar X. -->
+    <string name="bunpro_login_close_cd">Cancel login</string>
+
     <!-- Switch turning the Bunpro integration on/off, independent of whether
          a token is saved. -->
     <string name="bunpro_enabled_row_title">Show Bunpro status</string>
     <string name="bunpro_enabled_row_subtitle">Look up your SRS progress for Japanese words</string>
 
     <!-- Description cell explaining the integration and the token caveat. -->
-    <string name="bunpro_settings_about"><xliff:g id="brand_bunpro" example="Bunpro">Bunpro</xliff:g> is a Japanese grammar and vocabulary SRS. This uses your browser session token, which expires periodically — you\'ll need to paste in a fresh one when it does.</string>
+    <string name="bunpro_settings_about"><xliff:g id="brand_bunpro" example="Bunpro">Bunpro</xliff:g> is a Japanese grammar and vocabulary SRS. This uses your browser session token, which expires periodically — log in again to fetch a fresh one when it does.</string>
 
     <!-- Alert shown when the entered token is rejected by Bunpro. -->
     <string name="bunpro_invalid_token_alert_title">Token not accepted</string>
-    <string name="bunpro_invalid_token_alert_message">Bunpro rejected this token. Session tokens expire, so a previously working one may simply be stale — copy a current one from a logged-in bunpro.jp session and try again.</string>
+    <string name="bunpro_invalid_token_alert_message">Bunpro rejected this token. Session tokens expire, so a previously working one may simply be stale — tap “Log in to fetch token” to get a current one and try again.</string>
     <string name="bunpro_invalid_token_alert_button">OK</string>
 
     <!-- Bunpro word badge: shown beside the Common pill when the user has
          this word in their Bunpro reviews. -->
-    <string name="word_bunpro_mastered">Bunpro · Mastered</string>
-    <!-- %1$d is the user's current review streak for the word. -->
-    <string name="word_bunpro_streak_fmt">Bunpro · Streak <xliff:g id="streak" example="5">%1$d</xliff:g></string>
+    <!-- Bunpro's own SRS stage names; brand terminology, left untranslated. -->
+    <string name="word_bunpro_stage_beginner" translatable="false">Beginner</string>
+    <string name="word_bunpro_stage_adept" translatable="false">Adept</string>
+    <string name="word_bunpro_stage_seasoned" translatable="false">Seasoned</string>
+    <string name="word_bunpro_stage_expert" translatable="false">Expert</string>
+    <string name="word_bunpro_stage_master" translatable="false">Master</string>
+    <!-- Stage plus its step, e.g. "Adept 2". -->
+    <string name="word_bunpro_stage_step_fmt" translatable="false"><xliff:g id="stage" example="Adept">%1$s</xliff:g> <xliff:g id="step" example="2">%2$d</xliff:g></string>
+    <!-- Badge text; %1$s is the resolved stage, e.g. "Adept 2" or "Master". -->
+    <string name="word_bunpro_level_fmt">Bunpro · <xliff:g id="level" example="Adept 2">%1$s</xliff:g></string>
     <string name="word_bunpro_studied" translatable="false">Bunpro</string>
+    <!-- Word exists in Bunpro but the user hasn't started studying it. -->
+    <string name="word_bunpro_not_studied">Bunpro · Not studied</string>
+    <!-- Word has no Bunpro vocab entry at all. -->
+    <string name="word_bunpro_absent">Not in Bunpro</string>
+    <!-- Bunpro returned near-misses but no exact match; tap to see them. -->
+    <string name="word_bunpro_maybe">Maybe in Bunpro</string>
+    <string name="word_bunpro_maybe_dialog_title">Possible Bunpro matches</string>
+    <!-- %1$s is the word the user looked up. -->
+    <string name="word_bunpro_maybe_dialog_intro">No exact match for <xliff:g id="word" example="ということ">%1$s</xliff:g>, but Bunpro returned:</string>
+    <string name="word_bunpro_maybe_dialog_close">Close</string>
+    <!-- Confirm dialog before the one write this app makes. -->
+    <string name="word_bunpro_add_title">Add to Bunpro reviews?</string>
+    <!-- %1$s is the word being added. -->
+    <string name="word_bunpro_add_message"><xliff:g id="word" example="肺">%1$s</xliff:g> will be added to your Bunpro review queue and will start appearing in your reviews.</string>
+    <string name="word_bunpro_add_confirm">Add</string>
+    <string name="word_bunpro_add_cancel">Cancel</string>
+    <string name="word_bunpro_add_done">Added to your Bunpro reviews</string>
+    <string name="word_bunpro_add_failed">Couldn\'t add to Bunpro — check your session token</string>
     <!-- Accessibility label; %1$s is the visible badge text. -->
     <string name="word_bunpro_badge_cd">In your Bunpro reviews: <xliff:g id="badge" example="Bunpro · Streak 5">%1$s</xliff:g></string>
+    <!-- Accessibility label for the non-studied badge states. -->
+    <string name="word_bunpro_status_cd">Bunpro status: <xliff:g id="badge" example="Not in Bunpro">%1$s</xliff:g></string>
 
     <!-- Bunpro hub-cell digests. -->
     <string name="settings_cell_bunpro" translatable="false">Bunpro</string>
