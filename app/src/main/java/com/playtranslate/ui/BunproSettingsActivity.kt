@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.widget.EditText
+import android.widget.Toast
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,11 +17,17 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.materialswitch.MaterialSwitch
 import com.playtranslate.Prefs
 import com.playtranslate.R
+import com.playtranslate.themeColor
 import com.playtranslate.bunpro.BunproClient
+import com.playtranslate.bunpro.BunproGrammarLookup
+import com.playtranslate.bunpro.BunproGrammarScraper
+import com.playtranslate.bunpro.BunproGrammarStore
 import com.playtranslate.bunpro.BunproLookup
+import com.playtranslate.bunpro.BunproSelfCheck
 import com.playtranslate.translation.KeyStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 
 /**
  * Settings sub-screen for the Bunpro SRS integration: session token + an
@@ -86,6 +93,9 @@ class BunproSettingsActivity : SettingsSubPageActivity() {
         }
 
         wireEnabledRow(findViewById(R.id.rowBunproEnabled))
+        wireSyncRow(findViewById(R.id.rowBunproSync))
+        wireDetailsRow(findViewById(R.id.rowBunproDetails))
+        wireSelfCheckRow(findViewById(R.id.rowBunproSelfCheck))
 
         btnSave = findViewById(R.id.btnSave)
         progressSave = findViewById(R.id.progressSave)
@@ -105,6 +115,185 @@ class BunproSettingsActivity : SettingsSubPageActivity() {
         switchEnabled = row.findViewById(R.id.switchRowToggle)
         switchEnabled.isChecked = prefs.bunproEnabled
         row.setOnClickListener { switchEnabled.isChecked = !switchEnabled.isChecked }
+    }
+
+    /**
+     * Mirrors the grammar catalogue to this device. Only the INDEX — one
+     * request for all ~979 points, which is enough for matching. The
+     * per-point detail sweep is ~979 more requests and stays opt-in.
+     */
+    private fun wireSyncRow(row: View) {
+        row.findViewById<TextView>(R.id.tvRowTitle).text =
+            getString(R.string.bunpro_sync_row_title)
+        val subtitle = row.findViewById<TextView>(R.id.tvRowSubtitle).apply { isVisible = true }
+        val button = row.findViewById<MaterialButton>(R.id.btnRowAction)
+        button.text = getString(R.string.bunpro_sync_button)
+
+        fun refreshSubtitle() {
+            lifecycleScope.launch {
+                val n = BunproGrammarStore.indexSize(this@BunproSettingsActivity)
+                if (!isFinishing) {
+                    subtitle.text =
+                        if (n == 0) getString(R.string.bunpro_sync_row_never)
+                        else getString(R.string.bunpro_sync_row_count, n)
+                }
+            }
+        }
+        refreshSubtitle()
+
+        button.setOnClickListener {
+            button.isEnabled = false
+            button.text = getString(R.string.bunpro_sync_working)
+            lifecycleScope.launch {
+                val result = BunproGrammarScraper.syncIndex(this@BunproSettingsActivity)
+                // The studied set is the relevance lever: without it the
+                // matcher surfaces N5 conjugations the user learned years ago
+                // (measured: it removes ~64% of matches while keeping N3+).
+                // One request, so it rides along with the catalogue sync.
+                val studiedOk =
+                    if (result is BunproGrammarScraper.SyncResult.Ok) {
+                        BunproGrammarLookup.syncStudied(this@BunproSettingsActivity)
+                    } else false
+                // Drop the in-memory index so the next lookup sees both.
+                BunproGrammarLookup.invalidate()
+                if (isFinishing) return@launch
+                button.isEnabled = true
+                button.text = getString(R.string.bunpro_sync_button)
+                refreshSubtitle()
+                val message = when (result) {
+                    is BunproGrammarScraper.SyncResult.Ok ->
+                        getString(R.string.bunpro_sync_ok, result.count) + "\n\n" +
+                            getString(
+                                if (studiedOk) R.string.bunpro_sync_studied_ok
+                                else R.string.bunpro_sync_studied_failed
+                            )
+                    BunproGrammarScraper.SyncResult.NotConfigured ->
+                        getString(R.string.bunpro_sync_not_configured)
+                    is BunproGrammarScraper.SyncResult.Failed ->
+                        getString(R.string.bunpro_sync_failed, result.reason)
+                }
+                OverlayAlert.Builder(this@BunproSettingsActivity)
+                    .setTitle(getString(R.string.bunpro_sync_result_title))
+                    .setMessage(message)
+                    .addCancelButton(getString(R.string.bunpro_selfcheck_close))
+                    .show()
+            }
+        }
+    }
+
+    /** Non-null while a detail sweep is running, so the button can stop it. */
+    private var detailJob: Job? = null
+
+    /**
+     * The optional per-point sweep: one request per grammar point, for the
+     * conjugation tables and short nuance text.
+     *
+     * Kept on its own row, behind a confirmation, because it is minutes long
+     * and touches someone else's server ~979 times. It is resumable, so
+     * stopping it (or leaving the screen, which cancels the job) costs only
+     * the in-flight request.
+     *
+     * Explicitly optional: matching works from the index alone, and the lemma
+     * arm already covers much of what the conjugation tables would add.
+     */
+    private fun wireDetailsRow(row: View) {
+        row.findViewById<TextView>(R.id.tvRowTitle).text =
+            getString(R.string.bunpro_details_row_title)
+        val subtitle = row.findViewById<TextView>(R.id.tvRowSubtitle).apply { isVisible = true }
+        val button = row.findViewById<MaterialButton>(R.id.btnRowAction)
+
+        fun refresh() {
+            lifecycleScope.launch {
+                val total = BunproGrammarStore.indexSize(this@BunproSettingsActivity)
+                val done = BunproGrammarStore.detailCount(this@BunproSettingsActivity)
+                if (isFinishing) return@launch
+                subtitle.text =
+                    if (total == 0) getString(R.string.bunpro_details_row_none)
+                    else getString(R.string.bunpro_details_row_progress, done, total)
+                button.isEnabled = total > 0
+            }
+        }
+        refresh()
+        button.text = getString(R.string.bunpro_details_button)
+
+        button.setOnClickListener {
+            // Already running → this is the stop control.
+            detailJob?.let {
+                it.cancel()
+                detailJob = null
+                button.text = getString(R.string.bunpro_details_button)
+                refresh()
+                Toast.makeText(this, R.string.bunpro_details_stopped, Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            OverlayAlert.Builder(this)
+                .setTitle(getString(R.string.bunpro_details_confirm_title))
+                .setMessage(getString(R.string.bunpro_details_confirm_body))
+                .addButton(
+                    label = getString(R.string.bunpro_details_confirm_start),
+                    color = themeColor(R.attr.ptAccent),
+                ) { startDetailSweep(button, ::refresh) }
+                .addCancelButton(getString(R.string.word_bunpro_add_cancel))
+                .show()
+        }
+    }
+
+    private fun startDetailSweep(button: MaterialButton, refresh: () -> Unit) {
+        detailJob = lifecycleScope.launch {
+            val result = BunproGrammarScraper.syncDetails(
+                this@BunproSettingsActivity,
+            ) { done, total ->
+                // Progress arrives off the main thread; hop back to touch views.
+                lifecycleScope.launch {
+                    if (!isFinishing) {
+                        button.text = getString(R.string.bunpro_details_row_progress, done, total)
+                    }
+                }
+            }
+            detailJob = null
+            if (isFinishing) return@launch
+            button.text = getString(R.string.bunpro_details_button)
+            refresh()
+            // Fresh conjugation forms mean the matcher's index is stale.
+            BunproGrammarLookup.invalidate()
+            if (result is BunproGrammarScraper.SyncResult.Ok) {
+                Toast.makeText(this@BunproSettingsActivity, R.string.bunpro_details_done, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    /**
+     * Runs [BunproSelfCheck] and shows its report.
+     *
+     * This exists because the matcher's central assumption — that Sudachi
+     * lemmatizes よかった to いい — cannot be tested off-device: Sudachi needs a
+     * packaged dictionary from a downloaded language pack. Reporting into an
+     * alert means verification needs nothing but the app itself.
+     */
+    private fun wireSelfCheckRow(row: View) {
+        row.findViewById<TextView>(R.id.tvRowTitle).text =
+            getString(R.string.bunpro_selfcheck_row_title)
+        row.findViewById<TextView>(R.id.tvRowSubtitle).apply {
+            text = getString(R.string.bunpro_selfcheck_row_subtitle)
+            isVisible = true
+        }
+        val button = row.findViewById<MaterialButton>(R.id.btnRowAction)
+        button.text = getString(R.string.bunpro_selfcheck_button)
+        button.setOnClickListener {
+            button.isEnabled = false
+            button.text = getString(R.string.bunpro_selfcheck_working)
+            lifecycleScope.launch {
+                val report = BunproSelfCheck.run(this@BunproSettingsActivity)
+                if (isFinishing) return@launch
+                button.isEnabled = true
+                button.text = getString(R.string.bunpro_selfcheck_button)
+                OverlayAlert.Builder(this@BunproSettingsActivity)
+                    .setTitle(getString(R.string.bunpro_selfcheck_title))
+                    .setMessage(report.summary + "\n\n" + report.asText())
+                    .addCancelButton(getString(R.string.bunpro_selfcheck_close))
+                    .show()
+            }
+        }
     }
 
     /** Save-button loading state: text blanked + click suppressed with the

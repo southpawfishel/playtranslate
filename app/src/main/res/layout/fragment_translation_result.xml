@@ -124,6 +124,16 @@
                     android:layout_height="wrap_content"
                     android:orientation="vertical">
 
+                    <!-- Bunpro grammar found in the captured sentence. Above
+                         the word list because it is sentence-scoped, and
+                         populated asynchronously — stays empty (zero height)
+                         when Bunpro is off or nothing matched. -->
+                    <LinearLayout
+                        android:id="@+id/bunproGrammarContainer"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical" />
+
                     <TextView
                         android:id="@+id/tvMainWordsLoading"
                         android:layout_width="match_parent"

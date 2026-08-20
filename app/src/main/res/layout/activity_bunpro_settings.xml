@@ -102,6 +102,25 @@
                     <include layout="@layout/settings_row_switch"
                         android:id="@+id/rowBunproEnabled" />
 
+                    <include layout="@layout/settings_row_divider" />
+
+                    <!-- Grammar catalogue mirror: one request for the index,
+                         then an optional throttled per-point sweep. -->
+                    <include layout="@layout/settings_row_action"
+                        android:id="@+id/rowBunproSync" />
+
+                    <!-- Optional per-point sweep: ~979 requests, throttled and
+                         resumable. Separate row because it is minutes-long and
+                         must never fire implicitly. -->
+                    <include layout="@layout/settings_row_action"
+                        android:id="@+id/rowBunproDetails" />
+
+                    <!-- On-device verification (BunproSelfCheck). The lemma
+                         assumption can't be tested without a real Sudachi
+                         dictionary, so this is how it gets checked at all. -->
+                    <include layout="@layout/settings_row_action"
+                        android:id="@+id/rowBunproSelfCheck" />
+
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"

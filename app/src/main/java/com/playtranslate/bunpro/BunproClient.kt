@@ -38,6 +38,10 @@ import java.util.concurrent.TimeUnit
  */
 object BunproClient {
 
+    /** `reviewable_type` values, matching what the API returns. */
+    const val TYPE_VOCAB = "Vocab"
+    const val TYPE_GRAMMAR = "GrammarPoint"
+
     private const val TAG = "BunproClient"
     private const val BASE_URL = "https://api.bunpro.jp/api/frontend"
 
@@ -152,24 +156,28 @@ object BunproClient {
      * standing without a re-search. A 401 yields [BunproResult.Unauthorized] so
      * the expired-token path stays uniform with the reads.
      */
-    suspend fun addToReviews(token: String, vocabId: Long): BunproResult<BunproReview> =
+    suspend fun addToReviews(
+        token: String,
+        id: Long,
+        type: String = TYPE_VOCAB,
+    ): BunproResult<BunproReview> =
         withContext(Dispatchers.IO) {
             if (token.isBlank()) return@withContext BunproResult.Failed
             val req = Request.Builder()
                 .url("$BASE_URL/$ADD_TO_REVIEWS_PATH")
                 .addHeader("Authorization", "Bearer $token")
                 .addHeader("Accept", "application/json")
-                .patch(addToReviewsBody(listOf(vocabId)).toRequestBody(JSON))
+                .patch(addToReviewsBody(listOf(id), type).toRequestBody(JSON))
                 .build()
             try {
                 client.newCall(req).execute().use { resp ->
                     when {
                         resp.code == 401 || resp.code == 403 -> {
-                            Log.d(TAG, "addToReviews($vocabId): token rejected (${resp.code})")
+                            Log.d(TAG, "addToReviews($type $id): token rejected (${resp.code})")
                             BunproResult.Unauthorized
                         }
                         !resp.isSuccessful -> {
-                            Log.d(TAG, "addToReviews($vocabId): HTTP ${resp.code}")
+                            Log.d(TAG, "addToReviews($type $id): HTTP ${resp.code}")
                             BunproResult.Failed
                         }
                         else -> {
@@ -181,7 +189,46 @@ object BunproClient {
                     }
                 }
             } catch (e: Exception) {
-                Log.d(TAG, "addToReviews($vocabId) failed: ${e.message}")
+                Log.d(TAG, "addToReviews($type $id) failed: ${e.message}")
+                BunproResult.Failed
+            }
+        }
+
+    /**
+     * Every grammar point the user has studied, with its SRS state — one
+     * unpaginated request.
+     *
+     * `hydrate_reviewable_index` is misleadingly named: it returns the user's
+     * REVIEW RECORDS, not a catalogue. There is no grammar content here at all
+     * (no title, meaning or structure), just SRS state keyed by
+     * `reviewable_id`. That makes it the relevance signal rather than a source
+     * of grammar: on the benchmark corpus, suppressing points the user already
+     * knows cut shown matches by 64% while keeping the N3+ material.
+     */
+    suspend fun studiedGrammar(token: String): BunproResult<List<BunproReview>> =
+        withContext(Dispatchers.IO) {
+            if (token.isBlank()) return@withContext BunproResult.Failed
+            val req = Request.Builder()
+                .url("$BASE_URL/reviews/hydrate_reviewable_index?reviewable_type=GrammarPoint")
+                .addHeader("Authorization", "Bearer $token")
+                .addHeader("Accept", "application/json")
+                .get()
+                .build()
+            try {
+                client.newCall(req).execute().use { resp ->
+                    when {
+                        resp.code == 401 || resp.code == 403 -> BunproResult.Unauthorized
+                        !resp.isSuccessful -> BunproResult.Failed
+                        else -> BunproResult.Ok(
+                            // Same envelope as the add call — no new DTOs.
+                            PtJson.lenient
+                                .decodeFromString<BunproAddResponse>(resp.body.string())
+                                .data.map { it.attributes },
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "studiedGrammar failed: ${e.message}")
                 BunproResult.Failed
             }
         }
@@ -192,14 +239,17 @@ object BunproClient {
      * `[String, Long]` tuples, which kotlinx can't express as a data class
      * without a custom serializer. Extracted for testability.
      */
-    internal fun addToReviewsBody(vocabIds: List<Long>): String = buildJsonObject {
+    internal fun addToReviewsBody(
+        ids: List<Long>,
+        type: String = TYPE_VOCAB,
+    ): String = buildJsonObject {
         put("action_type", JsonPrimitive("add"))
         // Explicit null, not omitted — matches the captured request.
         put("deck_id", JsonNull)
         putJsonArray("reviewables") {
-            vocabIds.forEach { id ->
+            ids.forEach { id ->
                 addJsonArray {
-                    add(JsonPrimitive("Vocab"))
+                    add(JsonPrimitive(type))
                     add(JsonPrimitive(id))
                 }
             }

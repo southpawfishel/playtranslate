@@ -29,7 +29,9 @@ import kotlinx.coroutines.flow.drop
 import com.playtranslate.AnkiManager
 import com.playtranslate.Prefs
 import com.playtranslate.audio.AudioRequest
+import com.playtranslate.bunpro.BunproGrammarLookup
 import com.playtranslate.bunpro.BunproLookup
+import com.playtranslate.bunpro.GrammarMatch
 import com.playtranslate.audio.PlayOutcome
 import com.playtranslate.audio.PronunciationPlayer
 import com.playtranslate.translation.ChineseScriptConverter
@@ -750,6 +752,28 @@ class WordDetailBottomSheet : DialogFragment() {
             else -> null
         }
         if (mtBannerText != null) addMachineTranslatedBanner(content, mtBannerText)
+
+        // Grammar leads the definitions: さすが is both a vocab word AND a
+        // JLPT2 grammar point, and "this is also a pattern you could study" is
+        // the more surprising half of the answer. Async + additive, so the
+        // sheet renders identically when Bunpro is off or nothing matched.
+        val grammarAnchor = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+        }
+        content.addView(grammarAnchor)
+        // Sentence context comes from the host when the sheet is embedded, and
+        // from launch args in dialog mode — same resolution the Anki/example
+        // sections use.
+        maybeAddGrammarSection(
+            grammarAnchor,
+            queriedWord,
+            (activity as? SentenceContextProvider)?.currentSentenceContext()?.original
+                ?: arguments?.getString(ARG_SENTENCE_ORIGINAL),
+        )
 
         val definitionsSuffix = if (numSenses > 1)
             resources.getQuantityString(R.plurals.word_detail_senses_count, numSenses, numSenses) else null
@@ -1473,6 +1497,108 @@ class WordDetailBottomSheet : DialogFragment() {
      * "Tatoeba", "1 character"). The layout already sizes the title;
      * this helper just routes the suffix into the existing badge slot.
      */
+    /**
+     * Appends a Bunpro grammar section to [anchor] when the tapped word sits
+     * inside a grammar pattern.
+     *
+     * Scoped to the tapped word's span rather than the whole sentence: a whole
+     * sentence yields roughly one hit per line on real game text, most of it
+     * N5 conjugation, but the user asked about ONE word — only grammar touching
+     * that word answers the question.
+     *
+     * Silent when Bunpro is off, no catalogue is synced, or nothing matched,
+     * so the sheet is unchanged for anyone not using the feature.
+     */
+    private fun maybeAddGrammarSection(
+        anchor: LinearLayout,
+        word: String,
+        sentence: String?,
+    ) {
+        val ctx = requireContext()
+        if (!BunproLookup.isEnabled(Prefs(ctx.applicationContext))) return
+        // Without sentence context, treat the word itself as the haystack: a
+        // tapped span IS a valid one-word sentence for matching purposes.
+        val haystack = sentence?.takeIf { it.isNotBlank() && it.contains(word) } ?: word
+        val begin = haystack.indexOf(word).coerceAtLeast(0)
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            val matches = BunproGrammarLookup.forSpan(
+                ctx, haystack, begin, begin + word.length,
+            )
+            if (!isAdded || matches.isEmpty()) return@launch
+            anchor.removeAllViews()
+            addGroupHeader(
+                anchor,
+                getString(R.string.word_detail_group_grammar),
+                if (matches.size > 1) matches.size.toString() else null,
+            )
+            val card = addGroupCard(anchor)
+            matches.forEachIndexed { i, m ->
+                if (i > 0) addInsetDivider(card)
+                card.addView(buildGrammarRow(m))
+            }
+        }
+    }
+
+    /**
+     * One matched grammar point: the form as it appears in the sentence, the
+     * point's title and meaning, and its JLPT level.
+     *
+     * An ambiguous span names its alternatives rather than silently picking
+     * one — 37% of spans on the benchmark corpus had several candidates, and
+     * some (って as quotation vs. topic) are contextual calls this cannot make.
+     * For a learner, "one of these two" is information; a confident wrong
+     * answer is not.
+     */
+    private fun buildGrammarRow(match: GrammarMatch): View {
+        val ctx = requireContext()
+        val p = match.primary
+        return LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpRes(R.dimen.pt_row_h_padding), dp(10), dpRes(R.dimen.pt_row_h_padding), dp(10))
+            addView(TextView(ctx).apply {
+                text = if (p.level.isNullOrBlank()) p.title
+                else getString(R.string.word_grammar_title_fmt, p.title, jlptLabel(p.level))
+                setTextColor(ctx.themeColor(R.attr.ptText))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            })
+            p.meaning?.takeIf { it.isNotBlank() }?.let { meaning ->
+                addView(TextView(ctx).apply {
+                    text = meaning
+                    setTextColor(ctx.themeColor(R.attr.ptTextMuted))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    setPadding(0, dp(2), 0, 0)
+                })
+            }
+            // The form as it appears here, when it differs from the point's own
+            // name — "matched よかった" is the useful bit for a conjugated hit.
+            if (match.matchedForm != p.title) {
+                addView(TextView(ctx).apply {
+                    text = getString(R.string.word_grammar_matched_fmt, match.matchedForm)
+                    setTextColor(ctx.themeColor(R.attr.ptTextHint))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setPadding(0, dp(4), 0, 0)
+                })
+            }
+            if (match.isAmbiguous) {
+                addView(TextView(ctx).apply {
+                    text = getString(
+                        R.string.word_grammar_also_fmt,
+                        match.candidates.drop(1).joinToString("、") { it.title },
+                    )
+                    setTextColor(ctx.themeColor(R.attr.ptTextHint))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setPadding(0, dp(4), 0, 0)
+                })
+            }
+        }
+    }
+
+    /** "JLPT5" → "N5"; anything else (Non-JLPT, 関西弁) passes through. */
+    private fun jlptLabel(level: String): String =
+        if (level.startsWith("JLPT")) "N" + level.removePrefix("JLPT") else level
+
     private fun addGroupHeader(parent: LinearLayout, title: String, suffix: String? = null) {
         val header = layoutInflater
             .inflate(R.layout.settings_group_header, parent, false)

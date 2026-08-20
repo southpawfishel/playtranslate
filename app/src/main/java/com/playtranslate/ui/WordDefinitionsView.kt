@@ -172,6 +172,50 @@ class WordDefinitionsView @JvmOverloads constructor(
                 fullWidth(topMargin = if (isNotEmpty()) dp(8f * scale) else 0),
             )
         }
+
+        addGrammarLines(data, scale)
+    }
+
+    /**
+     * Bunpro grammar from the surrounding sentence, one line per point.
+     *
+     * Deliberately terser than the word-detail sheet's block: this renders in
+     * the magnifying lens, a popup floating over a game, where vertical space
+     * is the scarce resource. Title, level and meaning on one wrapped line is
+     * enough to answer "is there grammar here worth studying?" — the full
+     * treatment lives in the detail sheet.
+     *
+     * Empty by default, so surfaces that never populate [WordDefinitionData.grammar]
+     * are unchanged.
+     */
+    private fun addGrammarLines(data: WordDefinitionData, scale: Float) {
+        if (data.grammar.isEmpty()) return
+        addView(
+            TextView(context).apply {
+                text = context.getString(R.string.word_detail_group_grammar).uppercase()
+                setTextColor(hintText)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f * scale)
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            },
+            fullWidth(topMargin = dp(8f * scale)),
+        )
+        data.grammar.forEach { m ->
+            val c = m.primary
+            val level = c.level
+                ?.let { if (it.startsWith("JLPT")) "N" + it.removePrefix("JLPT") else it }
+            addView(
+                TextView(context).apply {
+                    text = buildString {
+                        append(c.title)
+                        if (!level.isNullOrBlank()) append(" · ").append(level)
+                        c.meaning?.takeIf { it.isNotBlank() }?.let { append(" — ").append(it) }
+                    }
+                    setTextColor(secondaryText)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f * scale)
+                },
+                fullWidth(topMargin = dp(2f * scale)),
+            )
+        }
     }
 
     /** Common pill · stars · frequency chips · Anki deck pill, wrapping. */

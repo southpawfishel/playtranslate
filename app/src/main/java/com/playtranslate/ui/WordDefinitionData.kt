@@ -1,6 +1,7 @@
 package com.playtranslate.ui
 
 import com.playtranslate.bunpro.BunproLookup
+import com.playtranslate.bunpro.GrammarMatch
 import com.playtranslate.model.FrequencyTag
 import com.playtranslate.model.ReadingRow
 
@@ -29,6 +30,10 @@ data class WordDefinitionData(
      *  its current behaviour and only surfaces that actually resolve a lookup
      *  show the pill. */
     val bunpro: BunproLookup.Outcome = BunproLookup.Outcome.Unavailable,
+    /** Bunpro grammar found in the surrounding sentence. Rendered compactly
+     *  (one line per point) below the senses. Empty by default so every
+     *  existing construction site is unaffected. */
+    val grammar: List<GrammarMatch> = emptyList(),
     /** Pitch-accent downstep variants for [reading], empty when unknown.
      *  [WordResultCell] draws the contour over its reading when non-empty. */
     val pitch: List<Int> = emptyList(),

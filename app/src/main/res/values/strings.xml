@@ -1539,6 +1539,57 @@
     <!-- Accessibility label for the non-studied badge states. -->
     <string name="word_bunpro_status_cd">Bunpro status: <xliff:g id="badge" example="Not in Bunpro">%1$s</xliff:g></string>
 
+    <!-- Grammar section in the word-detail sheet. -->
+    <string name="word_detail_group_grammar">Grammar</string>
+    <!-- %1$s is the grammar point, %2$s its JLPT level, e.g. "さすが · N2". -->
+    <string name="word_grammar_title_fmt"><xliff:g id="point" example="さすが">%1$s</xliff:g> · <xliff:g id="level" example="N2">%2$s</xliff:g></string>
+    <!-- %1$s is the form as it appears in the sentence. -->
+    <string name="word_grammar_matched_fmt">Matched <xliff:g id="form" example="よかった">%1$s</xliff:g> in this sentence</string>
+    <!-- %1$s lists the other grammar points this form could be. -->
+    <string name="word_grammar_also_fmt">Could also be: <xliff:g id="others" example="ということ">%1$s</xliff:g></string>
+
+    <!-- Add-to-reviews affordance on a grammar row. -->
+    <string name="word_grammar_writeup_unavailable">Could not load the explanation. Check your connection and Bunpro session token.</string>
+    <string name="word_grammar_add_button">Add</string>
+    <string name="word_grammar_adding">Adding…</string>
+    <string name="word_grammar_added">Added</string>
+    <string name="word_grammar_add_failed">Failed</string>
+
+    <!-- Grammar catalogue mirror + on-device verification rows. -->
+    <string name="bunpro_sync_row_title">Grammar catalogue</string>
+    <string name="bunpro_sync_row_never">Not synced yet</string>
+    <!-- %1$d is how many grammar points are stored on this device. -->
+    <string name="bunpro_sync_row_count"><xliff:g id="count" example="979">%1$d</xliff:g> grammar points stored</string>
+    <string name="bunpro_sync_button">Sync</string>
+    <string name="bunpro_sync_working">Syncing…</string>
+    <string name="bunpro_sync_result_title">Catalogue sync</string>
+    <!-- %1$d is the number of grammar points downloaded. -->
+    <string name="bunpro_sync_ok"><xliff:g id="count" example="979">%1$d</xliff:g> grammar points downloaded and stored on this device.</string>
+    <string name="bunpro_sync_studied_ok">Your studied grammar was synced too, so points you already know are hidden.</string>
+    <string name="bunpro_sync_studied_failed">Your studied grammar could not be synced — points you already know will still be shown. Check your session token.</string>
+    <string name="bunpro_sync_not_configured">Save a Bunpro session token first.</string>
+    <!-- %1$s is a short technical reason. -->
+    <string name="bunpro_sync_failed">Sync failed: <xliff:g id="reason" example="could not read buildId">%1$s</xliff:g></string>
+
+    <string name="bunpro_details_row_title">Grammar explanations</string>
+    <string name="bunpro_details_row_none">Not downloaded — sync the catalogue first</string>
+    <!-- %1$d fetched, %2$d total grammar points. -->
+    <string name="bunpro_details_row_progress"><xliff:g id="done" example="120">%1$d</xliff:g> of <xliff:g id="total" example="979">%2$d</xliff:g> downloaded</string>
+    <string name="bunpro_details_button">Fetch</string>
+    <string name="bunpro_details_confirm_title">Download grammar details?</string>
+    <string name="bunpro_details_confirm_body">This fetches one page per grammar point, deliberately slowly so it is not a burden on Bunpro. It takes several minutes and can be stopped at any time — progress is saved, so it picks up where it left off.
+
+It is optional: grammar matching already works without it.</string>
+    <string name="bunpro_details_confirm_start">Start</string>
+    <string name="bunpro_details_done">Download complete.</string>
+    <string name="bunpro_details_stopped">Stopped — progress saved. Run it again to continue.</string>
+    <string name="bunpro_selfcheck_row_title">Run self-check</string>
+    <string name="bunpro_selfcheck_row_subtitle">Verifies the tokenizer and grammar matching on this device</string>
+    <string name="bunpro_selfcheck_button">Run</string>
+    <string name="bunpro_selfcheck_working">Running…</string>
+    <string name="bunpro_selfcheck_title">Self-check</string>
+    <string name="bunpro_selfcheck_close">Close</string>
+
     <!-- Bunpro hub-cell digests. -->
     <string name="settings_cell_bunpro" translatable="false">Bunpro</string>
     <string name="settings_bunpro_not_connected_summary">Add a session token to see your SRS progress</string>

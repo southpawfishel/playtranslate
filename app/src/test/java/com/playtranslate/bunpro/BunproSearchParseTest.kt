@@ -113,7 +113,69 @@ class BunproSearchParseTest {
         assertFalse("but it is NOT mastered", srs.mastered)
     }
 
+    // ── hydrate_reviewable_index (bulk SRS sync) ────────────────────────
+
+    @Test
+    fun `hydrate index parses with the EXISTING review types`() {
+        // GET /reviews/hydrate_reviewable_index?reviewable_type=GrammarPoint
+        // returns {"data":[<review>]} — the same envelope as the add call, so
+        // no new DTOs are needed. Note what it does NOT contain: no title,
+        // meaning, structure or metadata. It is the user's REVIEW RECORDS,
+        // not the grammar-point catalogue.
+        val parsed = PtJson.lenient.decodeFromString<BunproAddResponse>(HYDRATE_JSON)
+        assertEquals(2, parsed.data.size)
+        val first = parsed.data.first().attributes
+        assertEquals("GrammarPoint", first.reviewableType)
+        assertEquals(99L, first.reviewableId)
+        assertEquals(12, first.streak)
+        // Streak 12 = Master, and it is NOT flagged is_recurring_mastered —
+        // more evidence that flag is the Master+ opt-in, not the stage.
+        val srs = BunproSrsStatus.from(first)
+        assertTrue(srs.mastered)
+        assertFalse(srs.recurringMastered)
+        assertEquals(BunproLevel(BunproStage.MASTER, null), srs.level)
+    }
+
     private companion object {
+        /** Two records from a real hydrate_reviewable_index response. */
+        val HYDRATE_JSON = """
+        {
+          "data": [
+            {
+              "id": "37351805",
+              "type": "review",
+              "attributes": {
+                "id": 37351805, "streak": 12,
+                "next_review": "2046-07-02T05:00:00.000Z",
+                "complete": true, "is_fsrs": false,
+                "is_recurring_mastered": false, "review_misses": 0,
+                "started_studying_at": "2025-06-23T04:00:00.000Z",
+                "reviewable_id": 99, "reviewable_type": "GrammarPoint",
+                "accuracy": 100, "times_studied": 12, "ghost_count": 0
+              },
+              "relationships": {
+                "reviewable": { "data": { "id": "99", "type": "grammar_point" } }
+              }
+            },
+            {
+              "id": "63433651",
+              "type": "review",
+              "attributes": {
+                "id": 63433651, "streak": 5,
+                "next_review": "2026-08-15T22:00:00.000Z",
+                "complete": true, "is_fsrs": false,
+                "is_recurring_mastered": true, "review_misses": 0,
+                "reviewable_id": 206, "reviewable_type": "GrammarPoint",
+                "accuracy": 100, "times_studied": 5, "ghost_count": 0
+              },
+              "relationships": {
+                "reviewable": { "data": { "id": "206", "type": "grammar_point" } }
+              }
+            }
+          ]
+        }
+        """.trimIndent()
+
         val ADD_RESPONSE_JSON = """
         {
           "data": [

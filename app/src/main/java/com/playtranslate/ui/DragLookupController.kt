@@ -11,6 +11,7 @@ import android.os.Looper
 import android.util.Log
 import android.util.TypedValue
 import com.playtranslate.AnkiManager
+import com.playtranslate.bunpro.BunproGrammarLookup
 import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.CaptureService
 import com.playtranslate.R
@@ -144,6 +145,10 @@ class DragLookupController(
     /** Cache key for the dwell-triggered lookup result so a release at the
      *  same word can reuse it instead of re-running tokenize + dictionary. */
     private data class DwellKey(val lineText: String, val charOffset: Int)
+
+    /** OCR line under the finger for the current lift — the sentence context
+     *  the grammar matcher needs. Set in [detectLabelTokenAt]. */
+    @Volatile private var currentLineText: String? = null
     private var lineTokensCache: Map<String, List<LabelToken>>? = null
 
     // Dwell-preview state. Drives the 1-second hold timer that fires
@@ -650,6 +655,12 @@ class DragLookupController(
         val hitLine = findLineAt(rawX, rawY, lines) ?: return null
         val lineText = hitLine.text
         if (lineText.isEmpty()) return null
+        // The OCR line under the finger IS the sentence context for this lift.
+        // Stashed here because the popup-fill coroutine below only receives the
+        // resolved word, and grammar is a property of the sentence, not the
+        // word. Written once per hit and read within the same lookupJob, which
+        // a new lift cancels and replaces.
+        currentLineText = lineText
         val tokens = cache[lineText] ?: return null
         if (tokens.isEmpty()) return null
         val isVertical = hitLine.orientation == com.playtranslate.language.TextOrientation.VERTICAL
@@ -940,10 +951,18 @@ class DragLookupController(
                 // lens. One word per lift, so no fan-out concern here.
                 try {
                     val outcome = BunproLookup.outcomeFor(context, popupData.word)
-                    if (outcome != BunproLookup.Outcome.Unavailable) {
+                    // Grammar is sentence-scoped: matched against the whole OCR
+                    // line under the finger, not just the lifted word. Word
+                    // scoping covers only ~10% of characters on real game text,
+                    // which made grammar effectively invisible.
+                    val grammar = currentLineText
+                        ?.let { BunproGrammarLookup.forSentence(context, it) }
+                        .orEmpty()
+                    if (outcome != BunproLookup.Outcome.Unavailable || grammar.isNotEmpty()) {
                         withContext(Dispatchers.Main) {
                             magnifier.setDefinitions(
-                                popupData.toLensData().copy(ankiDecks = decks, bunpro = outcome),
+                                popupData.toLensData()
+                                    .copy(ankiDecks = decks, bunpro = outcome, grammar = grammar),
                                 label,
                             )
                         }
@@ -951,7 +970,7 @@ class DragLookupController(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    Log.w(TAG, "Lens Bunpro badge fill failed: ${e.message}")
+                    Log.w(TAG, "Lens Bunpro fill failed: ${e.message}")
                 }
             } catch (e: CancellationException) {
                 throw e
