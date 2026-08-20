@@ -163,6 +163,11 @@ object BunproGrammarScraper {
      * teaching content and is fetched only for a point the user has opened —
      * one request, for one thing they asked to read.
      *
+     * The result is cached in [BunproGrammarStore.saveWriteup] so the same
+     * point encountered in a later sentence costs nothing. That caches the
+     * pages the user opened, the way a browser would; it is still not a sweep
+     * of all ~979.
+     *
      * Returns null on any failure; the caller shows a fallback rather than an
      * error, since this decorates a row that already renders.
      */
@@ -185,7 +190,11 @@ object BunproGrammarScraper {
             // Store the short fields while we have them — free, and it means a
             // later sweep has less to do.
             props.reviewable?.let { BunproGrammarStore.saveDetail(ctx, it) }
-            props.included.writeups.firstOrNull()?.plainText()?.takeIf { it.isNotBlank() }
+            val text = props.included.writeups.firstOrNull()?.plainText()
+                ?.takeIf { it.isNotBlank() }
+            val id = props.reviewable?.id
+            if (text != null && id != null) BunproGrammarStore.saveWriteup(ctx, id, text)
+            text
         } catch (e: Exception) {
             Log.d(TAG, "writeup parse failed for $slug: ${e.message}")
             null

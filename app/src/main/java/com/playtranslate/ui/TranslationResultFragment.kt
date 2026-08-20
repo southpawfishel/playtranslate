@@ -4,7 +4,6 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
-import android.graphics.Typeface
 import android.graphics.Rect
 import android.os.Bundle
 import android.util.TypedValue
@@ -28,8 +27,6 @@ import com.playtranslate.AnkiManager
 import com.playtranslate.CaptureService
 import com.playtranslate.Prefs
 import com.playtranslate.bunpro.BunproGrammarLookup
-import com.playtranslate.bunpro.BunproGrammarScraper
-import com.playtranslate.bunpro.BunproLevel
 import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.bunpro.GrammarMatch
 import com.playtranslate.R
@@ -219,8 +216,11 @@ class TranslationResultFragment : Fragment() {
     private lateinit var tvOriginal: ClickableTextView
     private lateinit var tvMainWordsLoading: TextView
     private lateinit var mainWordsContainer: LinearLayout
-    /** Sentence-level Bunpro grammar, above the word list. */
+    /** Sentence-level Bunpro grammar: its own section above Words. */
     private lateinit var bunproGrammarContainer: LinearLayout
+    private lateinit var grammarSection: View
+    private lateinit var cardGrammar: com.google.android.material.card.MaterialCardView
+    private lateinit var btnToggleGrammar: ImageButton
 
     /** Renders the source + target sections (shared with the over-game capture
      *  panel): inline furigana, the word highlight, section visibility, copy, and
@@ -390,6 +390,9 @@ class TranslationResultFragment : Fragment() {
         tvMainWordsLoading   = view.findViewById(R.id.tvMainWordsLoading)
         mainWordsContainer   = view.findViewById(R.id.mainWordsContainer)
         bunproGrammarContainer = view.findViewById(R.id.bunproGrammarContainer)
+        grammarSection       = view.findViewById(R.id.grammarSection)
+        cardGrammar          = view.findViewById(R.id.cardGrammar)
+        btnToggleGrammar     = view.findViewById(R.id.btnToggleGrammar)
         btnToggleWords       = view.findViewById(R.id.btnToggleWords)
         wordsContent         = view.findViewById(R.id.wordsContent)
         cardWords            = view.findViewById(R.id.cardWords)
@@ -422,6 +425,10 @@ class TranslationResultFragment : Fragment() {
         btnToggleWords.setOnClickListener {
             prefs.hideWordsSection = !prefs.hideWordsSection
             applyWordsVisibility()
+        }
+        btnToggleGrammar.setOnClickListener {
+            prefs.hideGrammarSection = !prefs.hideGrammarSection
+            applyGrammarVisibility()
         }
         btnResultClear.setOnClickListener {
             // Pure state action — no host context needed. Reset directly
@@ -456,6 +463,18 @@ class TranslationResultFragment : Fragment() {
         val hidden = prefs.hideWordsSection
         cardWords.visibility = if (hidden) View.GONE else View.VISIBLE
         btnToggleWords.setImageResource(if (hidden) R.drawable.ic_visibility_off else R.drawable.ic_visibility)
+    }
+
+    /** The eye collapses the grammar CARD, leaving its header (and so the eye
+     *  itself) in place — same contract as Words. Whether the section exists at
+     *  all is a separate question, owned by [renderBunproGrammar]. */
+    private fun applyGrammarVisibility() {
+        if (!this::cardGrammar.isInitialized) return
+        val hidden = prefs.hideGrammarSection
+        cardGrammar.visibility = if (hidden) View.GONE else View.VISIBLE
+        btnToggleGrammar.setImageResource(
+            if (hidden) R.drawable.ic_visibility_off else R.drawable.ic_visibility
+        )
     }
 
     // ── Result render (driven by vm.result observation) ──────────────────
@@ -500,6 +519,9 @@ class TranslationResultFragment : Fragment() {
                 // act on a transient Translating state, so a gear here is a dead control.
                 binder.bindSourceOcr(state.ocrProvenance, canReOcr = false)
                 binder.setTargetTranslatingPlaceholder()
+                // Grammar is sentence-scoped and the sentence isn't final yet;
+                // the Ready render is what puts the section back.
+                grammarSection.isGone = true
                 binder.applyTranslationVisibility()
                 binder.applyOriginalVisibility()
                 applyWordsVisibility()
@@ -673,6 +695,12 @@ class TranslationResultFragment : Fragment() {
          *  batch endpoint, so a capture costs one request per distinct word;
          *  this keeps a large capture from opening a socket per word. */
         const val SEM_PERMITS = 4
+
+        /** How many grammar write-ups ONE capture may fetch. Rows beyond this
+         *  render everything the device already knows and offer an explicit
+         *  "Read the explanation" tap. Every fetch is cached, so a text whose
+         *  grammar recurs stops costing anything after the first few captures. */
+        const val GRAMMAR_WRITEUP_FETCH_CAP = 3
     }
 
     /** 1dp ptDivider line inset from the start by pt_row_h_padding, matching
@@ -1296,7 +1324,8 @@ class TranslationResultFragment : Fragment() {
      *  mid-lookup preserves progress; this method just mirrors the
      *  current state into the views. */
     /**
-     * Bunpro grammar found in the captured sentence, above the word list.
+     * Bunpro grammar found in the captured sentence — its own section, above
+     * Words.
      *
      * SENTENCE-scoped, and that is the point. Scoping to a tapped word covers
      * only ~10% of characters on real game text, so grammar was effectively
@@ -1304,12 +1333,14 @@ class TranslationResultFragment : Fragment() {
      * sentences carry something once already-studied points are filtered out,
      * and this surfaces all of it without a tap.
      *
-     * Additive and silent on failure: the container stays empty (zero height)
-     * when Bunpro is off, no catalogue is synced, or nothing matched.
+     * Additive and silent on failure: the whole section stays GONE when Bunpro
+     * is off, no catalogue is synced, or nothing matched — so a capture with no
+     * grammar shows no empty heading.
      */
     private fun renderBunproGrammar(sentence: String?) {
         if (!this::bunproGrammarContainer.isInitialized) return
         bunproGrammarContainer.removeAllViews()
+        grammarSection.isGone = true
         val sentenceText = sentence?.takeIf { it.isNotBlank() } ?: return
         val ctx = context ?: return
         if (!BunproLookup.isEnabled(Prefs(ctx.applicationContext))) return
@@ -1318,141 +1349,97 @@ class TranslationResultFragment : Fragment() {
             val matches = BunproGrammarLookup.forSentence(ctx, sentenceText)
             if (!isAdded || matches.isEmpty()) return@launch
             bunproGrammarContainer.removeAllViews()
-            // The container sits INSIDE the Words card, so without its own
-            // heading these rows read as vocabulary — which is exactly how they
-            // looked on first test. The label is what distinguishes them.
-            bunproGrammarContainer.addView(
-                TextView(ctx).apply {
-                    text = getString(R.string.word_detail_group_grammar).uppercase()
-                    setTextColor(ctx.themeColor(R.attr.ptTextHint))
-                    textSize = 11f
-                    typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                    val pad = resources.getDimensionPixelSize(R.dimen.pt_row_h_padding)
-                    setPadding(pad, dp(10), pad, dp(2))
+            val cells = matches.mapIndexed { i, m ->
+                if (i > 0) bunproGrammarContainer.addView(inflateWordDivider())
+                GrammarResultCell(ctx).also {
+                    bindGrammarCell(it, m)
+                    bunproGrammarContainer.addView(it)
                 }
-            )
-            matches.forEach { m ->
-                bunproGrammarContainer.addView(buildGrammarRow(ctx, m))
             }
+            grammarSection.isVisible = true
+            applyGrammarVisibility()
+            loadGrammarDetails(ctx, matches, cells)
         }
     }
 
-    /** One matched point: title · level, its meaning, and the form as it
-     *  appears here. Ambiguous spans name their alternatives rather than
-     *  silently picking one. */
-    private fun buildGrammarRow(ctx: Context, match: GrammarMatch): View {
+    private fun bindGrammarCell(cell: GrammarResultCell, match: GrammarMatch) {
+        val ctx = requireContext()
         val p = match.primary
-        val pad = resources.getDimensionPixelSize(R.dimen.pt_row_h_padding)
-        // Title column + an add-to-reviews button, mirroring the vocab flow:
-        // the point is already known to be unstudied (studied ones are
-        // filtered out), so "add" is the only sensible action.
-        val row = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
-            setPadding(pad, dp(8), pad, dp(8))
-        }
-        val addButton = com.google.android.material.button.MaterialButton(
-            ctx, null, com.google.android.material.R.attr.materialButtonOutlinedStyle,
-        ).apply {
-            text = getString(R.string.word_grammar_add_button)
-            textSize = 12f
-            isAllCaps = false
-            minWidth = 0; minimumWidth = 0
-            insetTop = 0; insetBottom = 0
-            setOnClickListener { btn ->
-                btn.isEnabled = false
-                (btn as com.google.android.material.button.MaterialButton).text =
-                    getString(R.string.word_grammar_adding)
-                viewLifecycleOwner.lifecycleScope.launch {
-                    val ok = BunproGrammarLookup.addToReviews(ctx, p.pointId)
-                    if (!isAdded) return@launch
-                    btn.text = getString(
-                        if (ok) R.string.word_grammar_added else R.string.word_grammar_add_failed
-                    )
-                    // Leave a successful add disabled — it is done. A failure
-                    // re-enables so the user can retry.
-                    btn.isEnabled = !ok
-                }
-            }
-        }
-        val column = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            addView(TextView(ctx).apply {
-                text = if (p.level.isNullOrBlank()) p.title
-                else getString(
-                    R.string.word_grammar_title_fmt, p.title,
-                    if (p.level.startsWith("JLPT")) "N" + p.level.removePrefix("JLPT") else p.level,
+        cell.bind(
+            match = match,
+            // Whatever is already on disk, filled in by loadGrammarDetails.
+            detail = null,
+            scale = WORD_CELL_SCALE,
+            onAdd = { onDone ->
+                // Same confirm-add-toast path the vocab pill uses; the cell
+                // flips its own pill to the new SRS stage from onDone.
+                BunproAddAction.confirmAddGrammar(
+                    ctx = ctx,
+                    scope = viewLifecycleOwner.lifecycleScope,
+                    title = p.title,
+                    pointId = p.pointId,
+                    onResult = onDone,
                 )
-                setTextColor(ctx.themeColor(R.attr.ptAccent))
-                textSize = 14f
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            })
-            p.meaning?.takeIf { it.isNotBlank() }?.let { meaning ->
-                addView(TextView(ctx).apply {
-                    text = meaning
-                    setTextColor(ctx.themeColor(R.attr.ptTextMuted))
-                    textSize = 12.5f
-                })
-            }
-            if (match.isAmbiguous) {
-                addView(TextView(ctx).apply {
-                    text = getString(
-                        R.string.word_grammar_also_fmt,
-                        match.candidates.drop(1).joinToString("、") { it.title },
+            },
+            onLoadDetail = {
+                viewLifecycleOwner.lifecycleScope.launch {
+                    val detail = BunproGrammarLookup.detailFor(
+                        ctx, p.pointId, p.slug, allowFetch = true,
                     )
-                    setTextColor(ctx.themeColor(R.attr.ptTextHint))
-                    textSize = 11.5f
-                })
-            }
-        }
-        // Tapping the text column fetches this point's write-up — one request,
-        // for the one point the user asked to read about.
-        p.slug?.let { slug ->
-            column.isClickable = true
-            column.setOnClickListener { showGrammarWriteup(ctx, p.title, slug) }
-        }
-        row.addView(column)
-        // Already in reviews → show where it sits in the SRS instead of an
-        // add button. Points below Master still appear (you may have studied
-        // one and forgotten it), so "add" is not always the right action.
-        row.addView(
-            if (p.streak != null) {
-                TextView(ctx).apply {
-                    text = BunproLevel.fromStreak(p.streak).let { lvl ->
-                        lvl.step?.let { "${lvl.stage.name.lowercase().replaceFirstChar(Char::uppercase)} $it" }
-                            ?: lvl.stage.name.lowercase().replaceFirstChar(Char::uppercase)
+                    if (!isAdded) return@launch
+                    cell.updateDetail(detail)
+                    if (detail?.writeup == null) {
+                        cell.setDetailLoading(false)
+                        Toast.makeText(
+                            ctx.applicationContext,
+                            R.string.word_grammar_writeup_unavailable,
+                            Toast.LENGTH_LONG,
+                        ).show()
                     }
-                    setTextColor(ctx.themeColor(R.attr.ptTextHint))
-                    textSize = 11.5f
                 }
-            } else {
-                addButton
-            }
+            },
         )
-        return row
     }
 
     /**
-     * Fetches and shows the Bunpro write-up for one grammar point.
+     * Fills each grammar row's inline explanation.
      *
-     * On demand rather than from a local mirror: the bulk sweep stores only
-     * the short fields, so the lesson text is fetched for the point the user
-     * opened and nothing else.
+     * Anything already mirrored on disk is free and lands immediately.
+     * Anything else costs one request, so only the first
+     * [GRAMMAR_WRITEUP_FETCH_CAP] rows of a capture are allowed to fetch, and
+     * they do it in sequence rather than in parallel — this is a bulk read of
+     * someone else's site and it should look like a reader, not a crawler. The
+     * rest offer a "Read the explanation" tap. Because every fetch is cached,
+     * a game whose grammar recurs settles to zero requests within a few
+     * captures.
      */
-    private fun showGrammarWriteup(ctx: Context, title: String, slug: String) {
+    private fun loadGrammarDetails(
+        ctx: Context,
+        matches: List<GrammarMatch>,
+        cells: List<GrammarResultCell>,
+    ) {
         viewLifecycleOwner.lifecycleScope.launch {
-            val text = BunproGrammarScraper.fetchWriteup(ctx, slug)
-            if (!isAdded) return@launch
-            OverlayAlert.Builder(ctx)
-                .setTitle(title)
-                .setMessage(text ?: getString(R.string.word_grammar_writeup_unavailable))
-                .addCancelButton(getString(R.string.bunpro_selfcheck_close))
-                .show()
+            var fetches = 0
+            matches.forEachIndexed { i, m ->
+                val p = m.primary
+                // Ask the mirror first, so a cached point neither spends a
+                // request nor consumes the budget.
+                val cached = BunproGrammarLookup.detailFor(ctx, p.pointId, p.slug, allowFetch = false)
+                if (!isAdded) return@launch
+                cells[i].updateDetail(cached)
+                if (cached?.writeup != null) return@forEachIndexed
+                if (fetches >= GRAMMAR_WRITEUP_FETCH_CAP || p.slug.isNullOrBlank()) {
+                    return@forEachIndexed
+                }
+                fetches++
+                cells[i].setDetailLoading(true)
+                val fetchedDetail =
+                    BunproGrammarLookup.detailFor(ctx, p.pointId, p.slug, allowFetch = true)
+                if (!isAdded) return@launch
+                cells[i].updateDetail(fetchedDetail ?: cached)
+            }
         }
     }
-
-    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
     private fun renderWordLookups(state: WordLookupsState) {
         if (view == null) return
@@ -1515,6 +1502,11 @@ class TranslationResultFragment : Fragment() {
         if (!this::mainWordsContainer.isInitialized || mainWordsContainer.isEmpty()) return
         val cells = lastRenderedCells
         if (cells.isEmpty()) return
+        // Bunpro standing can change while we're away too — adding a word from
+        // the word-detail sheet rewrites BunproLookup's cache, but the rows
+        // rendered here kept their pre-add pill and went on saying "Not
+        // studied". Re-reading is free: every word is already cached.
+        loadBunproBadges(cells.keys.toList(), cells)
         ankiDecksByWord.clear()
         val anki = AnkiManager(requireContext())
         if (!anki.isAnkiDroidInstalled() || !anki.hasPermission()) {

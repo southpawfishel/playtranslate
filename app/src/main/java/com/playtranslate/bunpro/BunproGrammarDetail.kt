@@ -92,27 +92,9 @@ data class BunproWriteup(
      *  list items once tags are stripped — see `plainText`. */
     val body: String? = null,
 ) {
-    /**
-     * The write-up as readable text.
-     *
-     * Beyond stripping tags, this drops the example-sentence placeholders
-     * (`<li data-study-question='…'>`), which carry no text of their own and
-     * would otherwise leave a run of empty bullets in the middle of the prose.
-     */
-    fun plainText(): String {
-        val src = body ?: return ""
-        return src
-            .replace(Regex("<li[^>]*data-study-question[^>]*>"), "")
-            .replace(Regex("<br\\s*/?>"), "\n")
-            .replace(Regex("</p>|</ul>|</section>"), "\n\n")
-            .replace(Regex("<[^>]+>"), "")
-            .replace("&nbsp;", " ")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace(Regex("\n{3,}"), "\n\n")
-            .trim()
-    }
+    /** The write-up as readable text — see [BunproHtml], which every
+     *  Bunpro string goes through, not just this one. */
+    fun plainText(): String = BunproHtml.toPlainText(body)
 }
 
 /**

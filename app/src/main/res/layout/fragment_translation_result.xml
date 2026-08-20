@@ -76,6 +76,72 @@
             <include layout="@layout/section_source" />
 
             <!-- ══════════════════════════════════════════════════════ -->
+            <!-- GRAMMAR (Bunpro)                                      -->
+            <!-- ══════════════════════════════════════════════════════ -->
+            <!-- Its own section rather than a block inside Words. The two
+                 lists answer different questions (this one is sentence-
+                 scoped), and sharing a card made grammar read as vocabulary.
+                 The whole group — header included — is GONE unless the
+                 sentence actually matched something, so a capture with no
+                 grammar shows no empty scaffolding. -->
+
+            <LinearLayout
+                android:id="@+id/grammarSection"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingTop="@dimen/pt_group_gap"
+                    android:paddingBottom="8dp"
+                    android:paddingStart="4dp"
+                    android:paddingEnd="4dp">
+
+                    <TextView
+                        android:id="@+id/labelGrammar"
+                        style="@style/Text.PT.GroupHeader"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/section_grammar" />
+
+                    <ImageButton
+                        android:id="@+id/btnToggleGrammar"
+                        android:layout_width="36dp"
+                        android:layout_height="32dp"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="@string/cd_toggle_grammar_visibility"
+                        android:src="@drawable/ic_visibility"
+                        app:tint="?attr/ptTextMuted" />
+
+                </LinearLayout>
+
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/cardGrammar"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    app:cardBackgroundColor="?attr/ptCard"
+                    app:cardCornerRadius="@dimen/pt_radius"
+                    app:cardElevation="0dp"
+                    app:strokeColor="?attr/ptDivider"
+                    app:strokeWidth="1dp">
+
+                    <LinearLayout
+                        android:id="@+id/bunproGrammarContainer"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical" />
+
+                </com.google.android.material.card.MaterialCardView>
+
+            </LinearLayout>
+
+            <!-- ══════════════════════════════════════════════════════ -->
             <!-- WORDS                                                 -->
             <!-- ══════════════════════════════════════════════════════ -->
 
@@ -123,16 +189,6 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical">
-
-                    <!-- Bunpro grammar found in the captured sentence. Above
-                         the word list because it is sentence-scoped, and
-                         populated asynchronously — stays empty (zero height)
-                         when Bunpro is off or nothing matched. -->
-                    <LinearLayout
-                        android:id="@+id/bunproGrammarContainer"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical" />
 
                     <TextView
                         android:id="@+id/tvMainWordsLoading"

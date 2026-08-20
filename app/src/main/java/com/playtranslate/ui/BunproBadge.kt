@@ -127,7 +127,56 @@ object BunproBadge {
         onClick: (() -> Unit)? = null,
     ): TextView? {
         val text = label(ctx, outcome) ?: return null
-        val studied = isStudied(outcome)
+        return pill(
+            ctx, text, isStudied(outcome), studiedColor, mutedColor, background,
+            textSizeSp, horizontalPadPx, verticalPadPx,
+            onClick = onClick?.takeIf { isActionable(outcome) },
+        )
+    }
+
+    /**
+     * The grammar counterpart to [buildPill].
+     *
+     * Grammar standing arrives as a raw SRS streak (null = not in the user's
+     * reviews) rather than a vocab search [BunproLookup.Outcome], but it must
+     * LOOK identical — same star, same tone, same wording — or the two kinds of
+     * Bunpro content read as two unrelated features. Both routes end in [pill].
+     */
+    fun buildGrammarPill(
+        ctx: Context,
+        streak: Int?,
+        studiedColor: Int,
+        mutedColor: Int,
+        background: Drawable,
+        textSizeSp: Float,
+        horizontalPadPx: Int,
+        verticalPadPx: Int,
+    ): TextView {
+        val text =
+            if (streak == null) ctx.getString(R.string.word_bunpro_not_studied)
+            else ctx.getString(
+                R.string.word_bunpro_level_fmt,
+                stageLabel(ctx, BunproLevel.fromStreak(streak)),
+            )
+        return pill(
+            ctx, text, studied = streak != null, studiedColor, mutedColor, background,
+            textSizeSp, horizontalPadPx, verticalPadPx, onClick = null,
+        )
+    }
+
+    /** The one place the pill's visuals are defined. */
+    private fun pill(
+        ctx: Context,
+        text: String,
+        studied: Boolean,
+        studiedColor: Int,
+        mutedColor: Int,
+        background: Drawable,
+        textSizeSp: Float,
+        horizontalPadPx: Int,
+        verticalPadPx: Int,
+        onClick: (() -> Unit)?,
+    ): TextView {
         val textColor = if (studied) studiedColor else mutedColor
         val iconRes =
             if (studied) R.drawable.ic_offline_star_filled
@@ -153,7 +202,7 @@ object BunproBadge {
             contentDescription =
                 if (studied) ctx.getString(R.string.word_bunpro_badge_cd, text)
                 else ctx.getString(R.string.word_bunpro_status_cd, text)
-            if (onClick != null && isActionable(outcome)) {
+            if (onClick != null) {
                 isClickable = true
                 isFocusable = true
                 setOnClickListener { onClick() }

@@ -30,6 +30,7 @@ import com.playtranslate.AnkiManager
 import com.playtranslate.Prefs
 import com.playtranslate.audio.AudioRequest
 import com.playtranslate.bunpro.BunproGrammarLookup
+import com.playtranslate.bunpro.BunproHtml
 import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.bunpro.GrammarMatch
 import com.playtranslate.audio.PlayOutcome
@@ -1253,40 +1254,20 @@ class WordDetailBottomSheet : DialogFragment() {
             }
             is BunproLookup.Outcome.Found -> {
                 if (outcome.status.srs.studied) return
-                OverlayAlert.Builder(ctx)
-                    .setTitle(getString(R.string.word_bunpro_add_title))
-                    .setMessage(getString(R.string.word_bunpro_add_message, word))
-                    .addButton(
-                        label = getString(R.string.word_bunpro_add_confirm),
-                        color = ctx.themeColor(R.attr.ptAccent),
-                    ) { performBunproAdd(badgeRow, word, outcome.status) }
-                    .addCancelButton(getString(R.string.word_bunpro_add_cancel))
-                    .show()
+                // Confirmation, add and toast all live in BunproAddAction, so
+                // this sheet and the result list's pills behave identically.
+                BunproAddAction.confirmAddWord(
+                    ctx = ctx,
+                    scope = viewLifecycleOwner.lifecycleScope,
+                    word = word,
+                    status = outcome.status,
+                ) { ok ->
+                    // Re-run the lookup: on success it now reads the rewritten
+                    // cache entry and renders the studied pill, no network call.
+                    if (ok && isAdded) maybeAddBunproBadge(badgeRow, word)
+                }
             }
             else -> Unit
-        }
-    }
-
-    /** Runs the add and re-renders the badge row from the updated cache. */
-    private fun performBunproAdd(
-        badgeRow: FlowLayout,
-        word: String,
-        status: BunproLookup.WordStatus,
-    ) {
-        val ctx = requireContext()
-        viewLifecycleOwner.lifecycleScope.launch {
-            val ok = BunproLookup.addToReviews(ctx, word, status)
-            if (!isAdded) return@launch
-            Toast.makeText(
-                ctx,
-                getString(
-                    if (ok) R.string.word_bunpro_add_done else R.string.word_bunpro_add_failed
-                ),
-                Toast.LENGTH_SHORT,
-            ).show()
-            // Re-run the lookup: on success it now reads the rewritten cache
-            // entry and renders the studied pill, with no network call.
-            if (ok) maybeAddBunproBadge(badgeRow, word)
         }
     }
 
@@ -1563,7 +1544,9 @@ class WordDetailBottomSheet : DialogFragment() {
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                 typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             })
-            p.meaning?.takeIf { it.isNotBlank() }?.let { meaning ->
+            // Bunpro returns every human-facing string as HTML, the catalogue
+            // gloss included — see BunproHtml.
+            BunproHtml.toPlainTextOrNull(p.meaning)?.let { meaning ->
                 addView(TextView(ctx).apply {
                     text = meaning
                     setTextColor(ctx.themeColor(R.attr.ptTextMuted))

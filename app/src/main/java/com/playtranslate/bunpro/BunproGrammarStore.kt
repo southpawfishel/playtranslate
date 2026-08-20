@@ -10,6 +10,24 @@ import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
 
 /**
+ * What the device has stored for one grammar point beyond its catalogue entry.
+ *
+ * [nuance], [caution] and [partOfSpeech] come from the bulk sweep; [writeup] is
+ * present only for a point the user actually opened. Any field can be null —
+ * the row renders whatever is there.
+ */
+data class StoredGrammarDetail(
+    val pointId: Long,
+    val nuance: String?,
+    val caution: String?,
+    val partOfSpeech: String?,
+    val writeup: String?,
+) {
+    val isEmpty: Boolean
+        get() = nuance == null && caution == null && partOfSpeech == null && writeup == null
+}
+
+/**
  * On-disk mirror of the Bunpro grammar catalogue.
  *
  * Storage follows the house pattern ([com.playtranslate.translationlog.TranslationHistoryStore],
@@ -28,7 +46,7 @@ import kotlinx.coroutines.withContext
  */
 object BunproGrammarStore {
 
-    private const val SCHEMA_VERSION = 1
+    private const val SCHEMA_VERSION = 2
     private const val KEY_BUILD_ID = "build_id"
     private const val KEY_INDEX_SYNCED_AT = "index_synced_at"
 
@@ -59,7 +77,15 @@ object BunproGrammarStore {
         database.execSQL(
             "CREATE TABLE IF NOT EXISTS grammar_detail (" +
                 "point_id INTEGER PRIMARY KEY, nuance TEXT, caution TEXT, " +
-                "part_of_speech TEXT, structure_forms TEXT, fetched_at INTEGER NOT NULL)"
+                // Written ONLY by [saveWriteup] — i.e. only for a point the user
+                // actually opened. The bulk sweep never touches this column; see
+                // BunproGrammarIncluded for why the write-ups are not harvested.
+                "part_of_speech TEXT, structure_forms TEXT, writeup TEXT, " +
+                // 1 only when the bulk sweep wrote this row. A row created by a
+                // write-up fetch alone must NOT make the sweep think it is done
+                // with that point — see [idsMissingDetail] / [detailCount].
+                "swept INTEGER NOT NULL DEFAULT 0, " +
+                "fetched_at INTEGER NOT NULL)"
         )
         // Which grammar points the user has already studied. Volatile relative
         // to the catalogue (it changes every review session), so it is stored
@@ -183,9 +209,10 @@ object BunproGrammarStore {
         }
     }
 
-    /** How many points have detail stored — drives the sweep's progress row. */
+    /** How many points the sweep has covered — drives its progress row. Counts
+     *  only swept rows, so opening a write-up can't inflate the number. */
     suspend fun detailCount(ctx: Context): Int = withContext(dispatcher) {
-        openDb(ctx).rawQuery("SELECT COUNT(*) FROM grammar_detail", null)
+        openDb(ctx).rawQuery("SELECT COUNT(*) FROM grammar_detail WHERE swept = 1", null)
             .use { it.moveToFirst(); it.getInt(0) }
     }
 
@@ -196,21 +223,79 @@ object BunproGrammarStore {
 
     // ── Detail ──────────────────────────────────────────────────────────
 
+    /**
+     * Upserts the short fields, **preserving any cached [writeup]**.
+     *
+     * Deliberately update-then-insert rather than CONFLICT_REPLACE: a replace
+     * rewrites the whole row, so a later sweep over a point the user had
+     * already opened would silently discard its cached explanation and make
+     * the row fetch again on the next capture.
+     */
     suspend fun saveDetail(ctx: Context, detail: BunproGrammarDetail) = withContext(dispatcher) {
-        openDb(ctx).insertWithOnConflict(
-            "grammar_detail", null,
-            ContentValues().apply {
-                put("point_id", detail.id)
-                put("nuance", detail.nuanceTranslation)
-                put("caution", detail.caution)
-                put("part_of_speech", detail.partOfSpeech)
-                put("structure_forms", detail.structureForms().joinToString("\n"))
-                put("fetched_at", System.currentTimeMillis())
-            },
-            SQLiteDatabase.CONFLICT_REPLACE,
+        val database = openDb(ctx)
+        val values = ContentValues().apply {
+            put("nuance", detail.nuanceTranslation)
+            put("caution", detail.caution)
+            put("part_of_speech", detail.partOfSpeech)
+            put("structure_forms", detail.structureForms().joinToString("\n"))
+            put("swept", 1)
+            put("fetched_at", System.currentTimeMillis())
+        }
+        val updated = database.update(
+            "grammar_detail", values, "point_id = ?", arrayOf(detail.id.toString()),
         )
+        if (updated == 0) {
+            database.insertWithOnConflict(
+                "grammar_detail", null,
+                ContentValues(values).apply { put("point_id", detail.id) },
+                SQLiteDatabase.CONFLICT_REPLACE,
+            )
+        }
         Unit
     }
+
+    /** Caches the lesson write-up for ONE point the user opened. Same
+     *  update-or-insert shape as [saveDetail] so it never clobbers the short
+     *  fields a sweep may already have stored. */
+    suspend fun saveWriteup(ctx: Context, pointId: Long, writeup: String) = withContext(dispatcher) {
+        val database = openDb(ctx)
+        val values = ContentValues().apply { put("writeup", writeup) }
+        val updated = database.update(
+            "grammar_detail", values, "point_id = ?", arrayOf(pointId.toString()),
+        )
+        if (updated == 0) {
+            database.insertWithOnConflict(
+                "grammar_detail", null,
+                ContentValues(values).apply {
+                    put("point_id", pointId)
+                    put("structure_forms", "")
+                    put("fetched_at", System.currentTimeMillis())
+                },
+                SQLiteDatabase.CONFLICT_REPLACE,
+            )
+        }
+        Unit
+    }
+
+    /** Everything stored for one point, or null when nothing has been fetched
+     *  for it yet. Drives the inline detail on a grammar row. */
+    suspend fun loadDetail(ctx: Context, pointId: Long): StoredGrammarDetail? =
+        withContext(dispatcher) {
+            openDb(ctx).rawQuery(
+                "SELECT nuance, caution, part_of_speech, writeup FROM grammar_detail " +
+                    "WHERE point_id = ?",
+                arrayOf(pointId.toString()),
+            ).use { c ->
+                if (!c.moveToFirst()) null
+                else StoredGrammarDetail(
+                    pointId = pointId,
+                    nuance = c.getString(0)?.takeIf { it.isNotBlank() },
+                    caution = c.getString(1)?.takeIf { it.isNotBlank() },
+                    partOfSpeech = c.getString(2)?.takeIf { it.isNotBlank() },
+                    writeup = c.getString(3)?.takeIf { it.isNotBlank() },
+                )
+            }
+        }
 
     /** point id → conjugated forms from its structure tables, for
      *  `BunproGrammarIndex(extraForms = …)`. */
@@ -236,7 +321,10 @@ object BunproGrammarStore {
         openDb(ctx).rawQuery(
             "SELECT p.id FROM grammar_points p " +
                 "LEFT JOIN grammar_detail d ON d.point_id = p.id " +
-                "WHERE d.point_id IS NULL ORDER BY p.grammar_order",
+                // `swept <> 1` covers the row a write-up fetch created: it holds
+                // an explanation but none of the conjugation tables the sweep is
+                // actually after, so the sweep must still visit it.
+                "WHERE d.point_id IS NULL OR d.swept <> 1 ORDER BY p.grammar_order",
             null,
         ).use { c -> buildList { while (c.moveToNext()) add(c.getLong(0)) } }
     }

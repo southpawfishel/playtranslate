@@ -835,6 +835,14 @@ class Prefs internal constructor(
         get() = sp.getBoolean(KEY_HIDE_WORDS_SECTION, false)
         set(v) = sp.edit { putBoolean(KEY_HIDE_WORDS_SECTION, v) }
 
+    /** The Bunpro grammar section on the result screen. Its own toggle rather
+     *  than a sub-setting of Words: grammar is sentence-scoped and much taller
+     *  per entry, so a reader who wants vocabulary but not grammar (or the
+     *  reverse) needs to be able to say so. */
+    var hideGrammarSection: Boolean
+        get() = sp.getBoolean(KEY_HIDE_GRAMMAR_SECTION, false)
+        set(v) = sp.edit { putBoolean(KEY_HIDE_GRAMMAR_SECTION, v) }
+
     var showFuriganaInline: Boolean
         get() = sp.getBoolean(KEY_SHOW_FURIGANA_INLINE, false)
         set(v) = sp.edit { putBoolean(KEY_SHOW_FURIGANA_INLINE, v) }
@@ -1608,6 +1616,7 @@ class Prefs internal constructor(
         private const val KEY_HIDE_TRANSLATION_SECTION       = "hide_translation_section"
         private const val KEY_HIDE_ORIGINAL_SECTION          = "hide_original_section"
         private const val KEY_HIDE_WORDS_SECTION             = "hide_words_section"
+        private const val KEY_HIDE_GRAMMAR_SECTION           = "hide_grammar_section"
         private const val KEY_SHOW_FURIGANA_INLINE          = "show_furigana_inline"
         private const val KEY_RESULTS_FONT_MIN_SP           = "results_font_min_sp"
         private const val KEY_RESULTS_FONT_MAX_SP           = "results_font_max_sp"

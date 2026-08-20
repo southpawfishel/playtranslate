@@ -57,7 +57,13 @@ class WordResultCell @JvmOverloads constructor(
     private val speakSpinner: ProgressBar
     private val speakButton: FrameLayout
     private val ankiButton: FrameLayout
-    private val definitionsView = WordDefinitionsView(context)
+    private val definitionsView = WordDefinitionsView(context).apply {
+        // Adding to Bunpro from the pill changes this cell's data, not just its
+        // body — route it through updateBunpro so boundData moves too, or the
+        // next Anki-deck refresh would re-bind from the pre-add outcome and
+        // put "Not studied" back.
+        onBunproOutcomeChanged = { updateBunpro(it) }
+    }
 
     /** Re-entrancy guard / spinner driver for this cell's speak action,
      *  owned by whoever launches the speak coroutine (the fragment). */

@@ -811,6 +811,7 @@
 
     <!-- Header above the per-word tokenization list. -->
     <string name="section_words">Words</string>
+    <string name="section_grammar">Grammar</string>
 
     <!-- Skeleton/placeholder line under the Words header while
          tokenization is in flight. -->
@@ -1530,6 +1531,8 @@
     <string name="word_bunpro_add_title">Add to Bunpro reviews?</string>
     <!-- %1$s is the word being added. -->
     <string name="word_bunpro_add_message"><xliff:g id="word" example="肺">%1$s</xliff:g> will be added to your Bunpro review queue and will start appearing in your reviews.</string>
+    <!-- %1$s is the grammar point being added. -->
+    <string name="word_bunpro_add_grammar_message">The grammar point <xliff:g id="point" example="ていた">%1$s</xliff:g> will be added to your Bunpro review queue and will start appearing in your reviews.</string>
     <string name="word_bunpro_add_confirm">Add</string>
     <string name="word_bunpro_add_cancel">Cancel</string>
     <string name="word_bunpro_add_done">Added to your Bunpro reviews</string>
@@ -1550,10 +1553,17 @@
 
     <!-- Add-to-reviews affordance on a grammar row. -->
     <string name="word_grammar_writeup_unavailable">Could not load the explanation. Check your connection and Bunpro session token.</string>
-    <string name="word_grammar_add_button">Add</string>
-    <string name="word_grammar_adding">Adding…</string>
-    <string name="word_grammar_added">Added</string>
-    <string name="word_grammar_add_failed">Failed</string>
+    <string name="word_grammar_added">Added to your Bunpro reviews</string>
+    <string name="word_grammar_add_failed">Couldn\'t add to Bunpro — check your session token</string>
+    <string name="word_grammar_add_cd">Add this grammar point to your Bunpro reviews</string>
+
+    <!-- Inline explanation on a grammar row. -->
+    <!-- %1$s is Bunpro's caution note for the point. -->
+    <string name="word_grammar_caution_fmt">⚠ <xliff:g id="caution" example="よく can also mean frequently">%1$s</xliff:g></string>
+    <string name="word_grammar_load_explanation">Read the explanation</string>
+    <string name="word_grammar_loading_explanation">Loading explanation…</string>
+    <string name="word_grammar_show_more">Show more</string>
+    <string name="word_grammar_show_less">Show less</string>
 
     <!-- Grammar catalogue mirror + on-device verification rows. -->
     <string name="bunpro_sync_row_title">Grammar catalogue</string>
@@ -2599,6 +2609,7 @@ It is optional: grammar matching already works without it.</string>
 
     <!-- contentDescription for the eye-toggle on the words section. -->
     <string name="cd_toggle_words_visibility">Toggle words visibility</string>
+    <string name="cd_toggle_grammar_visibility">Toggle grammar visibility</string>
 
     <!-- contentDescription for the × close button on the word-detail
          bottom sheet. -->

@@ -13,9 +13,13 @@ import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.view.isNotEmpty
+import androidx.lifecycle.findViewTreeLifecycleOwner
+import androidx.lifecycle.lifecycleScope
 import com.playtranslate.R
+import com.playtranslate.bunpro.BunproHtml
 import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.themeColor
+import kotlinx.coroutines.launch
 
 /**
  * Renders the dictionary body shared by the magnifying lens
@@ -43,10 +47,16 @@ class WordDefinitionsView @JvmOverloads constructor(
     private val density = resources.displayMetrics.density
     private fun dp(v: Float): Int = (v * density).toInt()
 
-    /** Overrides how the "Maybe in Bunpro" near-miss list is presented. Set by
-     *  surfaces that can't use the foreground-activity path — see
-     *  [showBunproCandidates]. */
+    /** Overrides how a Bunpro pill tap is handled. Set by surfaces that can't
+     *  use the foreground-activity path — see [onBunproPillTapped]. */
     var onBunproPillClick: ((WordDefinitionData) -> Unit)? = null
+
+    /** Notifies the host that this word's Bunpro standing changed under it
+     *  (the user added it to reviews from the pill), so the host can keep its
+     *  own copy of the data in step. [WordResultCell] routes this to
+     *  `updateBunpro`; without it a later Anki-deck refresh would re-bind from
+     *  stale data and revert the pill. */
+    var onBunproOutcomeChanged: ((BunproLookup.Outcome) -> Unit)? = null
 
     private val primaryText = context.themeColor(R.attr.ptText)
     private val secondaryText = context.themeColor(R.attr.ptTextMuted)
@@ -201,19 +211,29 @@ class WordDefinitionsView @JvmOverloads constructor(
         )
         data.grammar.forEach { m ->
             val c = m.primary
-            val level = c.level
-                ?.let { if (it.startsWith("JLPT")) "N" + it.removePrefix("JLPT") else it }
+            val level = GrammarResultCell.jlptLabel(c.level)
+            // The point itself carries the emphasis (medium, primary) and the
+            // gloss stays muted, so a glance separates "which grammar" from
+            // "what it means" — the same split the full grammar row makes with
+            // its title and meaning lines.
             addView(
                 TextView(context).apply {
-                    text = buildString {
-                        append(c.title)
-                        if (!level.isNullOrBlank()) append(" · ").append(level)
-                        c.meaning?.takeIf { it.isNotBlank() }?.let { append(" — ").append(it) }
+                    text = android.text.SpannableStringBuilder().apply {
+                        val head = buildString {
+                            append(c.title)
+                            if (!level.isNullOrBlank()) append(" · ").append(level)
+                        }
+                        append(head)
+                        setSpan(
+                            android.text.style.StyleSpan(Typeface.BOLD),
+                            0, head.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                        )
+                        BunproHtml.toPlainTextOrNull(c.meaning)?.let { append(" — ").append(it) }
                     }
                     setTextColor(secondaryText)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f * scale)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f * scale)
                 },
-                fullWidth(topMargin = dp(2f * scale)),
+                fullWidth(topMargin = dp(3f * scale)),
             )
         }
     }
@@ -280,33 +300,63 @@ class WordDefinitionsView @JvmOverloads constructor(
             textSizeSp = 11.5f * scale,
             horizontalPadPx = dp(8f * scale),
             verticalPadPx = dp(2f * scale),
-            onClick = { showBunproCandidates(data) },
+            onClick = { onBunproPillTapped(data) },
         )?.let { add(it) }
         return row
     }
 
     /**
-     * Shows the near-miss list behind a "Maybe in Bunpro" pill.
+     * Bunpro pill tap: inspect the near misses, or confirm-then-add an
+     * unstudied word.
      *
-     * Defaults to the activity path ([OverlayAlert.Builder.show]), which is
-     * correct for the results list, dictionary lookup, and the word-detail
-     * sheet — it auto-detects a showing DialogFragment. It is WRONG for the
-     * magnifying lens, which draws over a game with no PlayTranslate activity
-     * foregrounded, so `show()` would defer the alert indefinitely. That
-     * surface sets [onBunproPillClick] to present via its own OverlayHost.
+     * The add half used to exist only on the word-detail sheet, so the same
+     * pill was live on one screen and dead on the next. It now works on every
+     * surface that can host a dialog and outlive a request — which is the
+     * split that matters. The magnifying lens is deliberately NOT one of
+     * those: it draws over a game with no PlayTranslate activity foregrounded
+     * (so `OverlayAlert.show()` would defer the alert indefinitely) and it is
+     * dismissed the moment you lift your finger. A tappable pill there would
+     * be a dead control, so the lens keeps a passive badge.
+     *
+     * [findViewTreeLifecycleOwner] is what draws that line, and it draws it
+     * honestly rather than by naming surfaces: a view in an activity's tree
+     * has an owner, a view parented straight to the WindowManager does not.
      */
-    private fun showBunproCandidates(data: WordDefinitionData) {
+    private fun onBunproPillTapped(data: WordDefinitionData) {
         onBunproPillClick?.let { it(data); return }
-        val lines = BunproBadge.candidateLines(context, data.bunpro)
-        if (lines.isEmpty()) return
-        OverlayAlert.Builder(context)
-            .setTitle(context.getString(R.string.word_bunpro_maybe_dialog_title))
-            .setMessage(
-                context.getString(R.string.word_bunpro_maybe_dialog_intro, data.word) +
-                    "\n\n" + lines.joinToString("\n")
-            )
-            .addCancelButton(context.getString(R.string.word_bunpro_maybe_dialog_close))
-            .show()
+        when (val outcome = data.bunpro) {
+            is BunproLookup.Outcome.Inconclusive -> {
+                val lines = BunproBadge.candidateLines(context, outcome)
+                if (lines.isEmpty()) return
+                OverlayAlert.Builder(context)
+                    .setTitle(context.getString(R.string.word_bunpro_maybe_dialog_title))
+                    .setMessage(
+                        context.getString(R.string.word_bunpro_maybe_dialog_intro, data.word) +
+                            "\n\n" + lines.joinToString("\n")
+                    )
+                    .addCancelButton(context.getString(R.string.word_bunpro_maybe_dialog_close))
+                    .show()
+            }
+            is BunproLookup.Outcome.Found -> {
+                if (outcome.status.srs.studied) return
+                val owner = findViewTreeLifecycleOwner() ?: return
+                BunproAddAction.confirmAddWord(
+                    ctx = context,
+                    scope = owner.lifecycleScope,
+                    word = data.word,
+                    status = outcome.status,
+                ) { ok ->
+                    if (!ok) return@confirmAddWord
+                    // addToReviews rewrote the cache, so this re-resolves to the
+                    // studied outcome with no network call.
+                    owner.lifecycleScope.launch {
+                        val next = BunproLookup.outcomeFor(context, data.word)
+                        onBunproOutcomeChanged?.invoke(next)
+                    }
+                }
+            }
+            else -> Unit
+        }
     }
 
     /** [metaChipFill] as the lightly-rounded data-chip shape (the

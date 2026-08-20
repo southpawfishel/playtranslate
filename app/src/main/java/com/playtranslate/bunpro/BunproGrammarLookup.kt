@@ -100,6 +100,37 @@ object BunproGrammarLookup {
         }
     }
 
+    /**
+     * Everything the device can say about one point, for the inline detail on a
+     * grammar row.
+     *
+     * Reads the local mirror first and returns immediately if it already holds
+     * an explanation. Only when [allowFetch] is true — and nothing is cached —
+     * does it spend one request on [BunproGrammarScraper.fetchWriteup], which
+     * caches what it gets. Callers bound how many of those they allow per
+     * capture; recurring points then cost nothing at all.
+     *
+     * Never throws: this decorates a row that must render regardless.
+     */
+    suspend fun detailFor(
+        ctx: Context,
+        pointId: Long,
+        slug: String?,
+        allowFetch: Boolean,
+    ): StoredGrammarDetail? = try {
+        val stored = BunproGrammarStore.loadDetail(ctx, pointId)
+        when {
+            stored?.writeup != null -> stored
+            !allowFetch || slug.isNullOrBlank() -> stored?.takeIf { !it.isEmpty }
+            else -> {
+                BunproGrammarScraper.fetchWriteup(ctx, slug)
+                BunproGrammarStore.loadDetail(ctx, pointId)?.takeIf { !it.isEmpty } ?: stored
+            }
+        }
+    } catch (e: Exception) {
+        null
+    }
+
     /** Tokenization powers the lemma arm; without it only literal surface
      *  patterns match. Degrades to empty, matching the Provider contract. */
     private fun tokenize(text: String): List<JaToken> = try {
