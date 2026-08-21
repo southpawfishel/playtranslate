@@ -510,4 +510,167 @@ class OverlayLayoutTest {
     fun lineBreakRuns_blank_isEmpty() {
         assertTrue(lineBreakRuns("   ").isEmpty())
     }
+
+    // ── SOURCE_ANGLE: slanted source boxes ───────────────────────────────
+
+    /** AABB of a 200×40 rect at 30°, with the oriented trio populated. */
+    private fun slantBox(
+        bounds: Rect = Rect(300, 300, 493, 435),
+        angle: Float = 30f,
+        text: String = "x",
+        isFurigana: Boolean = false,
+    ) = TextBox(
+        translatedText = text,
+        bounds = bounds,
+        isFurigana = isFurigana,
+        orientation = TextOrientation.HORIZONTAL,
+        angleDeg = angle,
+        orientedWidth = 200f,
+        orientedHeight = 40f,
+    )
+
+    private fun resolve(boxes: List<TextBox>, grow: Boolean = false, stackable: Boolean = false) =
+        OverlayLayout.resolveScreenRects(
+            boxes,
+            cropLeft = 0, cropTop = 0,
+            screenshotW = 1000, screenshotH = 1000,
+            displayW = 1000, displayH = 1000,
+            density = 1f,
+            targetIsVerticalScript = false,
+            targetStackable = stackable,
+            growEnabled = grow,
+        )
+
+    @Test
+    fun slantedBox_resolvesSourceAngle_regardlessOfPrefs() {
+        for (grow in listOf(false, true)) for (stackable in listOf(false, true)) {
+            val r = resolve(listOf(slantBox()), grow = grow, stackable = stackable)
+            assertEquals(RenderMode.SOURCE_ANGLE, r[0].mode)
+        }
+    }
+
+    @Test
+    fun slantedFurigana_staysLegacy() {
+        val r = resolve(listOf(slantBox(isFurigana = true)))
+        assertEquals(RenderMode.LEGACY_HORIZONTAL, r[0].mode)
+    }
+
+    @Test
+    fun zeroAngleBox_resolvesExactlyAsBefore() {
+        val r = resolve(listOf(box(Rect(300, 300, 493, 435))))
+        assertEquals(RenderMode.LEGACY_HORIZONTAL, r[0].mode)
+        assertEquals(RectF(294f, 294f, 499f, 441f), r[0].rect)
+    }
+
+    @Test
+    fun slantedBox_sitsOutUprightCarvePasses_bothDirections() {
+        // An upright horizontal box overlapping the slanted one: neither is
+        // carved against the other (cross-mode carving is the documented
+        // limitation) — the slanted box resolves its chip's EXACT oriented
+        // AABB (padded 212×52 at 30°, centered on the unpadded mapped
+        // center) and the upright box keeps its own padded rect.
+        val slanted = slantBox()
+        val upright = box(Rect(250, 320, 480, 360))
+        val r = resolve(listOf(slanted, upright))
+        val rr = r[0].rect
+        assertEquals(291.7f, rr.left, 0.1f)
+        assertEquals(292.0f, rr.top, 0.1f)
+        assertEquals(501.3f, rr.right, 0.1f)
+        assertEquals(443.0f, rr.bottom, 0.1f)
+        // The chip payload carries the drawn geometry.
+        val chip = r[0].chip!!
+        assertEquals(396.5f, chip.centerX, 0.1f)
+        assertEquals(367.5f, chip.centerY, 0.1f)
+        assertEquals(212f, chip.width, 0.1f)
+        assertEquals(52f, chip.height, 0.1f)
+        assertEquals(30f, chip.angleDeg, 0f)
+        assertEquals(RectF(244f, 314f, 486f, 366f), r[1].rect)
+    }
+
+    @Test
+    fun sameAngleChips_carveInsteadOfOverlapping() {
+        // Two stacked banners at the same angle whose padded chips overlap
+        // across the baseline-normal axis: they carve at the in-frame midline
+        // (pass 1's stacked-rows geometry in the shared deskewed frame), so
+        // the chips end disjoint while both keep covering their sources.
+        val a = slantBox(bounds = Rect(300, 300, 493, 435), angle = 30f)
+        val b = slantBox(bounds = Rect(320, 340, 513, 475), angle = 30f)
+        val r = resolve(listOf(a, b))
+        val ca = r[0].chip!!
+        val cb = r[1].chip!!
+        // Both carved chips keep the cluster angle and shrink from the 52px
+        // padded height — the carve took the overlap out of the facing edges.
+        assertEquals(30f, ca.angleDeg, 0f)
+        assertEquals(30f, cb.angleDeg, 0f)
+        assertTrue("carve must shrink at least one chip: ${ca.height} / ${cb.height}",
+            ca.height < 52f || cb.height < 52f)
+        // Sources stay covered: each chip still spans at least its unpadded dims' area center.
+        assertTrue(ca.height >= 40f)
+        assertTrue(cb.height >= 40f)
+    }
+
+    @Test
+    fun farAngleChips_doNotCarve() {
+        // Same overlap, angles 30° vs 10°: different clusters — no carve,
+        // both chips keep their full padded dims (the documented cross-angle
+        // limitation).
+        val a = slantBox(bounds = Rect(300, 300, 493, 435), angle = 30f)
+        val b = slantBox(bounds = Rect(320, 340, 513, 475), angle = 10f)
+        val r = resolve(listOf(a, b))
+        assertEquals(52f, r[0].chip!!.height, 0.1f)
+        assertEquals(52f, r[1].chip!!.height, 0.1f)
+    }
+
+    @Test
+    fun growCandidate_besideSlantedStraddler_clampsAndRotates() {
+        // A narrow vertical GROW box whose row a slanted AABB straddles: the
+        // straddler clamps both growth limits, so the box gains nothing and —
+        // wedged far below its target width — falls back to ROTATE instead of
+        // rendering a sliver-thin horizontal line.
+        val growBox = box(
+            Rect(400, 100, 450, 400),
+            orientation = TextOrientation.VERTICAL,
+            minWidthPx = 300,
+        )
+        val slanted = slantBox(bounds = Rect(100, 150, 700, 250), angle = 20f)
+        val r = resolve(listOf(growBox, slanted), grow = true)
+        assertEquals(RenderMode.ROTATE, r[0].mode)
+        assertEquals("no growth into the straddler", RectF(394f, 94f, 456f, 406f), r[0].rect)
+
+        // Control: without the slanted neighbour the same box does grow.
+        val alone = resolve(listOf(growBox), grow = true)
+        assertTrue("control must grow, got ${alone[0].rect}", alone[0].rect.width() > 62f)
+    }
+
+    @Test
+    fun growCandidate_besideUprightStraddler_noLongerGrowsThroughIt() {
+        // The pre-existing hole the straddler clamp closes: an UPRIGHT box
+        // overlapping the grow box's row landed in neither side limit and was
+        // grown straight through. Now it clamps both limits the same way.
+        val growBox = box(
+            Rect(400, 100, 450, 400),
+            orientation = TextOrientation.VERTICAL,
+            minWidthPx = 300,
+        )
+        val straddler = box(Rect(100, 150, 700, 250))
+        val r = resolve(listOf(growBox, straddler), grow = true)
+        assertEquals(RenderMode.ROTATE, r[0].mode)
+        assertEquals("no growth through the upright straddler", RectF(394f, 94f, 456f, 406f), r[0].rect)
+    }
+
+    @Test
+    fun boxesMatchFuzzy_angleChangeDefeatsFastPath() {
+        // An upright↔slanted mode flip always defeats the fast path.
+        val flat = box(Rect(300, 300, 493, 435))
+        val slanted = slantBox(text = "x")
+        assertTrue(!OverlayLayout.boxesMatchFuzzy(listOf(flat), listOf(slanted)))
+        // Between two slanted reads, motion is corner displacement of the
+        // drawn chip: angle jitter moves this 200×40 chip's corners ~1px —
+        // matches (no rebuild churn on a stable banner)...
+        val jittered = slanted.copy(angleDeg = 30.6f)
+        assertTrue(OverlayLayout.boxesMatchFuzzy(listOf(slanted), listOf(jittered)))
+        // ...while a real rotation sweeps them past the tolerance — rebuilds.
+        val rotated = slanted.copy(angleDeg = 42f)
+        assertTrue(!OverlayLayout.boxesMatchFuzzy(listOf(slanted), listOf(rotated)))
+    }
 }

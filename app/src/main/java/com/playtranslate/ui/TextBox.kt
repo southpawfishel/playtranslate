@@ -38,6 +38,24 @@ data class TextBox(
     /** Block alignment for horizontal boxes — drives skeleton bar placement
      *  and translated-text gravity. Ignored for vertical boxes. */
     val alignment: TextAlignment = TextAlignment.LEFT,
+    /** Source slant in degrees, clockwise-positive (`View.rotation` semantics);
+     *  0 = axis-aligned. Non-zero routes the box to [RenderMode.SOURCE_ANGLE]:
+     *  the chip lays out at the oriented dims and rotates about the [bounds]
+     *  center — [bounds] is exactly the slanted rect's AABB, so the rotated
+     *  chip lands on the source footprint. */
+    val angleDeg: Float = 0f,
+    /** True (unrotated) dims of the slanted rect in the same space as [bounds];
+     *  0 when [angleDeg] == 0. Ride with the angle — not re-derivable from
+     *  bounds+angle (singular at 45°). */
+    val orientedWidth: Float = 0f,
+    val orientedHeight: Float = 0f,
+    /** Consecutive upright re-reads survived by a held [angleDeg] (the
+     *  reconciler's slant hysteresis). Meaningful only while [angleDeg] != 0;
+     *  reset whenever a fresh measured angle arrives. Bounds the hold: the
+     *  acceptance flap the hold exists for alternates angled/upright and
+     *  never builds a streak, while a genuine upright transition releases
+     *  after a few reads instead of sticking for the box's lifetime. */
+    val slantUprightStreak: Int = 0,
     /** Minimum on-screen width (px) for a legible horizontal line of
      *  [translatedText] — the longest whitespace token measured at the
      *  legibility floor. Drives the vertical-box render routing in
@@ -58,7 +76,7 @@ data class TextBox(
      *  finding). Read by ReadingArbiter when a fuzz-same read differs. A
      *  prefix-substituted dispatch carries its full read's scores —
      *  accepted slop. Deliberately `var`: the ratchet mutates in place so
-     *  box IDENTITY survives (FuriganaPresenter's map, cached lists, the
+     *  box IDENTITY survives (presenter maps, cached lists, the
      *  view's short-circuit all key on it); safe because no structural-
      *  keyed container of TextBox exists (IdentityHashMaps only) and the
      *  fields never affect rendering. */

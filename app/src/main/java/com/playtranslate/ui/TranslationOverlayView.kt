@@ -156,6 +156,26 @@ class TranslationOverlayView(
     init {
         clipChildren = false
         clipToPadding = false
+        // Every child of this view is placed in CAPTURE-BITMAP pixels mapped to
+        // the display — a physical coordinate space that must never mirror. Left
+        // to inherit, it would: ViewRootImpl stamps the window configuration's
+        // layout direction onto any root whose own direction is INHERIT
+        // (performTraversals), so an Arabic system locale silently turns this
+        // FrameLayout RTL. FrameLayout's DEFAULT_CHILD_GRAVITY is TOP|START,
+        // which resolves to RIGHT there and computes childLeft as
+        // `parentRight - width` — DISCARDING leftMargin, while topMargin (no
+        // relative bit) still applies. Result: every chip collapses onto the
+        // right screen edge at its correct height, and the translationX-placed
+        // children (furigana, ROTATE, and the slanted SOURCE_ANGLE chips) are
+        // pushed off-screen past it.
+        //
+        // Pinning the container is deliberate over per-site absolute gravity:
+        // this is a pure geometry surface with no localized chrome, so one pin
+        // covers every render mode, including ones added later. Text direction
+        // is NOT affected — it resolves independently from content
+        // (TEXT_DIRECTION_FIRST_STRONG), so an Arabic translation still lays out
+        // as an RTL paragraph and stays right-aligned inside its chip.
+        layoutDirection = LAYOUT_DIRECTION_LTR
     }
 
     private val dp = context.resources.displayMetrics.density
@@ -320,10 +340,54 @@ class TranslationOverlayView(
 
         if (OcrManager.instance.debugLogGroupingEnabled) logLayoutDecisions(measured, resolved)
 
+        // THE one rotated-pin mechanism (SOURCE_ANGLE chips + slanted ruby):
+        // lay out at the oriented dims, rotate about the child's center (the
+        // default pivot), center-pin on the given screen point. Shared so the
+        // two rotation consumers can't drift apart.
+        fun applyRotatedPin(child: View, cx: Float, cy: Float, w: Int, h: Int, angleDeg: Float) {
+            child.rotation = angleDeg
+            child.translationX = cx - w / 2f
+            child.translationY = cy - h / 2f
+        }
+
+        // OCR-bitmap → screen scale, hoisted ABOVE the furigana branch: a
+        // bare `scaleX` there would silently resolve to the View's own
+        // scaleX property (1f) and size slanted ruby in bitmap pixels on
+        // scaled displays (Codex review finding).
+        val scaleX = width.toFloat() / screenshotW
+        val scaleY = height.toFloat() / screenshotH
+
         measured.zip(resolved).forEach { (box, resolvedBox) ->
             val rect = resolvedBox.rect
             val mode = resolvedBox.mode
             if (box.isFurigana) {
+                if (box.angleDeg != 0f) {
+                    // Slanted ruby: fixed screen-scaled oriented dims, text
+                    // bottom-pinned INSIDE the band via gravity (the in-frame
+                    // analogue of the upright path's bottom pin), rotated
+                    // about the center like SOURCE_ANGLE — bounds are the
+                    // band's exact AABB, so the center pin lands the band on
+                    // its baseline offset.
+                    val fw = (box.orientedWidth * scaleX).toInt().coerceAtLeast(1)
+                    val fh = (box.orientedHeight * scaleY).toInt().coerceAtLeast(1)
+                    val textSizePx = (fh * 0.7f).coerceAtLeast(4f)
+                    val strokeW = 3f * dp
+                    val child = OutlinedTextView(context).apply {
+                        text = box.translatedText
+                        setTextColor(Color.WHITE)
+                        outlineColor = Color.BLACK
+                        outlineWidth = strokeW
+                        typeface = Typeface.DEFAULT_BOLD
+                        includeFontPadding = false
+                        setShadowLayer(strokeW, 0f, 0f, Color.TRANSPARENT)
+                        setTextSize(TypedValue.COMPLEX_UNIT_PX, textSizePx)
+                        gravity = Gravity.BOTTOM or Gravity.START
+                    }
+                    child.setTag(R.id.tag_bg_color, Color.BLACK)
+                    addView(child, LayoutParams(fw, fh))
+                    applyRotatedPin(child, rect.centerX(), rect.centerY(), fw, fh, box.angleDeg)
+                    return@forEach
+                }
                 val isVerticalFurigana = box.orientation == TextOrientation.VERTICAL
                 // Vertical furigana: size from box width; horizontal: from box height
                 val textSizePx = if (isVerticalFurigana) {
@@ -400,16 +464,33 @@ class TranslationOverlayView(
                 // breaks single words across rows in a tall, narrow column. ROTATE wraps along the
                 // tall side, so its wrap width is rectH.
                 val baseMax = if (mode == RenderMode.GROW_HORIZONTAL) growMaxTextSizeSp else maxTextSizeSp
-                val wrapWidthPx = if (mode == RenderMode.ROTATE) rectH else rectW
+                // SOURCE_ANGLE lays out at the resolved chip's dims (the
+                // pre-rotation frame) — the carve may have moved/shrunk it —
+                // so its wrap axis is the chip width, the same idea as ROTATE
+                // wrapping along its tall side. Defensive fallback: a missing
+                // chip payload derives the dims from the box, the pre-carve
+                // behavior.
+                val chip = resolvedBox.chip
+                val angledW = (chip?.width?.toInt() ?: (box.orientedWidth * scaleX).toInt()).coerceAtLeast(1)
+                val angledH = (chip?.height?.toInt() ?: (box.orientedHeight * scaleY).toInt()).coerceAtLeast(1)
+                val wrapWidthPx = when (mode) {
+                    RenderMode.ROTATE -> rectH
+                    RenderMode.SOURCE_ANGLE -> angledW
+                    else -> rectW
+                }
                 val autoMax = unbreakableFitMaxSp(box.translatedText, wrapWidthPx, baseMax)
 
                 val child: View = when {
                     box.translatedText.isEmpty() -> {
                         // Skeleton bars follow the SOURCE orientation: a vertical OCR box shows
                         // vertical column-stripes (matching the text being covered) even when its
-                        // translation will land horizontally once it arrives.
+                        // translation will land horizontally once it arrives. A SOURCE_ANGLE
+                        // skeleton builds at the oriented dims — the placement branch below
+                        // rotates it onto the slanted source like the text child.
                         val verticalSkeleton = box.orientation == TextOrientation.VERTICAL
-                        buildSkeletonView(rectW, rectH, box.lineCount, box.bgColor, box.textColor, box.alignment, verticalSkeleton)
+                        val sw = if (mode == RenderMode.SOURCE_ANGLE) angledW else rectW
+                        val sh = if (mode == RenderMode.SOURCE_ANGLE) angledH else rectH
+                        buildSkeletonView(sw, sh, box.lineCount, box.bgColor, box.textColor, box.alignment, verticalSkeleton)
                     }
                     mode == RenderMode.STACK_UPRIGHT -> VerticalTextView(context).apply {
                         text = box.translatedText
@@ -453,6 +534,29 @@ class TranslationOverlayView(
                     child.rotation = 90f
                     child.translationX = rect.centerX() - rectH / 2f
                     child.translationY = rect.centerY() - rectW / 2f
+                } else if (mode == RenderMode.SOURCE_ANGLE) {
+                    // Slanted source: lay out at the chip's dims, rotate about the
+                    // child's center (the default pivot) by the chip's angle, and pin
+                    // on the chip's center — the resolved payload carries the carve's
+                    // outcome, so autosize, skeletons, and placement all follow it.
+                    // Exact only while scaleX == scaleY; unequal scales would need a
+                    // shear no single View rotation can express (both derive from the
+                    // same display, so they agree in every production caller).
+                    if (scaleX != 0f && kotlin.math.abs(scaleX - scaleY) > 0.01f * scaleX) {
+                        android.util.Log.w(
+                            "DetectionLog",
+                            "[layout] SOURCE_ANGLE under non-uniform scale ($scaleX vs $scaleY) — chip angle is approximate",
+                        )
+                    }
+                    addView(child, LayoutParams(angledW, angledH))
+                    if (chip != null) {
+                        applyRotatedPin(child, chip.centerX, chip.centerY, angledW, angledH, chip.angleDeg)
+                    } else {
+                        // Defensive: no payload — pre-carve pin on the unpadded
+                        // mapped bounds center at the box's own angle.
+                        val src = OverlayLayout.mapRect(box.bounds, cropOffsetX, cropOffsetY, scaleX, scaleY)
+                        applyRotatedPin(child, src.centerX(), src.centerY(), angledW, angledH, box.angleDeg)
+                    }
                 } else {
                     // STACK_UPRIGHT / HORIZONTAL_IN_PLACE / GROW_HORIZONTAL / LEGACY_HORIZONTAL
                     // and skeletons: fill the (possibly grown) box footprint at its rect.
@@ -512,7 +616,8 @@ class TranslationOverlayView(
             android.util.Log.d(
                 "DetectionLog",
                 "[layout] box[$i] ${resolved[i].mode} ${box.orientation.name[0]} " +
-                    "minW=${box.minWidthPx} \"$src\"->\"$tr\" rect=${rs(resolved[i].rect)}",
+                    "minW=${box.minWidthPx} ang=${box.angleDeg} " +
+                    "\"$src\"->\"$tr\" rect=${rs(resolved[i].rect)}",
             )
         }
         val idx = boxes.indices.filter { !boxes[it].isFurigana }
@@ -658,27 +763,51 @@ class TranslationOverlayView(
      * controller). [PinholeOverlayMode] indexes the returned list against
      * its own clean-only `cachedBoxes` directly.
      */
-    fun getChildScreenRects(): List<Rect> {
-        val rects = mutableListOf<Rect>()
+    fun getChildScreenRects(): List<Rect> = getChildFootprints().map { it.rect }
+
+    /** One rendered child's DRAWN footprint: the screen-space AABB plus the
+     *  laid-out dims + rotation that produced it. Upright children report
+     *  angle 0 with their layout dims. */
+    data class ChildFootprint(
+        val rect: Rect,
+        val angleDeg: Float,
+        val drawnW: Float,
+        val drawnH: Float,
+    )
+
+    /**
+     * The drawn footprint of every rendered child, in child order (same
+     * filter and order as [getChildScreenRects] — that list is now a
+     * projection of this one). The pinhole gate's exclusion consumes this
+     * channel: the DRAWN truth, instead of pairing rendered rects with
+     * stored box geometry whose padding/carving can diverge. A ROTATE-mode
+     * child reports its 90° rotation with its swapped layout dims — exact,
+     * like every other entry.
+     */
+    fun getChildFootprints(): List<ChildFootprint> {
+        val out = mutableListOf<ChildFootprint>()
         val location = IntArray(2)
         for (i in 0 until childCount) {
             val child = getChildAt(i)
             if (child.getTag(R.id.tag_bg_color) == null) continue
             if (child.rotation != 0f) {
-                // Rotated child: compute visual bounds via the hit rect,
-                // which accounts for rotation/translation transforms.
+                // Rotated child: visual bounds via the hit rect, which
+                // accounts for rotation/translation transforms.
                 val hitRect = android.graphics.Rect()
                 child.getHitRect(hitRect)
                 // getHitRect returns parent-relative coords; offset to screen
                 getLocationOnScreen(location)
                 hitRect.offset(location[0], location[1])
-                rects += hitRect
+                out += ChildFootprint(hitRect, child.rotation, child.width.toFloat(), child.height.toFloat())
             } else {
                 child.getLocationOnScreen(location)
-                rects += Rect(location[0], location[1], location[0] + child.width, location[1] + child.height)
+                out += ChildFootprint(
+                    Rect(location[0], location[1], location[0] + child.width, location[1] + child.height),
+                    0f, child.width.toFloat(), child.height.toFloat(),
+                )
             }
         }
-        return rects
+        return out
     }
 
     /**

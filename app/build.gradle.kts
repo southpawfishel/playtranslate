@@ -24,8 +24,8 @@ android {
         applicationId = "com.davesies.translate"
         minSdk = 29
         targetSdk = 36
-        versionCode = 16
-        versionName = "3.0.1"
+        versionCode = 17
+        versionName = "3.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

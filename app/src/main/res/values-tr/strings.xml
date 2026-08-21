@@ -102,7 +102,6 @@
     <string name="onboarding_notif_row_status_title">Yalnızca bir durum çubuğu simgesi</string>
     <string name="onboarding_notif_row_status_sub"><xliff:g id="app_name" example="PlayTranslate">PlayTranslate</xliff:g> uygulamasının çalıştığını belirten sessiz bir gösterge</string>
 
-
     <string name="onboarding_a11y_hint"><b><xliff:g id="app_name" example="PlayTranslate">PlayTranslate</xliff:g></b> öğesini arayın</string>
 
     <string name="onboarding_a11y_title">Diğer uygulamaların üzerinde göster</string>
@@ -114,7 +113,6 @@
     <string name="onboarding_a11y_row_menu_sub">Uygulamalar arasında geçiş yapmadan <xliff:g id="app_name" example="PlayTranslate">PlayTranslate</xliff:g> özelliklerine erişin</string>
     <string name="onboarding_a11y_row_lookup_title">Sözcükleri ara</string>
     <string name="onboarding_a11y_row_lookup_sub">Ekrandaki sözcükler için anında tanımlar alın</string>
-
 
     <string name="btn_grant_permission">İzin Ver</string>
 
@@ -144,10 +142,11 @@
 
     <string name="word_detail_common">Yaygın</string>
 
+    <string name="card_words_in_sentence">Cümlede geçen sözcükler</string>
+
     <string name="word_anki_in_decks"><xliff:g id="count" example="3">%1$d</xliff:g> Anki destesi</string>
 
     <string name="word_anki_deck_badge_cd">Anki\'de zaten var: <xliff:g id="label" example="Core 2k">%1$s</xliff:g></string>
-
 
     <string name="word_detail_numbered_definition"><xliff:g id="number" example="1">%1$d</xliff:g>. <xliff:g id="definition" example="to eat">%2$s</xliff:g></string>
 
@@ -209,6 +208,8 @@
     <string name="lang_search_no_results">Sonuç yok</string>
 
     <string name="lang_section_suggested">Önerilen</string>
+
+    <string name="lang_pick_any">Herhangi bir dil</string>
 
     <string name="lang_section_all">Tümü</string>
 
@@ -367,8 +368,6 @@
 
     <string name="capture_lifecycle_state_off">Kapalı</string>
 
-
-
     <string name="capture_lifecycle_on_subtitle">Ekran yakalamaya izin verildi</string>
 
     <string name="capture_lifecycle_off_subtitle">Ekran yakalamaya izin ver</string>
@@ -454,7 +453,6 @@
 
     <string name="anki_not_installed_get"><xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>\'i Edin</string>
 
-
     <string name="anki_permission_rationale_title"><xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> izni gerekli</string>
 
     <string name="anki_permission_rationale_message"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>\'ye bilgi kartı eklemek için <xliff:g id="app_name" example="PlayTranslate">PlayTranslate</xliff:g> uygulamasının <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>\'e erişim izni gerekir.\n\nBu izni vermek için Devam Et düğmesine dokunun.</string>
@@ -467,7 +465,13 @@
 
     <string name="anki_added_no_audio"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>\'ye eklendi (ses kullanılamıyor)</string>
 
-    <string name="anki_added_success"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>\'ye eklendi</string>
+    <string name="anki_added_no_screenshot"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>\'ye eklendi (ekran görüntüsü kullanılamıyor)</string>
+
+    <string name="anki_added_no_screenshot_or_audio"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>\'ye eklendi (ekran görüntüsü ve ses kullanılamıyor)</string>
+
+    <string name="anki_added_sentence_success">Cümle kartı <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>\'ye eklendi</string>
+
+    <string name="anki_added_word_success">Sözcük kartı <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>\'ye eklendi</string>
 
     <string name="anki_adding_in_progress"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>\'ye ekleniyor…</string>
 
@@ -531,6 +535,8 @@
 
     <string name="audio_source_game_enable_hint">Kayıt yapılmıyor — sonraki kartlarda oyun sesini yakalamak için açın</string>
 
+    <string name="game_audio_zoom_hint">Daha fazla veya daha az ses görmek için parmaklarınızı yaklaştırıp uzaklaştırın</string>
+
     <string name="game_audio_trim_duration"><xliff:g id="seconds" example="2.4">%1$s</xliff:g> sn seçili · <xliff:g id="total_seconds" example="147">%2$s</xliff:g> sn kayıtlı</string>
 
     <string name="anki_game_audio_cell_untrimmed">Kaydederken kırpılacak</string>
@@ -561,7 +567,9 @@
 
     <string name="anki_field_mapping_unconfigured">Göndermeden önce bu kart türü için alanları yapılandırın</string>
 
-    <string name="anki_sort_field_empty">“<xliff:g id="sort_field_name" example="Expression">%1$s</xliff:g>” alanına bir değer eşleyin — <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> bu alanı notu tanımlamak için kullanır ve boş değerler, gönderim sırasında kartın yinelenen (kopya) olarak reddedilmesine neden olur.</string>
+    <string name="anki_first_field_unmapped"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>\'nin notu tanıması için “<xliff:g id="field_name" example="Key">%1$s</xliff:g>” alanına bir değer eşleyin.</string>
+
+    <string name="anki_first_field_empty">Bu kartta “<xliff:g id="field_name" example="Key">%1$s</xliff:g>” alanı boş. <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>, notu tanımlamak için ilk alanı kullanır; bu nedenle her kartta bir değeri olmalıdır.</string>
 
     <string name="anki_models_unavailable">Kart türlerine bakmak için <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> uygulamasına ulaşılamadı. Birazdan tekrar deneyin.</string>
 
@@ -884,6 +892,8 @@
 
     <string name="bergamot_pair_unsupported">Geçerli dil çifti için desteklenmiyor</string>
 
+    <string name="bergamot_device_unsupported">Bu cihazda desteklenmiyor</string>
+
     <string name="offline_backend_downloaded_cd">İndirildi</string>
     <string name="offline_backend_not_downloaded_cd">İndirilmedi</string>
     <string name="offline_backend_enabled_cd">Etkin</string>
@@ -1047,7 +1057,6 @@
     <string name="llm_low_memory_title">Yeterli boş bellek yok</string>
 
     <string name="llm_low_memory_message"><xliff:g id="model_name" example="Qwen 2.5 1.5B">%1$s</xliff:g> çalışmak için yaklaşık <xliff:g id="needed_memory" example="4 GB">%2$s</xliff:g> boş bellek gerektirir. Şu anda yalnızca <xliff:g id="free_memory" example="1.2 GB">%3$s</xliff:g> boş.\n\nBellek açmak için diğer uygulamaları kapatın veya bu model cihazınıza uygun değilse iptal edin.</string>
-
 
     <string name="llm_low_memory_start_anyway">Yine de başlat</string>
 
@@ -1408,7 +1417,6 @@
 
     <string name="settings_ocr_download_failed">OCR modeli indirilemedi. Bağlantınızı kontrol edip tekrar deneyin.</string>
 
-
     <string name="settings_ocr_use_manga_subtitle">DENEYSEL. Yalnızca manga okumak için kullanın. Yavaştır; oyunlarda ve diğer içeriklerde kalitesi kötüdür.</string>
 
     <string name="settings_ocr_disable_manga_title">MangaOCR kapatılsın mı?</string>
@@ -1486,6 +1494,8 @@
     <string name="yomitan_no_space_message">Bu sözlüğü içe aktarmak için yaklaşık <xliff:g id="needed" example="180 MB">%1$s</xliff:g> boş alan gerekir, ancak yalnızca <xliff:g id="available" example="42 MB">%2$s</xliff:g> kullanılabilir. Yer açıp tekrar deneyin.</string>
     <string name="yomitan_single_dict_title">Tanımları yalnızca tek bir sözlükten göster</string>
     <string name="yomitan_single_dict_subtitle">Tanımlar, sonuç bulunan en yüksek öncelikli sözlükten gelir; yerleşik sözlük son seçenektir</string>
+    <string name="yomitan_styling_title">Sözlük stili</string>
+    <string name="yomitan_styling_subtitle">Tanımları her sözlüğün kendi düzeni ve stiliyle gösterir. Bundan sonra içe aktarılan sözlükler için geçerlidir; her zaman düz metin kullanmak için kapatın</string>
     <string name="yomitan_auto_update_label">Otomatik güncelle</string>
     <string name="yomitan_auto_update_subtitle">Bu sözlüğün yeni sürümlerini otomatik olarak indirir ve yükler</string>
     <string name="yomitan_io_error_title">İçe aktarma başarısız</string>
@@ -1509,6 +1519,26 @@
     <string name="yomitan_alias_label">Takma ad</string>
     <string name="yomitan_alias_hint">Bir takma ad ekleyin</string>
     <string name="yomitan_accent_default_cd">Varsayılan (altyazı metni rengi)</string>
+    <string name="yomitan_source_language_label">Kaynak dil</string>
+    <string name="yomitan_check_updates_label">Güncellemeleri denetle</string>
+    <string name="yomitan_update_checking_title">Güncellemeler denetleniyor</string>
+    <string name="yomitan_update_available_title">Güncelleme mevcut</string>
+    <string name="yomitan_update_available_message"><xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> sözlüğü <xliff:g id="revision" example="2026.02.05">%2$s</xliff:g> sürümüne güncellenebilir.</string>
+    <string name="yomitan_update_confirm">Güncelle</string>
+    <string name="yomitan_update_repair_title">Yeniden indirme gerekiyor</string>
+    <string name="yomitan_update_repair_message"><xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> sözlüğünün verileri, uygulamanın bu sürümüyle çalışabilmesi için yeniden indirilmelidir.</string>
+    <string name="yomitan_update_redownload_confirm">Yeniden indir</string>
+    <string name="yomitan_update_none_title">Güncel</string>
+    <string name="yomitan_update_none_message"><xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> sözlüğü en son sürümde.</string>
+    <string name="yomitan_update_check_failed_title">Güncellemeler denetlenemedi</string>
+    <string name="yomitan_update_check_failed_message">Sözlüğün güncelleme sunucusuna ulaşılamadı. Bağlantınızı kontrol edip tekrar deneyin.</string>
+    <string name="yomitan_update_busy_title">Şu anda güncellenemiyor</string>
+    <string name="yomitan_update_busy_message">Bir çeviri oturumu sürüyor. Bittiğinde tekrar deneyin.</string>
+    <string name="yomitan_update_scan_active_message">Sözlük güncellemeleri arka planda zaten denetleniyor. Birazdan tekrar deneyin.</string>
+    <string name="yomitan_update_skipped_title">Güncelleme uygulanmadı</string>
+    <string name="yomitan_update_skipped_message">Güncelleme indirildi ancak bu sözlükle eşleşmediği için yüklenmedi.</string>
+    <string name="yomitan_update_done_title">Sözlük güncellendi</string>
+    <string name="yomitan_update_done_message"><xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> sözlüğü artık güncel.</string>
     <string name="settings_header_tools">Araçlar</string>
     <string name="settings_cell_dictionary">Sözlük</string>
     <string name="settings_cell_history">Geçmiş</string>
@@ -1531,6 +1561,10 @@
     <string name="history_capture_image_toggle_title">Yakalama görüntülerini kaydet</string>
 
     <string name="history_capture_image_toggle_subtitle">Her kamera veya ekran yakalamasının bir görüntüsünü saklar</string>
+
+    <string name="history_hide_translations_toggle_title">Çevirileri gizle</string>
+
+    <string name="history_hide_translations_toggle_subtitle">Yalnızca yakalanan metni gösterir. Çevirisini görmek için bir satıra dokunun.</string>
 
     <string name="history_live_session_title">Canlı oturum</string>
 
@@ -1640,7 +1674,6 @@
          SETTINGS — Text-to-Speech section
          ═══════════════════════════════════════════════════════════════ -->
 
-
     <string name="tts_voice_numbered">Ses <xliff:g id="voice_index" example="3">%1$d</xliff:g></string>
 
     <string name="tts_voice_region_numbered"><xliff:g id="region" example="China">%1$s</xliff:g> <xliff:g id="region_index" example="2">%2$d</xliff:g></string>
@@ -1650,7 +1683,6 @@
     <string name="tts_voice_default_subtitle">Motorun varsayılan sesi</string>
 
     <string name="tts_voice_needs_download">İndirme gerekli</string>
-
 
     <string name="tts_no_engine_row_subtitle">Kullanılabilir konuşma motoru yok. Eklemek için dokunun.</string>
 
@@ -1735,8 +1767,6 @@
     <string name="anki_deck_not_selected_subtitle">Seçilmedi</string>
 
 
-
-
     <!-- ═══════════════════════════════════════════════════════════════
          SETTINGS — Support section
          ═══════════════════════════════════════════════════════════════ -->
@@ -1767,6 +1797,7 @@
     <string name="settings_debug_log_pinhole">Canlı mod iğne deliği ölçümlerini günlüğe kaydet</string>
     <string name="settings_debug_save_ocr_seed">OCR yakalamalarını tohum olarak kaydet</string>
     <string name="settings_debug_log_grouping">OCR gruplama kararlarını günlüğe kaydet</string>
+    <string name="settings_debug_angle_gate">Klasik açı eşiği (10°)</string>
     <string name="settings_debug_log_trace">Çeviri günlüğü izini kaydet</string>
     <string name="settings_debug_force_crash_title">Çökmeyi zorla</string>
     <string name="dictionary_screen_title">Sözlük</string>

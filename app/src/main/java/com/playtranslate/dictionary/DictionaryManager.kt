@@ -40,32 +40,17 @@ data class TokenWithReading(
     val surface: String,
     /** Dictionary form for lookup (e.g. "使う"). */
     val lookupForm: String,
-    /** Hiragana reading from Kuromoji, or null for multi-token phrases. */
+    /** Hiragana reading. Single tokens: the tokenizer's surface reading.
+     *  Re-globbed phrases (exact joins): the window tokens' readings
+     *  concatenated — the homograph-disambiguation hint `lookup()` narrows
+     *  by, with rank-order fallback when no entry matches it. Null for
+     *  lemma-variant phrases and spans with reading-less members. */
     val reading: String?,
     /** Conjugation tags the [surface] expresses (e.g. 言わせて → [Causative,
      *  Te-form]); empty for uninflected words and phrase-matched spans. */
     val inflections: List<InflectionTag> = emptyList(),
 )
 
-/** A furigana annotation: reading text positioned over a kanji span within the original text. */
-data class FuriganaToken(
-    /** The kanji portion of the token (okurigana stripped). e.g. "聞" from "聞い". */
-    val kanjiSurface: String,
-    /** Hiragana reading for the kanji portion. e.g. "き" for "聞". */
-    val reading: String,
-    /** Character offset of [kanjiSurface] within the original input text. */
-    val startOffset: Int,
-    /** Character end offset (exclusive) of [kanjiSurface] within the original input text. */
-    val endOffset: Int,
-    /** The FULL token surface this part came from (e.g. "聞いた" for "聞"). */
-    val surface: String = "",
-    /** Sudachi's dictionary form for the token ("聞く" for "聞いた"). */
-    val dictionaryForm: String = "",
-    /** True when this annotation IS the whole token — single furigana part
-     *  spanning the entire surface. Word-level decorations (pitch accent)
-     *  only make sense then: partial ruby can't carry a word contour. */
-    val coversWholeSurface: Boolean = false,
-)
 
 /**
  * Offline Japanese dictionary backed by a JMdict SQLite database bundled
@@ -198,14 +183,28 @@ class DictionaryManager private constructor(private val context: Context) {
         phraseOracle: (suspend (Set<String>) -> Set<String>)? = null,
     ): List<TokenWithReading> = withContext(Dispatchers.IO) {
         val tokens = SudachiJapaneseTokenizer.Provider.analyze(text)
-        // Fallback when the JMdict DB isn't ready: emit content words on their own
-        // (no n-gram phrase detection, no normalizedForm probing).
-        val contentOnly = {
-            tokens.filter { it.category.isContent }
-                .map { TokenWithReading(it.surface, it.dictionaryForm, it.reading?.let(Deinflector::katakanaToHiragana)) }
-                .filter { isLookupWorthy(it.lookupForm) }
+        val spans = reglobSpansForTokens(tokens, phraseOracle)
+            ?: return@withContext contentOnlyTokens(tokens)
+        val result = spans.map {
+            TokenWithReading(it.surface, it.lookupForm, it.reading, it.inflections)
         }
-        val database = ensureOpen() ?: return@withContext contentOnly()
+        Log.d(TAG, "tokenizeWithSurfaces: ${result.map { "(${it.surface} → ${it.lookupForm} [${it.reading}])" }}")
+        result
+    }
+
+    /**
+     * The n-gram re-glob over pre-analyzed [tokens], span-native: candidate
+     * generation, batched membership (JMdict + optional imported-dict
+     * oracle), then the greedy matcher. Null when the JMdict DB isn't ready
+     * — callers fall back to content-token-only behavior. Exposed for the
+     * JA annotator, which must reuse ONE analyze() pass for the whole
+     * annotation instead of re-tokenizing per consumer.
+     */
+    internal suspend fun reglobSpansForTokens(
+        tokens: List<JaToken>,
+        phraseOracle: (suspend (Set<String>) -> Set<String>)? = null,
+    ): List<ReglobSpan>? = withContext(Dispatchers.IO) {
+        val database = ensureOpen() ?: return@withContext null
 
         // Batch existence query: candidate N-gram phrases PLUS each content
         // token's dictionaryForm/normalizedForm (layer 1 — lets us pick the
@@ -227,7 +226,7 @@ class DictionaryManager private constructor(private val context: Context) {
         val known = database.withRefcount {
             val phraseStrings = candidates.mapTo(mutableSetOf()) { it.lookupForm }
             batchCheckPhrases(database, phraseStrings) to batchCheckEntries(database, formCandidates)
-        } ?: return@withContext contentOnly()
+        } ?: return@withContext null
         var (knownPhrases, knownForms) = known
 
         // Imported-dictionary gate for JMdict misses. Runs OUTSIDE withRefcount
@@ -238,49 +237,15 @@ class DictionaryManager private constructor(private val context: Context) {
             if (forOracle.isNotEmpty()) knownPhrases = knownPhrases + phraseOracle(forOracle)
         }
 
-        val result = reglobTokens(tokens, candidates, knownPhrases, knownForms)
-        Log.d(TAG, "tokenizeWithSurfaces: ${result.map { "(${it.surface} → ${it.lookupForm} [${it.reading}])" }}")
-        result
+        reglobSpans(tokens, candidates, knownPhrases, knownForms)
     }
 
-    /**
-     * Tokenize text for furigana display.
-     *
-     * Each token is processed independently with its conjugation-aware reading
-     * (e.g. 来た → き for 来, 聞い → き for 聞). Compound words with internal
-     * kana are split at shared boundaries (取り出す → と over 取, だ over 出).
-     *
-     * Offsets come from the analyzer's begin/end (original-text offsets that
-     * tile the input — verified), so they're robust to Sudachi's input-text
-     * normalization. No database queries.
-     */
-    fun tokenizeForFurigana(text: String): List<FuriganaToken> {
-        val result = mutableListOf<FuriganaToken>()
-        for (tok in SudachiJapaneseTokenizer.Provider.analyze(text)) {
-            val reading = tok.reading?.let { Deinflector.katakanaToHiragana(it) }
-            val hasKanji = tok.surface.any(Deinflector::isKanji)
-            if (!hasKanji || reading == null || reading == tok.surface) continue
-
-            val parts = Deinflector.splitFurigana(tok.surface, reading)
-            var partOffset = 0
-            for (part in parts) {
-                if (part.reading != null) {
-                    result += FuriganaToken(
-                        kanjiSurface = part.text,
-                        reading = part.reading,
-                        startOffset = tok.begin + partOffset,
-                        endOffset = tok.begin + partOffset + part.text.length,
-                        surface = tok.surface,
-                        dictionaryForm = tok.dictionaryForm,
-                        coversWholeSurface = parts.size == 1 && part.text == tok.surface,
-                    )
-                }
-                partOffset += part.text.length
-            }
-        }
-        return result
-    }
-
+    /** Fallback when the JMdict DB isn't ready: content words on their own
+     *  (no n-gram phrase detection, no normalizedForm probing). */
+    private fun contentOnlyTokens(tokens: List<JaToken>): List<TokenWithReading> =
+        tokens.filter { it.category.isContent }
+            .map { TokenWithReading(it.surface, it.dictionaryForm, it.reading?.let(Deinflector::katakanaToHiragana)) }
+            .filter { isLookupWorthy(it.lookupForm) }
 
     /**
      * Look up [word] in the local JMdict database.
@@ -593,33 +558,21 @@ class DictionaryManager private constructor(private val context: Context) {
         return ids
     }
 
-    private fun buildResponse(
-        db: SQLiteDatabase,
-        entryIds: List<Long>,
-        inflectionNote: String? = null
-    ): DictionaryResponse {
-        val entries = entryIds.mapNotNull { buildEntry(db, it, inflectionNote) }
-        return DictionaryResponse(entries = entries)
-    }
-
-    private fun buildEntry(db: SQLiteDatabase, id: Long, inflectionNote: String?): DictionaryEntry? {
-        val idStr = id.toString()
-
-        var isCommon = false
-        var freqScore = 0
-        db.rawQuery("SELECT is_common, freq_score FROM entry WHERE id=?", arrayOf(idStr)).use { c ->
-            if (c.moveToFirst()) {
-                isCommon  = c.getInt(0) == 1
-                freqScore = c.getInt(1)
-            }
-        }
-
-        // Kanji headwords. v2 packs carry `ke_pri` per form so we can mark
-        // common kanji forms as priority — the signal that lets `isKanaOnly`
-        // distinguish 決まる (priority kanji + minor uk sense → display kanji)
-        // from 何故 (no priority + uk sense → display kana). v1 packs lack the
-        // column; we degrade to "no priority known", which leaves `isKanaOnly`
-        // running its pre-v2 uk-only behaviour.
+    /**
+     * The entry's headword list — kanji forms + reading forms paired by
+     * [buildHeadwords]. Shared VERBATIM by [buildEntry] and
+     * [lookupReadingsOnly], so the readings-only path can never drift from
+     * the full path's pairing.
+     *
+     * Kanji headwords: v2 packs carry `ke_pri` per form so we can mark
+     * common kanji forms as priority (lets `isKanaOnly` distinguish 決まる
+     * from 何故); v1 packs degrade to "no priority known". `no_kanji`
+     * (JMdict re_nokanji) lets [buildHeadwords] drop readings never written
+     * with the kanji; `rank_score` rides along for the word-detail reading
+     * rows. ORDER BY position keeps `headwords` position-ordered —
+     * firstOrNull() == primary, unchanged app-wide.
+     */
+    private fun loadHeadwords(db: SQLiteDatabase, idStr: String): List<Headword> {
         val kanjiForms = mutableListOf<JmKanjiForm>()
         val v2HeadwordSchema = hasKePri(db)
         val kanjiSql = if (v2HeadwordSchema)
@@ -633,16 +586,8 @@ class DictionaryManager private constructor(private val context: Context) {
                 kanjiForms.add(JmKanjiForm(text, hasPriority))
             }
         }
-
-        // `no_kanji` (JMdict re_nokanji) lets [buildHeadwords] drop readings
-        // never written with the kanji during single-kanji expansion. Probed
-        // via the cached [hasNoKanji]; absent on pre-column packs →
-        // buildHeadwords falls back to the old positional pairing.
         val noKanjiColumn = hasNoKanji(db)
         val rankScoreColumn = hasRankScore(db)
-        // `rank_score` (common-use rank, higher = more common) rides along for the
-        // word-detail reading rows. ORDER BY position is kept so `headwords` stays
-        // position-ordered — firstOrNull() == primary, unchanged app-wide.
         val readingCols = buildList {
             add("text")
             if (noKanjiColumn) add("no_kanji")
@@ -665,8 +610,75 @@ class DictionaryManager private constructor(private val context: Context) {
                 )
             }
         }
+        return buildHeadwords(kanjiForms, readingForms, noKanjiColumn)
+    }
 
-        val headwords = buildHeadwords(kanjiForms, readingForms, noKanjiColumn)
+    /**
+     * Readings-only resolution for the annotator: the SAME entry choice as
+     * [lookup] (narrowed → direct → deinflection, identical ranked SQL) and
+     * the SAME headword pairing ([loadHeadwords]) — but no senses, examples,
+     * or imported enrichment. Returns a senses-free [DictionaryEntry]
+     * skeleton (packId + headwords) or null when the pack has nothing —
+     * callers fall back to the full two-store lookup, where imported-
+     * dictionary synthesis may still resolve. Parity with the full path's
+     * entry choice holds BY CONSTRUCTION (shared SQL, shared pairing, and
+     * YomitanEnrichment.mergeImportedTerms anchors on the first pack entry
+     * without reordering); cost is 2–3 indexed queries, which is what keeps
+     * FULL-depth annotation affordable on the live cycle.
+     */
+    suspend fun lookupReadingsOnly(word: String, reading: String? = null): DictionaryEntry? =
+        withContext(Dispatchers.IO) {
+            val database = ensureOpen() ?: return@withContext null
+            database.withRefcount {
+                var id: Long? = null
+                if (reading != null) {
+                    id = queryEntryIdsWithReading(database, word, reading).firstOrNull()
+                }
+                if (id == null) id = queryEntryIds(database, word).firstOrNull()
+                if (id == null) {
+                    for (candidate in Deinflector.candidates(word)) {
+                        id = queryEntryIds(database, candidate.text).firstOrNull()
+                        if (id != null) break
+                    }
+                }
+                val entryId = id ?: return@withRefcount null
+                val headwords = loadHeadwords(database, entryId.toString())
+                if (headwords.isEmpty()) return@withRefcount null
+                DictionaryEntry(
+                    slug = headwords.firstOrNull()?.written
+                        ?: headwords.firstOrNull()?.reading ?: entryId.toString(),
+                    packId = entryId,
+                    isCommon = null,
+                    tags = emptyList(),
+                    jlpt = emptyList(),
+                    headwords = headwords,
+                    senses = emptyList(),
+                )
+            }
+        }
+
+    private fun buildResponse(
+        db: SQLiteDatabase,
+        entryIds: List<Long>,
+        inflectionNote: String? = null
+    ): DictionaryResponse {
+        val entries = entryIds.mapNotNull { buildEntry(db, it, inflectionNote) }
+        return DictionaryResponse(entries = entries)
+    }
+
+    private fun buildEntry(db: SQLiteDatabase, id: Long, inflectionNote: String?): DictionaryEntry? {
+        val idStr = id.toString()
+
+        var isCommon = false
+        var freqScore = 0
+        db.rawQuery("SELECT is_common, freq_score FROM entry WHERE id=?", arrayOf(idStr)).use { c ->
+            if (c.moveToFirst()) {
+                isCommon  = c.getInt(0) == 1
+                freqScore = c.getInt(1)
+            }
+        }
+
+        val headwords = loadHeadwords(db, idStr)
         if (headwords.isEmpty()) return null
 
         // Tatoeba example sentences keyed by sense_position. The `example`
@@ -722,7 +734,9 @@ class DictionaryManager private constructor(private val context: Context) {
         if (senses.isEmpty()) return null
 
         return DictionaryEntry(
-            slug = kanjiForms.firstOrNull()?.text ?: readingForms.firstOrNull()?.text ?: idStr,
+            slug = headwords.firstOrNull()?.written
+                ?: headwords.firstOrNull()?.reading ?: idStr,
+            packId = id,
             isCommon = isCommon,
             tags = emptyList(),
             jlpt = emptyList(),   // JMdict doesn't reliably carry JLPT levels
@@ -758,7 +772,7 @@ class DictionaryManager private constructor(private val context: Context) {
          */
         private const val REGLOB_WINDOW = 8
 
-        private fun isLookupWorthy(token: String): Boolean {
+        internal fun isLookupWorthy(token: String): Boolean {
             if (token.isBlank()) return false
             if (token.all { it.code <= 0x007F }) return false
             if (token.length == 1 && token[0] in 'ぁ'..'ゖ') return false
@@ -855,6 +869,44 @@ class DictionaryManager private constructor(private val context: Context) {
         }
 
         /**
+         * One re-glob output span, token-native: [tokenStart]/[tokenCount]
+         * index the RAW analyzer stream, so consumers keep offset provenance
+         * (JaToken.begin/end) instead of re-finding surfaces by string.
+         * [reading] keeps [TokenWithReading]'s semantics — the LOOKUP HINT:
+         * stem reading for single-token spans, member concat for exact
+         * phrases, null for lemma variants — glue readings deliberately
+         * excluded; the annotator derives full-span concats from the raw
+         * tokens itself.
+         *
+         * Spans may OVERLAP: single-token glue folding can consume the
+         * opening particles of a phrase that then matches at its own start
+         * (言われる folds かも, then かもしれない matches at か). The overlap
+         * is load-bearing for the words list; SentenceAnnotator computes a
+         * disjoint display cover from these spans, phrase-priority.
+         */
+        internal data class ReglobSpan(
+            val tokenStart: Int,
+            val tokenCount: Int,
+            val surface: String,
+            val lookupForm: String,
+            val reading: String?,
+            val inflections: List<InflectionTag>,
+            val isPhrase: Boolean,
+        )
+
+        /** Legacy projection of [reglobSpans] — string output, no offsets.
+         *  Kept for the words-pipeline call sites and their tests; behavior
+         *  is byte-identical to the pre-span implementation. */
+        internal fun reglobTokens(
+            tokens: List<JaToken>,
+            candidates: List<PhraseCandidate>,
+            knownPhrases: Set<String>,
+            knownForms: Set<String>,
+        ): List<TokenWithReading> =
+            reglobSpans(tokens, candidates, knownPhrases, knownForms)
+                .map { TokenWithReading(it.surface, it.lookupForm, it.reading, it.inflections) }
+
+        /**
          * Greedy left-to-right re-glob matcher plus single-token fallback.
          * Pure: all dictionary knowledge arrives pre-resolved in [knownPhrases]
          * (phrase candidates that passed their membership gate) and
@@ -866,16 +918,16 @@ class DictionaryManager private constructor(private val context: Context) {
          * auxiliary/particle morphemes folded into a conjugating word's
          * surface span (e.g. ない after 使わ).
          */
-        internal fun reglobTokens(
+        internal fun reglobSpans(
             tokens: List<JaToken>,
             candidates: List<PhraseCandidate>,
             knownPhrases: Set<String>,
             knownForms: Set<String>,
-        ): List<TokenWithReading> {
+        ): List<ReglobSpan> {
             val byStart = candidates.groupBy { it.startIndex }.mapValues { (_, group) ->
                 group.sortedWith(compareByDescending<PhraseCandidate> { it.windowLen }.thenBy { it.isVariant })
             }
-            val result = mutableListOf<TokenWithReading>()
+            val result = mutableListOf<ReglobSpan>()
             var i = 0
             while (i < tokens.size) {
                 val match = byStart[i]?.firstOrNull { it.lookupForm in knownPhrases }
@@ -893,8 +945,27 @@ class DictionaryManager private constructor(private val context: Context) {
                     } else {
                         emptyList()
                     }
-                    result.add(TokenWithReading(
-                        match.surface, match.lookupForm, reading = null, inflections = inflections,
+                    // Phrase reading: hiragana concat of the window tokens'
+                    // readings — the tokenizer's evidence for WHICH homograph
+                    // entry this span is. lookup() narrows by it (彼+等 →
+                    // かれら selects the かれら entry instead of rank-first
+                    // あれら) and falls back to rank order when nothing
+                    // matches — which is exactly the sandhi case (一+泊 →
+                    // いちはく misses every entry; the いっぱく entry wins on
+                    // rank as before). Lemma variants stay null: the final
+                    // token's reading is its inflected surface's (なっ),
+                    // which can never match the dictionary form's entry
+                    // reading, so the hint would always miss.
+                    val phraseReading = if (match.isVariant) null else {
+                        val parts = tokens.subList(i, i + match.windowLen).map { it.reading }
+                        if (parts.any { it.isNullOrEmpty() }) null
+                        else Deinflector.katakanaToHiragana(parts.joinToString(""))
+                    }
+                    result.add(ReglobSpan(
+                        tokenStart = i, tokenCount = match.tokensConsumed,
+                        surface = match.surface, lookupForm = match.lookupForm,
+                        reading = phraseReading, inflections = inflections,
+                        isPhrase = true,
                     ))
                     i += match.tokensConsumed
                     continue
@@ -920,12 +991,21 @@ class DictionaryManager private constructor(private val context: Context) {
                             }
                         }
                         val reading = t.reading?.let { Deinflector.katakanaToHiragana(it) }
-                        result.add(TokenWithReading(
-                            surfaceSpan, lookupForm, reading,
+                        result.add(ReglobSpan(
+                            tokenStart = i, tokenCount = 1 + glue.size,
+                            surface = surfaceSpan, lookupForm = lookupForm,
+                            reading = reading,
                             inflections = JapaneseInflectionAnalyzer.analyze(t, glue),
+                            isPhrase = false,
                         ))
                     }
                 }
+                // NOTE: i advances by ONE even after glue folding — the folded
+                // tokens are revisited (they're non-content, so they emit
+                // nothing themselves) BUT a phrase candidate starting inside
+                // the folded glue still gets its chance to match (言われるかも
+                // then かもしれない). That overlap is intentional; see
+                // [ReglobSpan].
                 i++
             }
             return result

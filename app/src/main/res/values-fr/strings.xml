@@ -114,7 +114,6 @@
 
     <string name="onboarding_notif_row_status_sub">Un discret indicateur signalant que <xliff:g id="app_name" example="PlayTranslate">PlayTranslate</xliff:g> est actif</string>
 
-
     <string name="onboarding_a11y_hint">Recherchez <b><xliff:g id="app_name" example="PlayTranslate">PlayTranslate</xliff:g></b></string>
 
     <string name="onboarding_a11y_title">Superposition aux autres applis</string>
@@ -134,7 +133,6 @@
     <string name="onboarding_a11y_row_lookup_title">Rechercher des mots</string>
 
     <string name="onboarding_a11y_row_lookup_sub">Obtenez des définitions instantanées pour les mots à l\'écran</string>
-
 
     <string name="btn_grant_permission">Accorder l\'autorisation</string>
 
@@ -164,9 +162,10 @@
 
     <string name="word_detail_common">Courant</string>
 
+    <string name="card_words_in_sentence">Mots de la phrase</string>
+
     <string name="word_anki_in_decks"><xliff:g id="count" example="3">%1$d</xliff:g> paquets Anki</string>
     <string name="word_anki_deck_badge_cd">Déjà dans Anki : <xliff:g id="label" example="Core 2k">%1$s</xliff:g></string>
-
 
     <string name="word_detail_numbered_definition"><xliff:g id="number" example="1">%1$d</xliff:g>. <xliff:g id="definition" example="to eat">%2$s</xliff:g></string>
 
@@ -228,6 +227,8 @@
     <string name="lang_search_no_results">Aucun résultat</string>
 
     <string name="lang_section_suggested">Suggérées</string>
+
+    <string name="lang_pick_any">N\'importe quelle langue</string>
 
     <string name="lang_section_all">Toutes</string>
 
@@ -386,8 +387,6 @@
 
     <string name="capture_lifecycle_state_off">Désactivé</string>
 
-
-
     <string name="capture_lifecycle_on_subtitle">Capture d\'écran autorisée</string>
 
     <string name="capture_lifecycle_off_subtitle">Autoriser la capture d\'écran</string>
@@ -473,7 +472,6 @@
 
     <string name="anki_not_installed_get">Obtenir <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g></string>
 
-
     <string name="anki_permission_rationale_title">Autorisation <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> requise</string>
 
     <string name="anki_permission_rationale_message">Pour ajouter des cartes à <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>, <xliff:g id="app_name" example="PlayTranslate">PlayTranslate</xliff:g> a besoin de l\'autorisation d\'accéder à <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>.\n\nAppuyez sur Continuer pour accorder cette autorisation.</string>
@@ -486,7 +484,13 @@
 
     <string name="anki_added_no_audio">Ajouté à <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> (audio indisponible)</string>
 
-    <string name="anki_added_success">Ajouté à <xliff:g id="brand_anki" example="Anki">Anki</xliff:g></string>
+    <string name="anki_added_no_screenshot">Ajouté à <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> (capture d\'écran indisponible)</string>
+
+    <string name="anki_added_no_screenshot_or_audio">Ajouté à <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> (capture d\'écran et audio indisponibles)</string>
+
+    <string name="anki_added_sentence_success">Carte de phrase ajoutée à <xliff:g id="brand_anki" example="Anki">Anki</xliff:g></string>
+
+    <string name="anki_added_word_success">Carte de mot ajoutée à <xliff:g id="brand_anki" example="Anki">Anki</xliff:g></string>
 
     <string name="anki_adding_in_progress">Ajout à <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>…</string>
 
@@ -546,6 +550,8 @@
 
     <string name="audio_source_game_enable_hint">Enregistrement désactivé — activez-le afin de capturer l\'audio du jeu pour vos prochaines cartes</string>
 
+    <string name="game_audio_zoom_hint">Pincez pour afficher une portion plus ou moins longue de l\'audio</string>
+
     <string name="game_audio_trim_duration">Sélection : <xliff:g id="seconds" example="2.4">%1$s</xliff:g> s · Enregistrement : <xliff:g id="total_seconds" example="147">%2$s</xliff:g> s</string>
 
     <string name="anki_game_audio_cell_untrimmed">Rognage à l\'enregistrement de la carte</string>
@@ -576,7 +582,9 @@
 
     <string name="anki_field_mapping_unconfigured">Configurez les champs de ce type de carte avant l\'envoi</string>
 
-    <string name="anki_sort_field_empty">Associez une valeur au champ « <xliff:g id="sort_field_name" example="Expression">%1$s</xliff:g> » : <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> utilise ce champ pour identifier la note, et les valeurs vides provoquent des erreurs de rejet pour doublon lors de l\'envoi.</string>
+    <string name="anki_first_field_unmapped">Mappez « <xliff:g id="field_name" example="Key">%1$s</xliff:g> » pour qu\'<xliff:g id="brand_anki" example="Anki">Anki</xliff:g> identifie la note.</string>
+
+    <string name="anki_first_field_empty">Le champ « <xliff:g id="field_name" example="Key">%1$s</xliff:g> » est vide sur cette carte. <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> utilise le premier champ pour identifier la note : ce champ doit donc contenir une valeur sur chaque carte.</string>
 
     <string name="anki_models_unavailable">Impossible de joindre <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> pour récupérer les types de carte. Réessayez dans un instant.</string>
 
@@ -895,6 +903,8 @@
     <string name="bergamot_warmup_downloading_multi">Téléchargement du modèle hors ligne <xliff:g id="file_index" example="1">%1$d</xliff:g> sur <xliff:g id="file_count" example="2">%2$d</xliff:g>… <xliff:g id="bytes_so_far" example="12 MB">%3$s</xliff:g> / <xliff:g id="bytes_total" example="50 MB">%4$s</xliff:g></string>
     <string name="bergamot_pair_unsupported">Non pris en charge pour la paire de langues actuelle</string>
 
+    <string name="bergamot_device_unsupported">Non pris en charge sur cet appareil</string>
+
     <string name="offline_backend_downloaded_cd">Téléchargé</string>
     <string name="offline_backend_not_downloaded_cd">Non téléchargé</string>
     <string name="offline_backend_enabled_cd">Activé</string>
@@ -1057,7 +1067,6 @@
     <string name="llm_low_memory_title">Mémoire libre insuffisante</string>
 
     <string name="llm_low_memory_message"><xliff:g id="model_name" example="Qwen 2.5 1.5B">%1$s</xliff:g> a besoin d\'environ <xliff:g id="needed_memory" example="4 GB">%2$s</xliff:g> de mémoire libre pour fonctionner. Actuellement, seuls <xliff:g id="free_memory" example="1.2 GB">%3$s</xliff:g> sont libres.\n\nFermez d\'autres applications pour libérer de la mémoire, ou annulez si ce modèle ne convient pas à votre appareil.</string>
-
 
     <string name="llm_low_memory_start_anyway">Démarrer quand même</string>
 
@@ -1492,6 +1501,8 @@
     <string name="yomitan_no_space_message">L\'importation de ce dictionnaire nécessite environ <xliff:g id="needed" example="180 MB">%1$s</xliff:g> d\'espace libre, mais seuls <xliff:g id="available" example="42 MB">%2$s</xliff:g> sont disponibles. Libérez de l\'espace et réessayez.</string>
     <string name="yomitan_single_dict_title">N\'afficher les définitions que d\'un seul dictionnaire</string>
     <string name="yomitan_single_dict_subtitle">Les définitions proviennent du dictionnaire prioritaire ayant des résultats ; le dictionnaire intégré est la solution de secours finale</string>
+    <string name="yomitan_styling_title">Style du dictionnaire</string>
+    <string name="yomitan_styling_subtitle">Afficher les définitions avec la mise en page et le style propres à chaque dictionnaire. S\'applique aux dictionnaires importés à partir de maintenant ; désactivez cette option pour toujours utiliser du texte brut</string>
     <string name="yomitan_auto_update_label">Mise à jour automatique</string>
     <string name="yomitan_auto_update_subtitle">Télécharger et installer automatiquement les nouvelles versions de ce dictionnaire</string>
     <string name="yomitan_io_error_title">Échec de l\'importation</string>
@@ -1516,6 +1527,46 @@
     <string name="yomitan_alias_hint">Ajouter un surnom</string>
     <string name="yomitan_accent_default_cd">Par défaut (couleur du texte du sous-titre)</string>
 
+    <string name="yomitan_source_language_label">Langue source</string>
+
+    <string name="yomitan_check_updates_label">Rechercher des mises à jour</string>
+
+    <string name="yomitan_update_checking_title">Recherche de mises à jour</string>
+
+    <string name="yomitan_update_available_title">Mise à jour disponible</string>
+
+    <string name="yomitan_update_available_message"><xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> peut être mis à jour vers la version <xliff:g id="revision" example="2026.02.05">%2$s</xliff:g>.</string>
+
+    <string name="yomitan_update_confirm">Mettre à jour</string>
+
+    <string name="yomitan_update_repair_title">Nouveau téléchargement nécessaire</string>
+
+    <string name="yomitan_update_repair_message">Les données de <xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> doivent être téléchargées à nouveau pour fonctionner avec cette version de l\'application.</string>
+
+    <string name="yomitan_update_redownload_confirm">Télécharger à nouveau</string>
+
+    <string name="yomitan_update_none_title">À jour</string>
+
+    <string name="yomitan_update_none_message"><xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> est dans sa dernière version.</string>
+
+    <string name="yomitan_update_check_failed_title">Impossible de vérifier les mises à jour</string>
+
+    <string name="yomitan_update_check_failed_message">Impossible de joindre le serveur de mises à jour du dictionnaire. Vérifiez votre connexion et réessayez.</string>
+
+    <string name="yomitan_update_busy_title">Mise à jour impossible pour le moment</string>
+
+    <string name="yomitan_update_busy_message">Une session de traduction est en cours. Réessayez une fois qu\'elle sera terminée.</string>
+
+    <string name="yomitan_update_scan_active_message">Les mises à jour des dictionnaires sont déjà en cours de vérification en arrière-plan. Réessayez dans un instant.</string>
+
+    <string name="yomitan_update_skipped_title">Mise à jour non appliquée</string>
+
+    <string name="yomitan_update_skipped_message">La mise à jour a été téléchargée, mais elle ne correspond pas à ce dictionnaire : elle n\'a donc pas été installée.</string>
+
+    <string name="yomitan_update_done_title">Dictionnaire mis à jour</string>
+
+    <string name="yomitan_update_done_message"><xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> est maintenant à jour.</string>
+
     <string name="settings_header_tools">Outils</string>
     <string name="settings_cell_dictionary">Dictionnaire</string>
     <string name="settings_cell_history">Historique</string>
@@ -1538,6 +1589,10 @@
     <string name="history_capture_image_toggle_title">Enregistrer les images de capture</string>
 
     <string name="history_capture_image_toggle_subtitle">Conserve une photo de chaque capture par appareil photo ou d\'écran</string>
+
+    <string name="history_hide_translations_toggle_title">Masquer les traductions</string>
+
+    <string name="history_hide_translations_toggle_subtitle">N\'affiche que le texte capturé. Appuyez sur une ligne pour voir sa traduction.</string>
 
     <string name="history_live_session_title">Session en direct</string>
 
@@ -1647,7 +1702,6 @@
          SETTINGS — Text-to-Speech section
          ═══════════════════════════════════════════════════════════════ -->
 
-
     <string name="tts_voice_numbered">Voix <xliff:g id="voice_index" example="3">%1$d</xliff:g></string>
 
     <string name="tts_voice_region_numbered"><xliff:g id="region" example="China">%1$s</xliff:g> <xliff:g id="region_index" example="2">%2$d</xliff:g></string>
@@ -1657,7 +1711,6 @@
     <string name="tts_voice_default_subtitle">La voix par défaut du moteur</string>
 
     <string name="tts_voice_needs_download">Téléchargement requis</string>
-
 
     <string name="tts_no_engine_row_subtitle">Aucun moteur vocal disponible. Appuyez pour en ajouter un.</string>
 
@@ -1742,8 +1795,6 @@
     <string name="anki_deck_not_selected_subtitle">Non sélectionné</string>
 
 
-
-
     <!-- ═══════════════════════════════════════════════════════════════
          SETTINGS — Support section rows
          ═══════════════════════════════════════════════════════════════ -->
@@ -1774,6 +1825,7 @@
     <string name="settings_debug_log_pinhole">Journaliser les métriques pinhole du mode en direct</string>
     <string name="settings_debug_save_ocr_seed">Enregistrer les captures OCR comme échantillons</string>
     <string name="settings_debug_log_grouping">Journaliser les décisions de regroupement OCR</string>
+    <string name="settings_debug_angle_gate">Seuil classique d\'angle (10°)</string>
     <string name="settings_debug_log_trace">Enregistrer la trace de l\'historique de traduction</string>
     <string name="settings_debug_force_crash_title">Forcer un plantage</string>
 

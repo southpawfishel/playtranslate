@@ -317,6 +317,11 @@
     <!-- Badge label shown beside common dictionary entries. -->
     <string name="word_detail_common">Common</string>
 
+    <!-- Section header above the per-word breakdown on a sentence Anki
+         card's back. Baked into the card at send time (Anki templates
+         can't localize). Sentence case; the card CSS applies ALL CAPS. -->
+    <string name="card_words_in_sentence">Words in sentence</string>
+
     <!-- Part-of-speech labels shown with a word's definitions (the magnifier
          lens, the translation-result word cell, the word-detail sheet, and the
          lookup popup). Universal grammatical categories only; mapped from
@@ -598,6 +603,11 @@
     <!-- Section header for languages we recommend or have detected as
          relevant for the user. -->
     <string name="lang_section_suggested">Suggested</string>
+
+    <!-- "Any language" choice (no restriction): the pinned leading row of the
+         standalone language picker (pick mode), and the Source Language row's
+         value on the dictionary detail page while nothing is selected. -->
+    <string name="lang_pick_any">Any</string>
 
     <!-- Section header for the full alphabetical list of languages. -->
     <string name="lang_section_all">All</string>
@@ -1084,9 +1094,28 @@
          be attached. -->
     <string name="anki_added_no_audio">Added to <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> (audio unavailable)</string>
 
-    <!-- Success toast for one-tap card creation. Shown on the result
-         screen / word-detail sheet immediately after the card lands. -->
-    <string name="anki_added_success">Added to <xliff:g id="brand_anki" example="Anki">Anki</xliff:g></string>
+    <!-- Success toast for a card whose screenshot could not be handed to
+         AnkiDroid's media store, so the card's Picture field landed
+         empty. Shown only when the note type actually had a field to
+         hold the image. -->
+    <string name="anki_added_no_screenshot">Added to <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> (screenshot unavailable)</string>
+
+    <!-- Success toast for a card that lost BOTH its screenshot and its
+         audio. One message, because whatever breaks AnkiDroid's media
+         store usually breaks every upload in the same send, and naming
+         half the loss leaves the other half to be discovered in the
+         deck. -->
+    <string name="anki_added_no_screenshot_or_audio">Added to <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> (screenshot and audio unavailable)</string>
+
+    <!-- Success toast for one-tap card creation of a SENTENCE card.
+         One-tap routes by the remembered Sentence/Word default with no
+         UI showing it, so the toast names the card shape created. -->
+    <string name="anki_added_sentence_success">Sentence card added to <xliff:g id="brand_anki" example="Anki">Anki</xliff:g></string>
+
+    <!-- Success toast for one-tap card creation of a WORD card. Same
+         surface as anki_added_sentence_success — the toast is where the
+         silently-applied mode becomes visible. -->
+    <string name="anki_added_word_success">Word card added to <xliff:g id="brand_anki" example="Anki">Anki</xliff:g></string>
 
     <!-- Progress toast shown immediately on one-tap from the drag-lens
          flow (the lens dismisses on tap, so the user needs feedback
@@ -1192,6 +1221,10 @@
          enabling helps future cards, not the one being edited. -->
     <string name="audio_source_game_enable_hint">Not recording. Turn on to capture game audio for future cards</string>
 
+    <!-- Caption under the in-card trim waveform (small grey text, centered).
+         Pinch is the only gesture the cell offers with no visual affordance. -->
+    <string name="game_audio_zoom_hint">Pinch to show more or less audio</string>
+
     <!-- Selection readout: the sentence audio row's title in the card editor
          while game audio is selected (the source name itself is on the
          adjacent voice pill).
@@ -1251,12 +1284,21 @@
          any fields yet. -->
     <string name="anki_field_mapping_unconfigured">Configure fields for this card type before sending</string>
 
-    <!-- Error line shown when the user left the AnkiDroid "sort field"
-         (used for duplicate detection) empty.
+    <!-- Toast shown when the note type's FIRST field (which Anki
+         checksums for duplicate detection) has no mapping configured.
+         Kept short: Android 12+ clamps toasts to two lines. The
+         field-mapping dialog opens right after this toast.
          %1$s = the AnkiDroid field name (free-form, user-defined; we
          render it as-is including any quotes the user picked).
          The “ ” curly quotes are intentional typography. -->
-    <string name="anki_sort_field_empty">Map a value to “<xliff:g id="sort_field_name" example="Expression">%1$s</xliff:g>” — <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> uses this field to identify the note, and empty values cause duplicate-rejection errors on send.</string>
+    <string name="anki_first_field_unmapped">Map a value to “<xliff:g id="field_name" example="Key">%1$s</xliff:g>” so <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> can identify the note.</string>
+
+    <!-- Error alert shown when the note type's FIRST field is mapped
+         but its source produced no value for this card, or (for the
+         built-in PlayTranslate note types) the first field was renamed
+         in AnkiDroid. Shown in a full alert, so length is fine.
+         %1$s = the AnkiDroid field name, as above. -->
+    <string name="anki_first_field_empty">“<xliff:g id="field_name" example="Key">%1$s</xliff:g>” is empty on this card. <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> uses the first field to identify the note, so it needs a value on every card.</string>
 
     <!-- Error toast shown when the AnkiDroid AddApi can't be reached
          while loading card types. -->
@@ -1975,6 +2017,11 @@ It is optional: grammar matching already works without it.</string>
          switch, like the LLM hardware-unsupported lines) when Mozilla's model
          set has no path for the current source→target language pair. -->
     <string name="bergamot_pair_unsupported">Not supported for the current language pair</string>
+    <!-- Same inert reason line for the device-level gate: 32-bit, or arm64
+         running under a binary translator (x86 emulators — Houdini crashes the
+         native engine; see BinaryTranslation). Device-level, so it outranks the
+         per-pair line above. -->
+    <string name="bergamot_device_unsupported">Not supported on this device</string>
 
     <!-- contentDescription suffix tokens for the offline row. -->
     <string name="offline_backend_downloaded_cd">Downloaded</string>
@@ -3047,6 +3094,10 @@ It is optional: grammar matching already works without it.</string>
     <string name="yomitan_single_dict_title">Only show definitions from one dictionary</string>
     <!-- Subtitle of the single-dictionary toggle, explaining which dictionary wins. -->
     <string name="yomitan_single_dict_subtitle">Definitions come from the highest-priority dictionary with results; the built-in dictionary is the final fallback</string>
+    <!-- Title of the dictionary-styling toggle at the bottom of the Terms section. -->
+    <string name="yomitan_styling_title">Dictionary styling</string>
+    <!-- Subtitle of the dictionary-styling toggle; only affects dictionaries imported with structured content. -->
+    <string name="yomitan_styling_subtitle">Show definitions with each dictionary\'s own layout and styling. Applies to dictionaries imported from now on; turn off to always use plain text</string>
     <!-- Title of the per-dictionary auto-update toggle on the dictionary detail page (shown only for dictionaries that support updates). -->
     <string name="yomitan_auto_update_label">Auto-update</string>
     <!-- Subtitle of the auto-update toggle. -->
@@ -3093,6 +3144,46 @@ It is optional: grammar matching already works without it.</string>
     <string name="yomitan_alias_hint">Add a nickname</string>
     <!-- Content description for the leading swatch in the per-dictionary accent picker (the subtitle text color = default). -->
     <string name="yomitan_accent_default_cd">Default (subtitle text color)</string>
+    <!-- Title of the Source Language row in the Configure section of the dictionary detail page (shown only when the dictionary's index.json declares no source language, which makes it apply to every language), and the toolbar title of the picker page the row opens. Its value renders lang_pick_any while unset. -->
+    <string name="yomitan_source_language_label">Source Language</string>
+    <!-- Title of the Check for Updates action row on the dictionary detail page (shown only for dictionaries that support updates, alongside the auto-update toggle). -->
+    <string name="yomitan_check_updates_label">Check for updates</string>
+    <!-- Title of the progress popup while the dictionary's update server is queried. -->
+    <string name="yomitan_update_checking_title">Checking for Updates</string>
+    <!-- Title of the prompt shown when the manual check finds a newer version. -->
+    <string name="yomitan_update_available_title">Update Available</string>
+    <!-- Body of the update-available prompt. %1$s = dictionary name, %2$s = the new version/revision string from the update server. -->
+    <string name="yomitan_update_available_message"><xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> can be updated to version <xliff:g id="revision" example="2026.02.05">%2$s</xliff:g>.</string>
+    <!-- Confirm button of the update-available prompt. -->
+    <string name="yomitan_update_confirm">Update</string>
+    <!-- Title of the prompt shown when the dictionary's data was dropped by an app upgrade and needs a re-download. -->
+    <string name="yomitan_update_repair_title">Re-download Needed</string>
+    <!-- Body of the re-download prompt. %1$s = dictionary name. -->
+    <string name="yomitan_update_repair_message">The data of <xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> needs to be downloaded again to work with this version of the app.</string>
+    <!-- Confirm button of the re-download prompt. -->
+    <string name="yomitan_update_redownload_confirm">Re-download</string>
+    <!-- Title of the alert shown when the manual check finds no update. -->
+    <string name="yomitan_update_none_title">Up to Date</string>
+    <!-- Body of the no-update alert. %1$s = dictionary name. -->
+    <string name="yomitan_update_none_message"><xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> is on the latest version.</string>
+    <!-- Title of the alert shown when the dictionary's update server can't be reached. -->
+    <string name="yomitan_update_check_failed_title">Couldn\'t Check for Updates</string>
+    <!-- Body of the check-failure alert. -->
+    <string name="yomitan_update_check_failed_message">The dictionary\'s update server couldn\'t be reached. Check your connection and try again.</string>
+    <!-- Title of the alert shown when the update can't run right now (translation session active, or the background update check is already running). -->
+    <string name="yomitan_update_busy_title">Can\'t Update Right Now</string>
+    <!-- Body when an active translation session blocks the update's install step. -->
+    <string name="yomitan_update_busy_message">A translation session is in progress. Try again when it finishes.</string>
+    <!-- Body when the background update check is already running. -->
+    <string name="yomitan_update_scan_active_message">Dictionary updates are already being checked in the background. Try again in a moment.</string>
+    <!-- Title of the alert shown when a manual update downloaded fine but was deliberately not installed (e.g. the update server served a different dictionary). Distinct from the download-error alert so the user isn't told to check their connection. -->
+    <string name="yomitan_update_skipped_title">Update Not Applied</string>
+    <!-- Body of the not-applied alert. -->
+    <string name="yomitan_update_skipped_message">The update was downloaded but doesn\'t match this dictionary, so it wasn\'t installed.</string>
+    <!-- Title of the alert shown after a successful manual update. -->
+    <string name="yomitan_update_done_title">Dictionary Updated</string>
+    <!-- Body of the update-success alert. %1$s = dictionary name. -->
+    <string name="yomitan_update_done_message"><xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> is now up to date.</string>
 
     <!-- TOOLS — standalone utilities reachable from settings. -->
     <string name="settings_header_tools">Tools</string>
@@ -3139,6 +3230,13 @@ It is optional: grammar matching already works without it.</string>
     <string name="history_capture_image_toggle_title">Save capture images</string>
     <!-- Subtitle under the save-capture-images sub-toggle. -->
     <string name="history_capture_image_toggle_subtitle">Keep a photo of each camera or screen capture</string>
+    <!-- Toggle under the History master switch: leave the translation line off the
+         rows on the History list, for readers who want to test themselves before
+         seeing it. Display only, nothing stops being recorded. Default off. -->
+    <string name="history_hide_translations_toggle_title">Hide translations</string>
+    <!-- Subtitle under the hide-translations toggle. The second sentence is the
+         promise that nothing is lost: the translation is one tap away. -->
+    <string name="history_hide_translations_toggle_subtitle">Show only the captured text. Tap a row to see its translation.</string>
     <!-- Header title of a live-mode session's transcript card on the History screen. -->
     <string name="history_live_session_title">Live session</string>
     <!-- Line count in a live-session card's header meta on the History screen,
@@ -3510,6 +3608,11 @@ It is optional: grammar matching already works without it.</string>
     <string name="settings_debug_log_pinhole">Log live-mode pinhole metrics</string>
     <string name="settings_debug_save_ocr_seed">Save OCR captures as seeds</string>
     <string name="settings_debug_log_grouping">Log OCR grouping decisions</string>
+    <!-- Settings dialog, debug section: switch-row title. Rollback switch:
+         while ON, slanted-text detection uses the old 10-degree threshold
+         instead of the current 3-degree default, so light diagonals render
+         as straight text again. -->
+    <string name="settings_debug_angle_gate">Classic angle threshold (10°)</string>
     <!-- Toggle row title in Settings → Debug (debug builds only): records live-mode commits to a trace file for offline validation. -->
     <string name="settings_debug_log_trace">Record translation-log trace</string>
     <string name="settings_debug_force_crash_title">Force crash</string>

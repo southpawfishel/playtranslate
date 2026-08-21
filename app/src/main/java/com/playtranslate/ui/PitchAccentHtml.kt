@@ -5,8 +5,11 @@ import com.playtranslate.dictionary.pitch.Mora
 /**
  * Renders a kana reading with its pitch-accent contour as pure HTML/CSS — the
  * card-side counterpart to [PitchAccentSpan] / [drawPitchContour], which draw
- * the same NHK line notation on an Android Canvas. Used by PlayTranslate's own
- * (legacy) Anki card backs, whose `Back` field is a plain-HTML blob.
+ * the same NHK line notation on an Android Canvas. Bakes the per-word
+ * contours in the default Sentence model's WordsTable field; the word
+ * card's main contour is instead drawn at review time by
+ * [PtCardTemplates.PITCH_JS], which ports this exact markup (and
+ * shares [PITCH_CSS]) — keep the two in lockstep.
  *
  * No Android dependencies (only [htmlEscape] and the pure [Mora] helpers) so
  * the exact markup is unit-testable.
@@ -21,9 +24,14 @@ internal object PitchAccentHtml {
      */
     const val PITCH_CSS =
         ".pa{display:inline-block;padding-top:0.45em;}" +
-        ".pa-m{display:inline-block;}" +
+        ".pa-m{display:inline-block;position:relative;}" +
         ".pa-h{border-top:0.1em solid currentColor;}" +
-        ".pa-d{border-right:0.1em solid currentColor;}" +
+        // The drop is a short tick falling from the overline — a quarter
+        // of the mora height — not a full-height pipe fencing the kana
+        // apart. (PitchAccentSpan, the in-app renderer, still draws the
+        // full-height drop; aligning it is a pending follow-up.)
+        ".pa-d::after{content:'';position:absolute;top:0;right:0;width:0.1em;" +
+            "height:25%;background:currentColor;}" +
         ".pa-pos{font-size:0.75em;opacity:0.7;}"
 
     /**

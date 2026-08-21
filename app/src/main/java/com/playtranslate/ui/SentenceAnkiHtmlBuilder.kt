@@ -2,8 +2,8 @@ package com.playtranslate.ui
 
 import android.util.Log
 import com.playtranslate.dictionary.Deinflector
-import com.playtranslate.dictionary.JapaneseTokenizer
-import com.playtranslate.dictionary.SudachiJapaneseTokenizer
+import com.playtranslate.language.AnnotatedSpan
+import com.playtranslate.language.SentenceAnnotation
 import com.playtranslate.language.SourceLangId
 import com.playtranslate.model.FrequencyTag
 
@@ -39,210 +39,13 @@ object SentenceAnkiHtmlBuilder {
         /** Per-dictionary frequencies for this word, for the Anki frequency
          *  list/sort fields; empty when unknown. */
         val frequencies: List<FrequencyTag> = emptyList(),
+        /** Common-entry flag; drives the word cell's Common pill. Rides
+         *  [WordEnrichment] like [pitch]/[frequencies]. */
+        val isCommon: Boolean = false,
+        /** Structured senses (the lens's rows). When empty the cell falls back
+         *  to splitting [meaning] on newlines, today's rendering. */
+        val senses: List<SenseDisplay> = emptyList(),
     )
-
-    /**
-     * @param highlightedWords words to bold in the sentence (font-weight:800)
-     */
-    fun buildFrontHtml(
-        japanese: String, words: List<WordEntry>,
-        highlightedWords: Set<String> = emptySet(),
-        sourceLangId: SourceLangId = SourceLangId.JA
-    ): String {
-        val clean = japanese.replace(Regex("[\\n\\r]+"), " ").trim()
-        val wordMap = words.associate { it.word to it.reading }.toMutableMap()
-        val expanded = highlightedWords.toMutableSet()
-        // Add conjugated surface forms so they get direct-matched and bolded
-        for (entry in words) {
-            if (entry.surfaceForm.isNotEmpty() && entry.surfaceForm != entry.word
-                && entry.word in highlightedWords) {
-                wordMap.putIfAbsent(entry.surfaceForm, "")
-                expanded.add(entry.surfaceForm)
-            }
-        }
-        val annotated = annotateText(clean, wordMap, newlineAsBr = false, highlightedWords = expanded, sourceLangId = sourceLangId)
-        return buildString {
-            append("<style>")
-            append(".gl-front ruby{cursor:pointer;-webkit-tap-highlight-color:transparent;}")
-            append(".gl-front ruby rt{display:none;}")
-            append(".gl-tip{position:fixed;background:rgba(40,40,40,0.93);color:#fff;padding:6px 16px;border-radius:8px;font-size:20px;pointer-events:none;z-index:9999;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.45);}")
-            append(".gl-tip::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:6px solid transparent;border-top-color:rgba(40,40,40,0.93);}")
-            append("</style>")
-            append("<div class=\"gl-front\" style=\"text-align:center;font-size:1.5em;padding:20px;line-height:2.8em;\">$annotated</div>")
-            append("<script>(function(){")
-            append("var tip=null,activeR=null;")
-            append("function hide(){if(tip){tip.parentNode.removeChild(tip);tip=null;}activeR=null;}")
-            append("function showTip(r,e){")
-            append("e.stopPropagation();e.preventDefault();")
-            append("if(activeR===r){hide();return;}")
-            append("hide();")
-            append("var rt=r.querySelector('rt');if(!rt)return;")
-            append("var rect=r.getBoundingClientRect();")
-            append("tip=document.createElement('div');tip.className='gl-tip';")
-            append("tip.textContent=rt.textContent;")
-            append("tip.style.left=(rect.left+rect.width/2)+'px';")
-            append("tip.style.top=rect.top+'px';")
-            append("tip.style.transform='translate(-50%,calc(-100% - 8px))';")
-            append("document.body.appendChild(tip);")
-            append("activeR=r;")
-            append("}")
-            append("var hasHover=window.matchMedia('(hover:hover)').matches;")
-            append("document.querySelectorAll('.gl-front ruby').forEach(function(r){")
-            append("r.addEventListener('touchend',function(e){showTip(r,e);});")
-            append("r.addEventListener('click',function(e){showTip(r,e);});")
-            append("if(hasHover){")
-            append("r.addEventListener('mouseenter',function(e){activeR=null;showTip(r,e);});")
-            append("r.addEventListener('mouseleave',function(){hide();});")
-            append("}")
-            append("});")
-            append("document.addEventListener('touchend',function(e){if(activeR&&!activeR.contains(e.target))hide();});")
-            append("document.addEventListener('click',function(e){if(activeR&&!activeR.contains(e.target))hide();});")
-            append("})()</script>")
-        }
-    }
-
-    /**
-     * @param highlightedWords words that get sorted to top and styled with highlight background
-     * @param highlightColor CSS color for the highlighted word rows (e.g. "#E8C07A")
-     */
-    fun buildBackHtml(
-        japanese: String, english: String, words: List<WordEntry>,
-        imageFilename: String?, highlightedWords: Set<String> = emptySet(),
-        sourceLangId: SourceLangId = SourceLangId.JA,
-        audioFilename: String? = null,
-        wordAudioFilenames: Map<String, String> = emptyMap(),
-        audioCredit: String? = null,
-    ): String {
-        val wordMap = words.associate { it.word to it.reading }
-        val furigana = annotateText(japanese, wordMap, newlineAsBr = true, sourceLangId = sourceLangId)
-        val sorted = if (highlightedWords.isNotEmpty()) {
-            words.sortedByDescending { it.word in highlightedWords }
-        } else words
-        // Legacy back HTML wraps a <style> block that defines the gl-*
-        // classes. classStyler emits class refs that the surrounding
-        // <style> applies — no inline duplication.
-        val wordsHtml = buildWordsHtmlWith(sorted, highlightedWords, classStyler, wordAudioFilenames, renderPitch = true)
-        return buildString {
-            append("<style>")
-            append("body{visibility:hidden!important;white-space:normal!important;}")
-            append(".gl-front{display:none!important;}")
-            append("#answer{display:none!important;}")
-            append(".gl-back{visibility:visible!important;}")
-            append(PitchAccentHtml.PITCH_CSS)
-            append("</style>")
-            append("<div class=\"gl-back\">")
-            if (imageFilename != null) {
-                append("<div style=\"text-align:center;margin:12px 0;\">")
-                append("<img src=\"${htmlEscape(imageFilename)}\" style=\"max-width:100%;border-radius:6px;\">")
-                append("</div>")
-            }
-            // [sound:] near the top of the back, under the screenshot.
-            // Inside .gl-back so the replay button inherits the
-            // visible-back visibility (body is hidden!important above).
-            if (audioFilename != null) {
-                append("<div style=\"text-align:center;margin:8px 0;\">")
-                append("[sound:$audioFilename]")
-                append("</div>")
-            }
-            if (!audioCredit.isNullOrBlank()) {
-                append("<div style=\"text-align:center;font-size:0.7em;opacity:0.6;margin:0 4px 8px;\">")
-                append(htmlEscape(audioCredit).replace(Regex("[\\n\\r]+"), "<br>"))
-                append("</div>")
-            }
-            append("<div style=\"text-align:center;font-size:1.5em;margin:12px 4px;line-height:2.2em;\">$furigana</div>")
-            append("<div class=\"gl-secondary\" style=\"text-align:center;font-size:1.2em;margin:12px 4px;\">")
-            append(htmlEscape(english).replace(Regex("[\\n\\r]+"), "<br>"))
-            append("</div>")
-            if (wordsHtml.isNotEmpty()) {
-                append("<hr>")
-                append("<div style=\"text-align:left;margin-top:8px;\">$wordsHtml</div>")
-            }
-            append("</div>")
-        }
-    }
-
-    fun annotateText(
-        text: String, wordMap: Map<String, String>,
-        newlineAsBr: Boolean, highlightedWords: Set<String> = emptySet(),
-        sourceLangId: SourceLangId = SourceLangId.JA
-    ): String {
-        if (wordMap.isEmpty()) {
-            // Even with no annotations, the output flows into Anki card
-            // markup — characters from the source text must be escaped.
-            val sb = StringBuilder(text.length)
-            for (c in text) {
-                if (c == '\n') sb.append(if (newlineAsBr) "<br>" else " ")
-                else sb.appendEscaped(c)
-            }
-            return sb.toString()
-        }
-        val sortedWords = wordMap.entries
-            .filter { it.key.isNotEmpty() }
-            .sortedByDescending { it.key.length }
-        val useDeinflection = sourceLangId == SourceLangId.JA
-        val useRuby = sourceLangId == SourceLangId.JA || sourceLangId == SourceLangId.ZH || sourceLangId == SourceLangId.ZH_HANT
-        val sb = StringBuilder()
-        var i = 0
-        while (i < text.length) {
-            val c = text[i]
-            if (c == '\n') {
-                sb.append(if (newlineAsBr) "<br>" else " ")
-                i++
-                continue
-            }
-            val direct = sortedWords.firstOrNull { (word, _) -> text.startsWith(word, i) }
-            if (direct != null) {
-                val (w, r) = direct
-                val isBold = w in highlightedWords
-                if (isBold) sb.append("<span style=\"font-weight:800;\">")
-                val hasCjk = w.any { it in '\u4e00'..'\u9fff' || it in '\u3400'..'\u4dbf' }
-                if (useRuby && hasCjk && r.isNotEmpty() && r != w) {
-                    sb.append("<ruby>").append(htmlEscape(w))
-                        .append("<rt>").append(htmlEscape(r)).append("</rt></ruby>")
-                } else {
-                    sb.append(htmlEscape(w))
-                }
-                if (isBold) sb.append("</span>")
-                i += w.length
-                continue
-            }
-            // Deinflection fallback: only for Japanese (Kuromoji-based)
-            if (useDeinflection) {
-                val isCjk = c in '\u3000'..'\u9fff' || c in '\uf900'..'\ufaff'
-                if (isCjk) {
-                    val maxEnd = minOf(i + 12, text.length)
-                    var deinflected = false
-                    for (end in maxEnd downTo i + 1) {
-                        val sub = text.substring(i, end)
-                        val matchedEntry = Deinflector.candidates(sub)
-                            .asSequence()
-                            .mapNotNull { cand -> sortedWords.firstOrNull { it.key == cand.text } }
-                            .firstOrNull()
-                        if (matchedEntry != null) {
-                            val isBold = matchedEntry.key in highlightedWords
-                            val r = matchedEntry.value
-                            val subHasCjk = sub.any { it in '\u4e00'..'\u9fff' || it in '\u3400'..'\u4dbf' }
-                            if (isBold) sb.append("<span style=\"font-weight:800;\">")
-                            if (subHasCjk && r.isNotEmpty() && r != sub) {
-                                sb.append("<ruby>").append(htmlEscape(sub))
-                                    .append("<rt>").append(htmlEscape(r)).append("</rt></ruby>")
-                            } else {
-                                sb.append(htmlEscape(sub))
-                            }
-                            if (isBold) sb.append("</span>")
-                            i = end
-                            deinflected = true
-                            break
-                        }
-                    }
-                    if (deinflected) continue
-                }
-            }
-            sb.appendEscaped(c)
-            i++
-        }
-        return sb.toString()
-    }
 
     fun starsString(score: Int) = "\u2605".repeat(score)
 
@@ -296,148 +99,138 @@ object SentenceAnkiHtmlBuilder {
      * each bracket **isolated by `<wbr>` separators**. Plain text
      * passthrough for languages without a reading-annotation path.
      *
-     * The goal is to match the semantics of PT's existing furigana
-     * display (DictionaryManager.tokenizeForFurigana / FuriganaSpan
-     * in TranslationResultFragment): furigana floats above ONLY the
-     * kanji surface, never the okurigana. Tap \u805e in \u805e\u3044\u305f \u2192 see \u304d
-     * (not \u304d\u3044, not \u304d\u3044\u305f). The ZH path is analogous: pinyin
-     * floats above each hanzi, never above adjacent punctuation/Latin.
+     * RENDERER, not analyzer: every reading decision was made once, in the
+     * [annotation] (docs/sentence-annotation-refactor.md) — this function
+     * draws the annotation's spans and never re-derives readings or re-joins
+     * words to text by string matching. The furigana here is therefore the
+     * SAME furigana the result screens display and the same readings
+     * sentence TTS speaks.
      *
      * **Why `<wbr>` is the right separator.** Two downstream
      * consumers each need a boundary signal between bracket-words
-     * and the kana that follows, and they need it in formats that
-     * don't show up as visible whitespace in the rendered card:
+     * and the kana that follows, in formats that don't show up as
+     * visible whitespace:
      *
      *  1. **Anki's `{{furigana:}}` filter** regex
      *     ` ?([^ >]+?)\[(.+?)\]` reads everything before `[` (except
      *     space and `>`) as the ruby base. `<wbr>` works as an
      *     anchor because the trailing `>` in the tag is excluded
-     *     from the `[^ >]` character class \u2014 the regex can't span
-     *     across a `<wbr>` into the next bracket's base. So inserting
-     *     `<wbr>` between bracket-words gives each kanji/hanzi its
-     *     own correct ruby base without inserting a visible space.
-     *
+     *     from the `[^ >]` character class.
      *  2. **Migaku's `support.html` parser** treats everything from
-     *     a kanji bracket until the next whitespace as the "word",
-     *     and surfaces `reading + word_post` in its tap-popup.
-     *     `<wbr>` is a standard HTML word-break-opportunity element;
-     *     if Migaku's parser is DOM-aware it treats `<wbr>` as a
-     *     word boundary. (If Migaku uses a `\s` raw-text regex
-     *     instead, `<wbr>` is literal text and this won't fix
-     *     Migaku's popup \u2014 to be verified on the user's device.)
-     *
-     * `<wbr>` renders as zero-width in HTML, so the rendered card
-     * has natural CJK text with no visible inter-word spaces \u2014
-     * works cleanly on Lapis, JPMN, custom templates, and Migaku
-     * alike (assuming Migaku's DOM-awareness pans out).
+     *     a kanji bracket until the next whitespace as the "word";
+     *     a DOM-aware parser treats `<wbr>` as a word boundary.
      *
      * Examples:
-     *  - JA \u805e\u3044\u305f         \u2192 `\u805e[\u304d]<wbr>\u3044\u305f`
-     *  - JA \u53cb\u9054\u306b\u805e\u3044\u305f   \u2192 `\u53cb\u9054[\u3068\u3082\u3060\u3061]<wbr>\u306b<wbr>\u805e[\u304d]<wbr>\u3044\u305f`
-     *  - JA \u53d6\u308a\u51fa\u3059       \u2192 `\u53d6[\u3068]<wbr>\u308a<wbr>\u51fa[\u3060]<wbr>\u3059`
-     *  - ZH \u4eca\u5929\u5929\u6c14\u5f88\u597d \u2192 `\u4eca[j\u012bn]<wbr>\u5929[ti\u0101n]<wbr>\u5929[ti\u0101n]<wbr>\u6c14[q\u00ec]<wbr>\u5f88[h\u011bn]<wbr>\u597d[h\u01ceo]`
-     *  - ZH \u4f60\u597d\uff0c\u4e16\u754c\uff01 \u2192 `\u4f60[n\u01d0]<wbr>\u597d[h\u01ceo]<wbr>\uff0c<wbr>\u4e16[sh\u00ec]<wbr>\u754c[ji\u00e8]<wbr>\uff01`
+     *  - JA 聞いた         → `聞[き]<wbr>いた`
+     *  - JA 友達に聞いた   → `友達[ともだち]<wbr>に<wbr>聞[き]<wbr>いた`
+     *  - JA 一泊した       → `一泊[いっぱく]<wbr>した` (the annotator's
+     *    word-span override; per-token readings would give いち+はく)
+     *  - ZH 今天天气很好 → `今[jīn]<wbr>天[tiān]<wbr>天[tiān]<wbr>气[qì]<wbr>很[hěn]<wbr>好[hǎo]`
      *
-     * Languages without a reading-annotation path: plain text
-     * passthrough (newlines \u2192 `<br>`).
+     * Highlight (`<b>`) and word wrappers (`data-pt-w`) are span-keyed:
+     * a highlighted word is matched by its words-table key against each
+     * span's resolved word/lookup form (with a surface fallback for
+     * unresolved words), never by scanning the text — the interior-offset
+     * highlight class dies with the walk. A null/mismatched [annotation]
+     * (no analysis available, or the text was edited after annotation and
+     * the caller didn't re-annotate) degrades to the PLAIN sentence with
+     * `<b>` highlights — never-wrong beats sometimes-ruby.
      */
     fun buildSentenceFurigana(
         text: String,
         words: List<WordEntry> = emptyList(),
         highlightedWords: Set<String> = emptySet(),
         sourceLangId: SourceLangId = SourceLangId.JA,
-        // Injectable for unit tests; production uses the process-scoped Sudachi
-        // tokenizer (which needs a pack dict, unavailable in plain JVM tests).
-        tokenizer: JapaneseTokenizer = SudachiJapaneseTokenizer.Provider,
+        /** When true, wrap each dictionary word's span of the sentence in
+         *  `<span data-pt-w="…">` (plus `data-pt-kana`/`data-pt-pitch` when
+         *  the word has pitch data) so the PT sentence template's JS can
+         *  find words: the front tooltip draws the pitch contour, the back
+         *  tap scrolls to the word's cell in the words table. Default
+         *  false — the structured path's SentenceFurigana output must stay
+         *  byte-stable for third-party consumers. */
+        wrapWords: Boolean = false,
+        annotation: SentenceAnnotation? = null,
     ): String {
         val isJa = sourceLangId == SourceLangId.JA
         val isZh = sourceLangId == SourceLangId.ZH || sourceLangId == SourceLangId.ZH_HANT
         if (!isJa && !isZh) return plainBody(text)
+        val ann = annotation?.takeIf { it.text == text }
+            ?: return buildSentencePlain(text, words, highlightedWords)
         val targets = resolveHighlightTargets(words, highlightedWords)
-        // JA: anchor kanji-bearing Kuromoji tokens to their start
-        // offsets in the source text. We walk char-by-char below;
-        // this index tells us "at position i, expand the next N chars
-        // into a furigana bracket using the cached reading."
-        // Pure-kana tokens, whitespace, and punctuation are NOT
-        // indexed and just get copied through from the source. That
-        // keeps the builder source-text-canonical (matching
-        // buildSentencePlain) and removes the dependency on Kuromoji
-        // emitting whitespace as tokens — newlines turn into `<br>`
-        // because we see them directly in `text`, not because
-        // Kuromoji happened to surface them.
-        val kanjiTokenAt = if (isJa) indexKanjiTokensByStart(text, tokenizer) else emptyMap()
-        // ZH: no Kuromoji equivalent, and `words` carries no
-        // positional metadata. Greedy-longest-prefix match against
-        // the WordEntry list (whatever HanLP-segmented lookups
-        // happened to hit during display) gives us the same effect
-        // as the JA token index without needing sentence-time
-        // segmentation here. Hanzi that didn't get a dictionary hit
-        // pass through plain.
-        //
-        // Pipeline invariant we rely on: `words` for ZH is
-        // surface-unique with surface-deterministic readings. The
-        // Map-keyed cache in LastSentenceCache.lookupWords (Map keyed
-        // by displayWord) dedupes by surface, and
-        // ChineseDictionaryManager.lookup is surface-keyed and
-        // returns the primary CC-CEDICT reading without context. So
-        // every occurrence of a given surface in `text` necessarily
-        // resolves to the same reading — `firstOrNull` against a
-        // longest-first list is safe even though it has no offset
-        // knowledge. The day we add context-aware per-position
-        // reading resolution (heteronyms like 中 zhōng/zhòng) this
-        // walk needs to switch to an offset-indexed token list
-        // mirroring the JA path.
-        val zhWords = if (isZh) {
-            words.asSequence()
-                .filter { it.word.isNotEmpty() && it.reading.isNotEmpty() }
-                .sortedByDescending { it.word.length }
-                .toList()
-        } else emptyList()
         val sb = StringBuilder()
-        var i = 0
-        // Inclusive char offset where the active <b> span should close;
-        // -1 when we're not inside a bold span. Targets are matched at
-        // their start positions only; we leave the closing tag on the
-        // step whose post-emit cursor reaches or passes the target's
-        // end. Surface forms in `words` come from Kuromoji-aligned
-        // lookups so off-boundary targets shouldn't happen in practice.
-        var boldCloseAt = -1
-        while (i < text.length) {
-            if (boldCloseAt < 0) {
-                val hit = targets.firstOrNull { text.startsWith(it, i) }
-                if (hit != null) {
-                    sb.append("<b>")
-                    boldCloseAt = i + hit.length
+        for (span in ann.spans) {
+            if (span.start < 0) continue // offsetless (ZH unanchored) — words-only span
+            val entry = wordEntryFor(span, words)
+            val highlighted =
+                (entry != null && entry.word in highlightedWords) || span.surface in targets
+            if (highlighted) sb.append("<b>")
+            val kana = entry?.let { e ->
+                when {
+                    e.reading.isNotEmpty() -> e.reading
+                    e.word.all(Deinflector::isKana) -> e.word
+                    else -> ""
                 }
+            }.orEmpty()
+            val wrap = wrapWords && entry != null
+            if (wrap) {
+                sb.append("<span data-pt-w=\"").append(htmlEscape(entry!!.word)).append("\"")
+                if (entry.pitch.isNotEmpty() && kana.isNotEmpty()) {
+                    sb.append(" data-pt-kana=\"").append(htmlEscape(kana))
+                        .append("\" data-pt-pitch=\"")
+                        .append(entry.pitch.joinToString(",")).append("\"")
+                }
+                sb.append(">")
             }
-            val advanced = if (isJa) {
-                val token = kanjiTokenAt[i]
-                if (token != null) {
-                    emitFuriganaParts(sb, token.surface, token.reading!!)
-                    i += token.surface.length
-                    true
-                } else false
-            } else {
-                val match = zhWords.firstOrNull { text.startsWith(it.word, i) }
-                if (match != null) {
-                    emitPinyinParts(sb, match.word, match.reading)
-                    i += match.word.length
-                    true
-                } else false
+            when {
+                isZh && entry != null && entry.reading.isNotEmpty() ->
+                    emitPinyinParts(sb, span.surface, entry.reading)
+                isZh -> appendPlain(sb, span.surface)
+                else -> emitReadingParts(sb, span.furigana)
             }
-            if (!advanced) {
-                i = appendOneCharOrBr(sb, text, i)
-            }
-            if (boldCloseAt in 0..i) {
-                sb.append("</b>")
-                boldCloseAt = -1
-            }
+            if (wrap) sb.append("</span>")
+            if (highlighted) sb.append("</b>")
         }
-        if (boldCloseAt >= 0) sb.append("</b>")
-        val out = stripBoundarySeparators(sb.toString())
+        // Word wrappers enclose the bracket runs, so boundary `<wbr>`s that
+        // the string-edge strip used to catch now sit just inside the span
+        // tags — equally workless, stripped the same way.
+        val out = SPAN_OPEN_WBR.replace(stripBoundarySeparators(sb.toString()), "$1")
+            .replace("$WBR</span>", "</span>")
         Log.d(TAG, "buildSentenceFurigana: in='$text' out='$out'")
         return out
     }
+
+    /** The words-table entry a span renders with: matched by the span's
+     *  resolved word / lookup form first, surface as the fallback for
+     *  entries whose lemma differs (inflected surfaceForm rows). This is a
+     *  join WITHIN one annotation payload — word-keyed, per the refactor's
+     *  edit-path rule — not a text scan. */
+    private fun wordEntryFor(span: AnnotatedSpan, words: List<WordEntry>): WordEntry? {
+        if (words.isEmpty()) return null
+        return words.firstOrNull { e ->
+            (span.word != null && e.word == span.word) ||
+                (span.lookupForm != null && e.word == span.lookupForm)
+        } ?: words.firstOrNull { e ->
+            e.surfaceForm.ifEmpty { e.word } == span.surface
+        }
+    }
+
+    /** JA bracket emission from the annotation's ruby parts: reading parts
+     *  become `<wbr>base[reading]<wbr>` brackets, write-through parts stay
+     *  plain (newlines → `<br>`). */
+    private fun emitReadingParts(sb: StringBuilder, parts: List<com.playtranslate.language.ReadingPart>) {
+        for (p in parts) {
+            val r = p.reading
+            if (r != null) {
+                sb.append(WBR).append(htmlEscape(p.text))
+                    .append('[').append(htmlEscape(r)).append(']').append(WBR)
+            } else {
+                appendPlain(sb, p.text)
+            }
+        }
+    }
+
+    /** A `<wbr>` immediately inside a word wrapper's opening tag. */
+    private val SPAN_OPEN_WBR = Regex("(<span[^>]*>)<wbr>")
 
     /**
      * Appends one character of [text] starting at [i] to [sb],
@@ -456,53 +249,9 @@ object SentenceAnkiHtmlBuilder {
         return i + 1
     }
 
-    /**
-     * Anchors each kanji-bearing Kuromoji token to its start offset in
-     * the source text. Greedy left-to-right via `indexOf`, advancing
-     * the scan past each match so duplicate surfaces (e.g. two の's)
-     * are claimed in tokenization order. Tokens whose surface doesn't
-     * appear in source — which can happen if Kuromoji normalises
-     * characters — are skipped silently; we'd rather drop the bracket
-     * than emit it at the wrong position.
-     */
-    /** Minimal kanji-bearing token: surface + hiragana reading, keyed by start offset. */
-    private data class KanjiToken(val surface: String, val reading: String?)
-
-    private fun indexKanjiTokensByStart(text: String, tokenizer: JapaneseTokenizer): Map<Int, KanjiToken> {
-        val out = mutableMapOf<Int, KanjiToken>()
-        for (m in tokenizer.analyze(text)) {
-            val reading = m.reading?.let { Deinflector.katakanaToHiragana(it) }
-            val hasKanji = m.surface.any(Deinflector::isKanji)
-            if (hasKanji && !reading.isNullOrEmpty()) {
-                // begin is the original-text offset (tokens tile the input), so it
-                // aligns with the consumer's character scan position.
-                out[m.begin] = KanjiToken(m.surface, reading)
-            }
-        }
-        return out
-    }
 
     /**
-     * Emits one `<wbr>kanji[reading]<wbr>` bracket per per-kanji
-     * splitFurigana part, with okurigana / internal kana written
-     * through as plain text. Used by the sentence builder; the expression
-     * builder forks [buildJaExpressionFurigana] (native leading-space
-     * separator) so `{{kana:…}}` stays `<wbr>`-free for Lapis's pitch.
-     */
-    private fun emitFuriganaParts(sb: StringBuilder, surface: String, reading: String) {
-        for (part in Deinflector.splitFurigana(surface, reading)) {
-            val r = part.reading
-            if (r != null) {
-                sb.append(WBR).append(htmlEscape(part.text))
-                    .append('[').append(htmlEscape(r)).append(']').append(WBR)
-            } else {
-                appendPlain(sb, part.text)
-            }
-        }
-    }
-
-    /**
-     * Chinese counterpart of [emitFuriganaParts]: emits per-hanzi
+     * Chinese counterpart of [emitReadingParts]: emits per-hanzi
      * `<wbr>{c}[{syllable}]<wbr>` brackets when the reading's
      * whitespace-separated syllable count matches the word's hanzi
      * count. Non-hanzi chars (punctuation, embedded Latin) pass through
@@ -692,43 +441,91 @@ object SentenceAnkiHtmlBuilder {
     }
 
     /**
-     * Builds the per-word HTML table used at the bottom of the legacy
-     * v004 back-side AND in the structured-path WORDS_TABLE output. The
-     * [styler] callback decides whether each element carries a `class=""`
-     * (legacy path, with the `<style>` block in the surrounding card
-     * supplying CSS) or an inline `style=""` (structured path, no
-     * surrounding CSS available). `internal` so [AnkiCardOutputBuilder]
-     * can pass [inlineStyler] for the structured path.
+     * Builds the per-word HTML table carried in the default Sentence
+     * model's WordsTable field AND in the structured-path WORDS_TABLE
+     * output. The [styler] callback decides whether each element
+     * carries a `class=""` (default path — the model CSS supplies the
+     * gl-* rules) or an inline `style=""` (structured path, no CSS
+     * available). `internal` so [AnkiCardOutputBuilder] and
+     * [PtNoteBuilder] can pass their stylers.
+     *
+     * Each word renders as a cell that ports [WordDefinitionsView.bind]
+     * to HTML, so the card and the magnifying lens read alike:
+     * head row (word · reading/pitch · audio) → meta row (Common pill ·
+     * ★ run · frequency chips) → senses with a POS header only when the
+     * POS changes from the previous sense. Target words get the
+     * `.gl-w-target` panel surface, context words the bare hairline
+     * `.gl-w` row — no accent fill; the accent underline in the
+     * sentence body is what marks targets. ALL senses render — the
+     * card is archival, and nothing in the app knows which sense is
+     * the right one, so none may be dropped. When [WordEntry.senses]
+     * is empty, falls back to the flattened meaning lines (which carry
+     * their own baked numbering).
      */
     internal fun buildWordsHtmlWith(
         words: List<WordEntry>,
         highlightedWords: Set<String>,
         styler: HtmlStyler,
         /** Map of word → Anki media filename for per-target-word audio.
-         *  When present, a `[sound:…]` tag is appended next to the word's
-         *  surface so Anki renders an inline play button. Words absent
-         *  from this map get no audio tag. */
+         *  When present, a `[sound:…]` tag is emitted in a `.pt-audio`
+         *  span in the head row so Anki renders an inline play button.
+         *  Words absent from this map get no audio tag. */
         wordAudioFilenames: Map<String, String> = emptyMap(),
         /** When true, render each word's reading with its pitch-accent contour
          *  (the legacy PT card back). Default false so the structured
          *  WORDS_TABLE path — which ships no pitch CSS and already gets pitch
          *  via the PitchPosition/PAOverride fields — emits no `pa-*` markup. */
         renderPitch: Boolean = false,
+        /** Localized Common-pill label. Production callers pass
+         *  R.string.word_detail_common; the default keeps plain JVM tests
+         *  context-free. */
+        commonLabel: String = "Common",
+        /** POS localizer for non-imported senses (imported headers render
+         *  verbatim, matching the lens). Production passes
+         *  Context::localizePos (list overload). */
+        localizePos: (List<String>) -> String = { it.joinToString(" · ") },
+        /** Misc register-tag renderer; null = emit nothing. Production
+         *  passes Context::renderMiscText (the render-side authority) —
+         *  the default drops misc, acceptable only in tests. */
+        renderMisc: (List<String>) -> String? = { null },
+        /** [SenseDisplay.scRowid] → structured glossary JSON, prefetched by
+         *  the send pipeline. Senses with an entry render as real structure
+         *  (`.gl-sc`, GLOSSARY_CSS on the v005 model); everything else
+         *  keeps the flat row. Empty = today's rendering throughout. */
+        structuredGlossaries: Map<Long, String> = emptyMap(),
+        /** dictId -> raw styles.css. Dictionaries whose structured senses
+         *  actually render get their CSS scoped
+         *  ([AnkiCardCss.scopeFor]) and inlined as a <style> block ahead
+         *  of the table — the Yomitan-standard card shape. */
+        dictStyles: Map<String, String> = emptyMap(),
     ): String {
         if (words.isEmpty()) return ""
         val sb = StringBuilder()
+        val usedDictIds = mutableSetOf<String>()
+        var prevWasTarget = false
         words.forEach { entry ->
-            val isHighlighted = entry.word in highlightedWords
-            val safeWord = htmlEscape(entry.word)
-            val audioTag = wordAudioFilenames[entry.word]
-                ?.let { " [sound:$it]" } ?: ""
-            if (isHighlighted) {
-                sb.append("<div ${styler("gl-hl-bg", "margin-bottom:14px;border-radius:6px;padding:8px 10px;")}>")
-                sb.append("<div ${styler("gl-hl", "")}><b>").append(safeWord).append("</b>").append(audioTag).append("</div>")
-            } else {
-                sb.append("<div ${styler(null, "margin-bottom:14px;")}>")
-                sb.append("<div><b>").append(safeWord).append("</b>").append(audioTag).append("</div>")
-            }
+            val isTarget = entry.word in highlightedWords
+            // Target cells run bigger than context cells (title 23px vs
+            // 20px, definitions 18px vs 17px at the 20px deck base). The
+            // bumps ride inline per element because target/context share
+            // classes and the structured path has no descendant selectors.
+            // (An accent-coloured target headword was tried and rejected
+            // on device — keep it text-coloured.)
+            val titleSize = if (isTarget) "font-size:1.15em;" else ""
+            val defSize = if (isTarget) "font-size:0.9em;" else ""
+            // The first context row after the target block drops its
+            // hairline — the cells' surfaces already separate the groups.
+            val cellExtra = if (!isTarget && prevWasTarget) "border-top:0;" else ""
+            // data-pt-w keys the cell to the sentence body's word wrappers
+            // so the back's tap-to-scroll can find it. Inert everywhere else.
+            sb.append("<div data-pt-w=\"").append(htmlEscape(entry.word)).append("\" ")
+                .append(styler(if (isTarget) "gl-w-target" else "gl-w", cellExtra)).append(">")
+            prevWasTarget = isTarget
+
+            // Head row: word, reading (flex remainder), audio circle.
+            sb.append("<div ${styler("gl-w-head", "")}>")
+            sb.append("<span ${styler("gl-w-word", titleSize)}>")
+                .append(htmlEscape(entry.word)).append("</span>")
             // Kana for the pitch contour: the reading, or (kana-only entries)
             // the all-kana word — mirrors the word card / WordResultCell. The
             // kana-only branch is gated on renderPitch so the structured
@@ -740,33 +537,109 @@ object SentenceAnkiHtmlBuilder {
                     entry.word.isNotEmpty() && entry.word.all(Deinflector::isKana) -> entry.word
                 else -> ""
             }
-            if (pitchKana.isNotEmpty() || entry.freqScore > 0) {
-                sb.append("<div ${styler(null, "font-size:0.85em;")}>")
-                if (pitchKana.isNotEmpty()) {
-                    sb.append("<span ${styler("gl-hint", "")}>")
-                    // Pitch contour (legacy back only); the diagram contains the
-                    // kana, so it replaces the plain reading.
-                    val pitchHtml = if (renderPitch) {
-                        PitchAccentHtml.pitchAccentHtml(pitchKana, entry.pitch)
-                    } else ""
-                    if (pitchHtml.isNotEmpty()) sb.append(pitchHtml)
-                    else sb.append(htmlEscape(entry.reading))
-                    sb.append("</span>")
+            // The reading span renders even when empty — it carries the
+            // flex:1 that pushes the audio circle to the cell's right edge.
+            sb.append("<span ${styler("gl-w-read gl-hint", "")}>")
+            if (pitchKana.isNotEmpty()) {
+                // Pitch contour (default-model back only); the diagram
+                // contains the kana, so it replaces the plain reading.
+                val pitchHtml = if (renderPitch) {
+                    PitchAccentHtml.pitchAccentHtml(pitchKana, entry.pitch)
+                } else ""
+                if (pitchHtml.isNotEmpty()) sb.append(pitchHtml)
+                else sb.append(htmlEscape(entry.reading))
+            }
+            sb.append("</span>")
+            wordAudioFilenames[entry.word]?.let {
+                sb.append("<span ${styler("pt-audio", "")}>[sound:$it]</span>")
+            }
+            sb.append("</div>")
+
+            // Meta row: Common pill, ★ run, one chip per frequency dict.
+            if (entry.isCommon || entry.freqScore > 0 || entry.frequencies.isNotEmpty()) {
+                sb.append("<div ${styler("gl-meta", "")}>")
+                if (entry.isCommon) {
+                    sb.append("<span ${styler("gl-pill gl-secondary", "")}>")
+                        .append(htmlEscape(commonLabel)).append("</span>")
                 }
                 if (entry.freqScore > 0) {
                     // starsString emits only the ★ glyph repeated, so it's
                     // HTML-safe by construction.
-                    sb.append(" <span ${styler(null, "color:#606060;")}>${starsString(entry.freqScore)}</span>")
+                    sb.append("<span ${styler("gl-stars gl-secondary", "")}>")
+                        .append(starsString(entry.freqScore)).append("</span>")
+                }
+                entry.frequencies.forEach { tag ->
+                    sb.append("<span ${styler("gl-chip gl-secondary", "")}>")
+                        .append(htmlEscape("${tag.source}: ${tag.display}")).append("</span>")
                 }
                 sb.append("</div>")
             }
-            val extra = if (isHighlighted) "margin-left:10px;font-weight:bold;" else "margin-left:10px;"
-            entry.meaning.split("\n").filter { it.isNotBlank() }.forEach { line ->
-                sb.append("<div ${styler("gl-secondary", extra)}>")
-                    .append(htmlEscape(line)).append("</div>")
+
+            // Senses: numbered rows, POS header only on change (the lens's
+            // rule — WordDefinitionsView keeps the same previousPos state).
+            // Caps were rejected by design review: every sense renders.
+            if (entry.senses.isNotEmpty()) {
+                var previousPos: List<String>? = null
+                entry.senses.forEachIndexed { i, sense ->
+                    if (sense.pos.isNotEmpty() && sense.pos != previousPos) {
+                        // Imported headers are display text (dictionary name ·
+                        // tags), never localized; caps come from the CSS
+                        // text-transform, not Kotlin.
+                        val label =
+                            if (sense.imported) sense.pos.joinToString(" · ")
+                            else localizePos(sense.pos)
+                        sb.append("<div ${styler("gl-pos-h gl-secondary", "")}>")
+                            .append(htmlEscape(label)).append("</div>")
+                        previousPos = sense.pos
+                    }
+                    val structuredHtml = sense.scRowid
+                        ?.let { structuredGlossaries[it] }
+                        ?.let {
+                            YomitanContentHtml.glossaryHtml(
+                                it, sense.dictId.orEmpty(), includeImages = false,
+                            )
+                        }
+                    sb.append("<div ${styler("gl-def", "")}>")
+                        .append("<span ${styler("gl-num gl-hint", defSize)}>")
+                        .append(i + 1).append(".</span>")
+                    if (structuredHtml != null) {
+                        // Structured glossary (the word card's shape) in the
+                        // sense body slot; block-level, so it sits beside
+                        // the number like the flat span does.
+                        sense.dictId?.let { usedDictIds.add(it) }
+                        sb.append("<div ${styler("gl-sc", "display:inline-block;vertical-align:top;")} data-dictionary=\"")
+                            .append(htmlEscape(sense.dictId.orEmpty()))
+                            .append("\">")
+                            .append(structuredHtml)
+                            .append("</div>")
+                    } else {
+                        sb.append("<span ${styler("gl-dtext", defSize)}>")
+                            // Imported flattened text carries real newlines
+                            // (sense groups, note lines); without <br> they
+                            // collapse to spaces in HTML and the definition
+                            // reads as one mashed run-on.
+                            .append(htmlEscape(sense.definition).replace("\n", "<br>"))
+                            .append("</span>")
+                    }
+                    sb.append("</div>")
+                    renderMisc(sense.misc)?.let { misc ->
+                        sb.append("<div ${styler("gl-misc gl-hint", "margin-left:25px;")}>")
+                            .append(htmlEscape(misc)).append("</div>")
+                    }
+                }
+            } else {
+                // No structured senses (no dictionary entry, or a pre-senses
+                // producer): today's flat meaning lines, already numbered.
+                entry.meaning.split("\n").filter { it.isNotBlank() }.forEach { line ->
+                    sb.append("<div ${styler("gl-dtext gl-secondary", defSize + "margin-top:6px;")}>")
+                        .append(htmlEscape(line)).append("</div>")
+                }
             }
             sb.append("</div>")
         }
-        return sb.toString()
+        // Tier 2: dictionaries whose structured senses actually rendered
+        // carry their own styles.css, scoped per dictionary and inlined
+        // ahead of the table — the Yomitan-standard card shape.
+        return AnkiCardCss.styleBlocks(usedDictIds, dictStyles) + sb.toString()
     }
 }

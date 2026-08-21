@@ -304,3 +304,217 @@ word order and a tight prefix are both safe.
 ### Verdict
 
 **PASS.** One ⚠️ found and fixed, no ❌.
+
+## Delta review 2026-08-04 (8 keys: one-tap card toasts, first-field guard, hide-translations toggle, waveform zoom hint)
+
+Scope: the eight keys added since the 2026-07-25 sync — `card_words_in_sentence`,
+`anki_added_sentence_success`, `anki_added_word_success`, `game_audio_zoom_hint`,
+`anki_first_field_unmapped`, `anki_first_field_empty`,
+`history_hide_translations_toggle_title`, `history_hide_translations_toggle_subtitle`.
+Reviewed independently of the translator, against `values/strings.xml` and its
+per-string comments, plus the surrounding Turkish for terminology and register.
+
+Mechanical layer verified programmatically over the eight keys: each name present
+exactly once and matching EN; placeholder multisets identical (`%1$s` in the two
+first-field strings, none elsewhere); every `<xliff:g>` span byte-identical to EN
+including `id` and `example` (`brand_anki`/`Anki`, `field_name`/`Key`); `<b>`, `\n`,
+`\{ \}`, `&lt;/&gt;/&amp;` counts match; the “ ” pairs in both first-field strings
+preserved 1:1; every apostrophe escaped (`Anki\'ye` ×2, `Anki\'nin`) with no raw `'`
+or `"` outside markup; brand name untranslated and untouched inside its span.
+**No 🛑 build-breaking issues.**
+
+### Findings (delta)
+
+| name | severity | current | suggested | note |
+|---|---|---|---|---|
+| `game_audio_zoom_hint` | ⚠️ | "Daha fazla veya daha az ses görmek için iki parmağınızla sıkıştırın" | "Daha fazla veya daha az ses görmek için parmaklarınızı yaklaştırıp uzaklaştırın" | **sıkıştır-** is not how Android speaks about pinch in Turkish (Google's TR describes the finger movement — *parmaklarınızı yaklaştırın / uzaklaştırın* — rather than naming the gesture), and it re-opens the misreading the translator worked to close: **ses sıkıştırma** is the standard Turkish term for *audio compression*, so a caption that already contains «ses» and ends in «sıkıştırın» offers "compress the audio" as a live parse. The suggestion also restores EN's two-way gesture ("more **or less**"), which a bare *sıkıştırın* (squeeze inward) drops. Length 79 vs 67 — still inside the shipped band for this caption (ru 68, de 82). |
+| `anki_first_field_unmapped` | 💬 | "Anki\'nin notu tanımlayabilmesi için “%1$s” alanına bir değer eşleyin." | "Anki\'nin notu tanıması için “%1$s” alanına bir değer eşleyin." | This is the one string in the delta with a hard render budget: it is a `Toast.LENGTH_LONG` (`AnkiSendDispatch.kt:218`) and Android 12+ clamps toasts to two lines, which is why EN is deliberately terse. With the `example` value it is 68 chars — the longest of all twelve locales (pt-BR 66, es 64, de 62, EN 51) — and `%1$s` is a user-defined field name that can be far longer than "Key". Dropping the ability suffix (`tanıması` for `tanımlayabilmesi`) buys 8 chars with no loss of meaning. Optional: the current text is only 2 chars over pt-BR, which shipped. |
+| `anki_first_field_empty` | 💬 | "…Anki, notu tanımlamak için ilk alanı kullanır; bu nedenle **bu alanın** her kartta bir değeri olmalıdır." | "…Anki, notu tanımlamak için ilk alanı kullanır; bu nedenle her kartta bir değeri olmalıdır." | The sentence already opens with «Bu kartta»; «bu nedenle bu alanın» stacks two more demonstratives into one clause. Dropping «bu alanın» leaves `değeri` bound to «ilk alanı» — the only candidate antecedent — so nothing becomes ambiguous, and the alert reads less legalistic. Pure polish; the current text is correct. |
+
+### Clean areas (delta) — checked, no findings
+
+**`card_words_in_sentence` — the dotted-i claim holds, character by character.**
+"Cümlede geçen sözcükler" is `C ü m l e d e / g e ç e n / s ö z c ü k l e r`: no `i`,
+no `ı`, and the three non-ASCII letters it does carry (ü, ç, ö) case identically under
+Turkish and locale-blind rules, so the CSS produces **CÜMLEDE GEÇEN SÖZCÜKLER** either
+way. The hazard is real, not theoretical: the header is emitted into
+`<div class="gl-section">` (`PtNoteBuilder.kt:138`) and both stylers give that class
+`text-transform:uppercase` (`PtCardTemplates.kt:132`, `AnkiHtmlStylers.kt:164`), with
+no Kotlin-side uppercasing anywhere (asserted in `SentenceAnkiHtmlBuilderTest.kt:683`).
+The obvious sibling-shaped rendering — *Cümledeki sözcükler*, patterned on
+`anki_group_words_count` "Karttaki sözcükler" — would have come out **CÜMLEDEKI**, so
+the departure from the `-deki` pattern is the correct call, not drift. It also costs
+nothing in naturalness: *cümlede geçen* is ordinary Turkish for "occurring in the
+sentence" and reads better as a card header than the flat locative would. Worth noting
+that `anki_group_words_count` is an in-app Compose label, not card HTML, so it is under
+no such constraint and the two strings are free to diverge.
+
+**One-tap toasts.** `anki_added_sentence_success` / `anki_added_word_success` keep the
+committed toast frame from `anki_added_no_audio` (`Anki\'ye eklendi`) and simply front
+the card shape, exactly as EN does. The shape names are the file's own:
+**Cümle kartı** / **Sözcük kartı** reuse `anki_mode_sentence` (Cümle) and
+`anki_mode_word` (Sözcük) verbatim, so the toast names the silently-applied mode in the
+same words the picker uses — which is the whole point of these two strings. Both land at
+27 chars, identical to EN, so the two-line toast clamp is not in play. **sözcük** (never
+*kelime*) is consistent with `section_words`, `anki_group_words_count` and
+`anki_words_helper`.
+
+**"not" for Anki's *note* — correct and consistently applied.** *Not* is Anki's and
+AnkiDroid's own Turkish term for a note, so a user who reads the toast and then opens
+AnkiDroid sees the same word. The generic-Turkish ambiguity (grade / memo) is defused by
+grammar in both strings: *Anki* is the genitive subject in `anki_first_field_unmapped`
+("**Anki\'nin** notu tanımlayabilmesi için") and the sentence subject in
+`anki_first_field_empty` ("**Anki**, notu tanımlamak için…"), so *not* never appears
+un-anchored. Both use the identical accusative *notu*. The apparent split with the app's
+**kart türü** (`anki_card_type_*`, `anki_field_mapping_unconfigured`) is inherited from
+English, which likewise says "card type" in the picker and "note" only here — TR mirrors
+the source rather than inventing a divergence.
+
+**tanımla- for "identify"** was checked rather than assumed: *tanımlamak* carries the
+"identify" sense in Turkish technical writing (whence **tanımlayıcı** = identifier), so
+"Anki\'nin notu tanımlayabilmesi" is not the "define the note" misreading it might look
+like at first glance. Left as-is. Likewise **eşle-** for *map* matches the file's
+established `anki_card_type_edit_mapping_row_label` ("Alan eşlemesini düzenle").
+
+**Surfaces read before judging length.** `anki_first_field_unmapped` is a toast
+(clamped — see the finding); `anki_first_field_empty` is the body of an
+`AnkiSendResult.Failed` alert (`AnkiSendDispatch.kt:270`, `:303`), where 127 chars is
+comfortably fine and the fuller explanation is appropriate. `game_audio_zoom_hint` is a
+wrapping caption, so its 67 chars are a wording question, not a truncation one.
+
+**History toggle — register matches the file's actual split.**
+`history_hide_translations_toggle_title` "Çevirileri gizle" uses the bare-stem verbal
+title that every sibling toggle uses (`history_toggle_title` "Metin geçmişini tut",
+`history_capture_image_toggle_title` "Yakalama görüntülerini kaydet",
+`anki_game_audio_row_title` "Oyun sesini kaydet"), so it is consistent, not an
+informal-imperative slip. The subtitle's two halves are deliberately different moods and
+both are right: descriptive 3rd-person **gösterir** for what the setting does, matching
+`history_toggle_subtitle` (kaydeder) and `history_capture_image_toggle_subtitle`
+(saklar); polite siz **dokunun** for the instruction, matching `anki_words_helper`
+("bir sözcüğe dokunun") and `overlay_icon_gesture_drag`. Terminology is on-file:
+**satır** for row (`history_empty_none`, `history_clear_confirm_message`), **yakalanan
+metin** carrying over `history_toggle_subtitle`'s *Yakalanan cümleleri*. The cataphoric
+possessive ("Çevirisini görmek için bir satıra dokunun") is standard Turkish UI phrasing
+— purpose clause first, referent after — not a dangling reference. EN's promise that
+nothing is lost survives intact, and at 77 chars it sits mid-pack (fr 78, ru 78, de 87).
+
+**`game_audio_zoom_hint`'s "görmek" is the right instinct and the suggested fix keeps
+it.** Without it, "daha fazla veya daha az ses" reads as *more or less volume*, which is
+the one wrong idea this caption must not plant; *ses görmek* is mildly odd literally, but
+EN's "show more or less audio" is equally odd literally, and the odd reading here is
+harmless while the volume reading is not. Only the gesture verb is at issue.
+**parmağınızla / parmaklarınızı** are correctly siz-level possessive.
+
+**Out of scope, flagged not filed:** the same card CSS that uppercases
+`card_words_in_sentence` also uppercases the POS headers (`gl-pos-h`,
+`AnkiHtmlStylers.kt:156`/`PtCardTemplates.kt:126`), and production passes
+`Context::localizePos` into the builder — so `pos_noun` "İsim" and `pos_verb` "Fiil"
+would render **İSIM** and **FIIL** under the same locale-blind rule that this delta was
+careful about. That is a pre-existing condition of keys outside these eight (and the
+export-vs-preview path was not traced here), so it is recorded, not filed as a finding
+against this delta.
+
+### Suffix coverage appendix — the eight keys
+
+Every suffix contact point, with real runtime values substituted. **No suffix in this
+delta attaches to a free-form placeholder.**
+
+| key | contact point | resolution |
+|---|---|---|
+| `card_words_in_sentence` | none (no placeholder) | Locative `Cümle+de` on a fixed noun. Front-unrounded harmony from *e* → `-de`, unvoiced-consonant rule not triggered. ✓ |
+| `anki_added_sentence_success` | `</xliff:g>\'ye` | Dative on the **brand**, whose value is the literal string "Anki" and never runtime-variable, so harmony is knowable. Final vowel *i* (front, unrounded) → `-e`; vowel-final stem → buffer *y*: **Anki\'ye**. Suffix sits outside the span; span inner text untouched. Matches `anki_added_no_audio`, `history_action_anki`. ✓ |
+| `anki_added_word_success` | `</xliff:g>\'ye` | Identical to the above. ✓ |
+| `game_audio_zoom_hint` | none (no placeholder) | `parmak+ınız+la` — 2pl possessive + instrumental on a fixed noun, back harmony throughout. ✓ |
+| `anki_first_field_unmapped` | `%1$s` → `” alanına` | The placeholder is closed by `”` and every suffix lands on the head noun **alan**: `alan + ı + na` → **alanına** (back harmony from *a*; possessive *-ı* then dative *-na*). Substituting real field names changes nothing: “Key” alanına ✓, “Kelime” alanına ✓, “Word Audio” alanına ✓, “語彙” alanına ✓. |
+| `anki_first_field_unmapped` | `</xliff:g>\'nin` | Genitive on the brand: vowel-final → *-nin*, front-unrounded harmony from *i* → **Anki\'nin**. ✓ |
+| `anki_first_field_empty` | `%1$s` → `” alanı boş` | Same head-noun strategy in the nominative: `alan + ı` → **alanı**. “Key” alanı boş ✓, “Kelime” alanı boş ✓. Later in the same string `ilk alanı` (accusative) and `bu alanın … değeri` (genitive + 3sg possessive) are both on fixed nouns. ✓ |
+| `history_hide_translations_toggle_title` | none | `Çeviri+ler+i` accusative plural on a fixed noun, front harmony. ✓ |
+| `history_hide_translations_toggle_subtitle` | none | `metn+i` (accusative with regular vowel drop — *metin* → *metni*, correct), `satır+a` (dative, back harmony), `Çeviri+si+ni` (3sg possessive + accusative). ✓ |
+
+### Verdict
+
+**PASS with one ⚠️.** The mechanical layer is clean. The dotted-i avoidance in
+`card_words_in_sentence` is verified and well-judged, the brand suffixes are correctly
+harmonized and escaped, no suffix touches a free-form placeholder anywhere in the delta,
+and the register split across the History toggle matches the file's own precedent. The
+single ⚠️ is `game_audio_zoom_hint`'s pinch verb; the two 💬 are optional polish.
+
+## Delta review 2026-08-19 (25 keys: language wildcard, Bergamot device gate, dictionary-styling toggle, Source Language row, manual dictionary-update flow, debug angle rollback)
+
+Mechanical layer verified programmatically across all 12 locales: all 25 delta names
+present, no extras, no duplicate `name=`; every `%n$s` present and matching EN; all
+`<xliff:g>` spans byte-identical to EN (`id`, `example`, inner placeholder); `<b>`, `\n`,
+`\{ \}`, `&lt;/&gt;/&amp;` counts match; no unescaped `'`/`"`. Analyzer reports
+`missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD SUCCESSFUL. No
+`<plurals>` in this delta. **No 🛑 build-breaking issues.**
+
+### Findings (delta) — all applied
+
+| name | severity | current | suggested | note |
+|---|---|---|---|---|
+| yomitan_update_repair_message | 💬 | «… uygulamanın bu sürümüyle **çalışmak için** yeniden indirilmelidir.» | «… uygulamanın bu sürümüyle **çalışabilmesi için** yeniden indirilmelidir.» | The bare -mak için infinitive requires the purpose clause to share the main clause's subject, which technically holds (veriler … çalışmak) but reads as a stated intention rather than a capability. EN is "**to work with** this version", i.e. so that it *can* work; the -Abilme + possessive gerund is the idiomatic Turkish for that, and it also removes the momentary garden-path where «uygulamanın» looks like the subject of çalışmak. |
+
+### Clean areas (delta) — checked, no findings
+
+**No suffix is ever attached to a placeholder.** This is the file's hard Turkish rule, and
+the delta respects it everywhere: «%1$s sözlüğü», «%1$s sözlüğünün verileri», «%1$s sözlüğü
+en son sürümde», «%1$s sözlüğü artık güncel» all hang the case and possessive marking on
+the head noun *sözlük*, whose vowel harmony is known. «%2$s sürümüne» likewise suffixes
+*sürüm*, not the revision string. A dictionary title can be «JMdict», «Jitendex.org» or
+«JMnedict [2026-08-13]» — none of those has predictable harmony, and none has to.
+
+**i / İ casing.** «Klasik», «İndir»-family forms and «denetle» are spelled with the correct
+dotted/dotless letters; nothing in the delta is pre-uppercased, so the runtime uppercasing
+in label views cannot produce an İSIM/FIIL-class defect here.
+
+**Update vocabulary reused from the app updater.** «Güncelleme mevcut» and «Güncellemeler
+denetlenemedi» are byte-identical to `update_dialog_title` / `update_check_failed_title`,
+and the whole family stays on **denetle** rather than mixing in kontrol et;
+`yomitan_update_check_failed_message` follows `yomitan_download_error_message`'s
+«Bağlantınızı kontrol edip tekrar deneyin»; `yomitan_update_scan_active_message` closes
+with `anki_models_unavailable`'s «Birazdan tekrar deneyin»; «Güncellemeler denetleniyor»
+matches `update_progress_verifying` «Doğrulanıyor…»; «arka planda» matches
+`onboarding_notif_row_silent_sub`.
+
+**«Kaynak dil» is the file's own term**, from `llm_prompt_kw_source_desc` («Kaynak dilin
+İngilizce adı»), and distinct from «Oyun Dili» (`pack_upgrade_label_source`).
+
+**Register.** siz-level imperatives throughout («deneyin», «kapatın», «kontrol edip»); the
+row and button labels take the short imperative/noun form («Güncelle», «Yeniden indir»,
+«Güncellemeleri denetle»), matching the file.
+
+**«artık güncel» carries EN's "now"**, keeping the success alert distinct from the
+no-update alert.
+
+### Verdict
+
+**PASS after fix.** One 💬, no ⚠️/❌/🛑. The usual Turkish failure mode in this app — a
+case suffix landing on a runtime value — does not occur anywhere in the delta.
+
+### Delta review round 2 — 2026-08-19 (`lang_pick_any` read against the render code)
+
+| name | severity | current | suggested | note |
+|---|---|---|---|---|
+| lang_pick_any | ⚠️ | «Tüm diller» | «Herhangi bir dil» | The pinned wildcard row shared its root with `lang_section_all`: «Tüm diller» sat two rows above a header reading «Tümü», so it read as a shortcut into the full list rather than "no language restriction". «Herhangi bir dil» is the ordinary Turkish wildcard and is lexically distinct in both slots. No suffix contact with any placeholder, so the change is free of harmony risk. |
+
+**Why round 1 missed it.** The string was reviewed against its English source and its two
+slots in isolation. It only fails when read against its *neighbours on screen*:
+`LanguageSetupActivity` passes the Any row as `leadingRows` (:282) and heads the list
+below it with `lang_section_suggested` then `lang_section_all` (:544, :550), so the pinned
+row and the "All" header are two rows apart. This is the doc's own lesson — read the render
+code, not the string — arriving from the other direction: not a truncation constraint, but
+an adjacency one.
+
+**Cross-locale shape.** Twelve independent renderings split into two camps: five chose an
+*any*-flavoured word (zh-rCN 任意语言, ru «Любой язык», ar «أي لغة», es «Cualquier idioma»,
+pt-BR «Qualquer idioma») and seven an *all*-flavoured one. Only the *all* camp can collide,
+and only where the pinned row repeats the header's own word — ja, tr, de and fr, now fixed.
+ko (모든 언어 / 전체), th (ทุกภาษา / ทั้งหมด) and vi (Mọi ngôn ngữ / Tất cả) use lexically
+distinct words in the two slots and were left alone. The fix also moves these four closer
+to the English, which deliberately says "Any" rather than "All" (and was itself renamed
+from "None" — the row means *no restriction*, not *unset*, and not *the whole list*).
+
+### Verdict (revised after round 2)
+
+**PASS after fixes.** One ⚠️ (round 2) and one 💬 (round 1). The Turkish-specific hazard —
+a case suffix landing on a runtime value — remains absent from the whole delta.

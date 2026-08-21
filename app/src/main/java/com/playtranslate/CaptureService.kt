@@ -31,6 +31,7 @@ import androidx.annotation.MainThread
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.playtranslate.model.OcrProvenance
+import com.playtranslate.model.PendingTranslation
 import com.playtranslate.model.TextSegment
 import com.playtranslate.model.TranslationResult
 import com.playtranslate.ocr.registry.OcrModelManager
@@ -289,19 +290,20 @@ class CaptureService : Service() {
     private val _statusUpdates = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val statusUpdates: SharedFlow<String> = _statusUpdates.asSharedFlow()
 
-    /** Hold-to-preview loading state. StateFlow because consumers (the
-     *  floating icon's loading indicator) need the current value, not a
-     *  stream of transitions. */
-    private val _holdLoading = MutableStateFlow(false)
-    val holdLoading: StateFlow<Boolean> = _holdLoading.asStateFlow()
-
     // ── Internal emit helpers (callable from sibling capture modes) ──────
 
     internal fun emitResult(result: TranslationResult) {
         _panelState.value = PanelState.Result(result)
+        // Deliberately NO livePanelRecord.committed here: only screen-derived
+        // deliveries ([translateAndSendToPanel]) commit. A deliberate flow
+        // (re-translate, deferred history) emitting through this writer shows
+        // text that is NOT the live screen — recording it would make the
+        // screen's unchanged text look new and let the live loop stomp the
+        // user's requested result one settled cycle later ([LivePanelRecord]).
     }
     internal fun emitError(message: String) {
         _panelState.value = PanelState.Error(message)
+        livePanelRecord.clear()
     }
     /**
      * The panel's "a live cycle looked at [displayId] and found nothing"
@@ -326,6 +328,9 @@ class CaptureService : Service() {
             noTextMessage(displayId, region),
             noTextProvenanceFor(displayId, region, Prefs(this).sourceLangId),
         )
+        // The recorded text is no longer what the panel shows — identical
+        // text REAPPEARING after a no-text gap must deliver again.
+        livePanelRecord.clear()
     }
     /** Reset the sticky panel stream to [PanelState.Idle] so its replay can't re-show a
      *  stale result after the activity returns (e.g. from the language picker). Idle is a
@@ -333,8 +338,8 @@ class CaptureService : Service() {
      *  the caller clears the VM separately (and can keep the result visible until then). */
     internal fun clearPanel() {
         _panelState.value = PanelState.Idle
+        livePanelRecord.clear()
     }
-    internal fun emitHoldLoading(loading: Boolean) { _holdLoading.value = loading }
 
     /** Observable translation-degradation state — one [DegradedWarningKind]
      *  drives every consumer:
@@ -379,6 +384,36 @@ class CaptureService : Service() {
         )
     }
 
+    /** Whether a one-shot hold gesture is currently in flight, i.e. whether
+     *  the floating icons should be wearing their loading spinner. State of
+     *  record for that spinner — see [setHoldLoading]. */
+    private var holdLoading = false
+
+    /**
+     * Arm / disarm the floating icons' hold spinner.
+     *
+     * Pushed straight at the icons rather than published on a flow the
+     * activity collects. The spinner is a sub-window of an overlay icon the
+     * service owns, and the gesture that arms it happens precisely when
+     * MainActivity is STOPPED — the user is holding the icon over a
+     * fullscreen game. A `repeatOnLifecycle(STARTED)` collector is cancelled
+     * in exactly that state, so routing this through the activity meant the
+     * spinner could only appear when the app itself was already on screen
+     * (dual-screen), and never in the single-screen case it exists for. The
+     * icons' live-mode and degraded colours have always been pushed from here
+     * ([syncIconState]) for the same reason; only this one had drifted onto
+     * the activity, when the service's outbound callbacks became flows.
+     *
+     * Main thread only — it ends in View mutation. Every caller already is:
+     * the icon's touch handlers, MainActivity, and [serviceScope] (which is
+     * Dispatchers.Main).
+     */
+    internal fun setHoldLoading(loading: Boolean) {
+        if (holdLoading == loading) return
+        holdLoading = loading
+        CaptureBackendResolver.activeOverlayUi?.setIconsLoading(loading)
+    }
+
     /** Push current service state to every floating icon. Called automatically
      *  by [setLiveDisplays] (on the empty↔non-empty transition), [setDegraded],
      *  and when icons are installed or torn down (from
@@ -388,6 +423,7 @@ class CaptureService : Service() {
         val ui = CaptureBackendResolver.activeOverlayUi ?: return
         ui.setIconsLiveMode(isLive)
         ui.setIconsDegraded(translationDegraded)
+        ui.setIconsLoading(holdLoading)
     }
 
     // ── Debug: MediaProjection mirror probe (Step-0 "D1" verification) ────
@@ -736,13 +772,20 @@ class CaptureService : Service() {
 
     /** Start a one-shot capture cycle on [displayId]. Caller observes the
      *  returned [CaptureSession]'s [CaptureSession.state] for
-     *  progress/result. Cancels any prior one-shot session. */
-    fun captureOnce(displayId: Int = primaryGameDisplayId()): CaptureSession {
+     *  progress/result. Cancels any prior one-shot session.
+     *  [allowDeferTranslation] is a per-call-site opt-in for the deferred
+     *  path (skip MT while the translation section is hidden — see
+     *  [PendingTranslation]); a surface that will paint translated boxes
+     *  immediately must not opt in. */
+    fun captureOnce(
+        displayId: Int = primaryGameDisplayId(),
+        allowDeferTranslation: Boolean = false,
+    ): CaptureSession {
         oneShotCaptureJob?.cancel()
         val state = MutableStateFlow<CaptureState>(
             CaptureState.InProgress(getString(R.string.status_capturing))
         )
-        val job = serviceScope.launch { runCaptureCycle(displayId, state) }
+        val job = serviceScope.launch { runCaptureCycle(displayId, state, allowDeferTranslation) }
         attachCancellationTerminal(job, state)
         oneShotCaptureJob = job
         return CaptureSession(state.asStateFlow(), job)
@@ -752,19 +795,25 @@ class CaptureService : Service() {
      * Processes a pre-captured screenshot bitmap instead of taking a new one.
      * Used when the screenshot must be taken before an activity appears on screen
      * (e.g. single-screen region capture from the floating menu).
+     *
+     * Re-OCR callers (override-carrying calls) keep [allowDeferTranslation]
+     * false — deliberately: a re-OCR records no History rows (see the gate in
+     * [runProcessCycle]), so a deferred re-OCR would have nothing to attach
+     * its late translation to.
      */
     fun processScreenshot(
         frame: com.playtranslate.capture.CapturedFrame,
         displayId: Int = primaryGameDisplayId(),
         regionOverride: RegionEntry? = null,
         sourceLangIdOverride: SourceLangId? = null,
+        allowDeferTranslation: Boolean = false,
     ): CaptureSession {
         oneShotCaptureJob?.cancel()
         val state = MutableStateFlow<CaptureState>(
             CaptureState.InProgress(getString(R.string.status_capturing))
         )
         val job = serviceScope.launch {
-            runProcessCycle(frame, displayId, state, regionOverride, sourceLangIdOverride)
+            runProcessCycle(frame, displayId, state, regionOverride, sourceLangIdOverride, allowDeferTranslation)
         }
         attachCancellationTerminal(job, state)
         oneShotCaptureJob = job
@@ -849,9 +898,17 @@ class CaptureService : Service() {
         state: MutableStateFlow<CaptureState>,
         regionOverride: RegionEntry? = null,
         sourceLangIdOverride: SourceLangId? = null,
+        allowDeferTranslation: Boolean = false,
     ) {
         val raw = frame.bitmap
         val frameIncludesSystemUi = frame.includesSystemUi
+        // The frame's capture moment as epoch ms (capturedAtMs is uptime;
+        // one conversion at the same instant). Passed as the result's
+        // createdAtMs so the game-audio anchor names the SHUTTER, not the
+        // post-translation construction — MT latency (seconds to tens on
+        // the slow tier) must not drift the trim seed.
+        val capturedAtWallMs = System.currentTimeMillis() -
+            (android.os.SystemClock.uptimeMillis() - frame.capturedAtMs)
         if (!isConfigured) {
             state.value = CaptureState.Failed("Not configured — tap Translate to set up")
             raw.recycle()
@@ -944,22 +1001,39 @@ class CaptureService : Service() {
             // Recording target captured BEFORE the translate call — a
             // mid-flight language change must not relabel these rows
             // (srcId is already pinned above).
+            val recordSrc = SourceLanguageProfiles[srcId].translationCode
             val recordTgt = Prefs(this@CaptureService).targetLang
-            val perGroup = translateGroupsSeparately(ocrResult.groups.map { it.text }, srcId)
+            // Deferred path — same contract as runCaptureOcrTranslate. Re-OCR
+            // callers never opt in (allowDeferTranslation stays false at their
+            // call sites): their recording is gated off below, so a deferred
+            // re-OCR would have nothing to attach its late translation to.
+            val deferTranslation = allowDeferTranslation &&
+                Prefs(this@CaptureService).hideTranslationSection &&
+                recordSrc != recordTgt
+            val perGroup = if (deferTranslation) null
+                else translateGroupsSeparately(ocrResult.groups.map { it.text }, srcId)
 
             // Deliberate capture → recording backend, FRESH captures only:
             // override-carrying calls are re-OCRs of an already-recorded
             // capture (engine change from the results surface), and a
             // refinement must not mint a second session's worth of rows.
+            // Deferred rows record with a null translation; the normal path
+            // keeps skipping rows whose translation came back blank.
+            // Logging eligibility snapshotted WITH the recording (see
+            // runCaptureOcrTranslate) — a deferred completion may only write
+            // what the user had opted into at THIS moment.
+            val historyEligible = Prefs(this@CaptureService).translationHistoryEnabled
+            val contextEligible = Prefs(this@CaptureService).llmContextEnabled
+            var captureSessionId: String? = null
             if (regionOverride == null && sourceLangIdOverride == null) {
-                val recordSrc = SourceLanguageProfiles[srcId].translationCode
                 val token = translationLogRecorder.beginCaptureSession()
+                captureSessionId = token.sessionId.takeIf { historyEligible }
                 ocrResult.groups.forEachIndexed { i, g ->
-                    val tr = perGroup.getOrNull(i)?.text.orEmpty()
-                    if (tr.isNotEmpty()) translationLogRecorder.onCaptureShown(
-                        token, g.text, tr, g.bounds, recordSrc, recordTgt,
+                    val tr = perGroup?.getOrNull(i)?.text.orEmpty()
+                    if (deferTranslation || tr.isNotEmpty()) translationLogRecorder.onCaptureShown(
+                        token, g.text, tr.takeIf { it.isNotEmpty() }, g.bounds, recordSrc, recordTgt,
                         com.playtranslate.translationlog.TranslationHistoryStore.PROVENANCE_ONE_SHOT,
-                        perGroup.getOrNull(i)?.backendDisplayName,
+                        perGroup?.getOrNull(i)?.backendDisplayName,
                         captureImage = screenshotPath?.let {
                             com.playtranslate.translationlog.HistoryImageStore.Source.FromPath(it)
                         },
@@ -972,18 +1046,32 @@ class CaptureService : Service() {
                 TranslationResult(
                     originalText        = ocrResult.fullText,
                     segments            = ocrResult.segments,
-                    translatedText      = perGroup.joinToString("\n\n") { it.text },
+                    translatedText      = perGroup?.joinToString("\n\n") { it.text }.orEmpty(),
                     timestamp           = timestamp,
                     screenshotPath      = screenshotPath,
-                    note                = perGroup.mapNotNull { it.note }.firstOrNull(),
-                    backendDisplayName  = perGroup.mapNotNull { it.backendDisplayName }.firstOrNull(),
+                    note                = perGroup?.mapNotNull { it.note }?.firstOrNull(),
+                    backendDisplayName  = perGroup?.mapNotNull { it.backendDisplayName }?.firstOrNull(),
                     ocrProvenance       = ocrProvenanceFor(
                         ocrResult, displayId, region, srcId, frameIncludesSystemUi,
                         frame.includesOwnOverlays,
                     ),
+                    pendingTranslation  = if (deferTranslation) PendingTranslation(
+                        groupTexts = ocrResult.groups.map { it.text },
+                        sourceLangId = srcId,
+                        targetLang = recordTgt,
+                        isCapture = true,
+                        historySessionId = captureSessionId,
+                        historyEligible = historyEligible,
+                        contextEligible = contextEligible,
+                    ) else null,
                     langContext         = Prefs(this@CaptureService).langContext(srcId),
+                    createdAtMs         = capturedAtWallMs,
                 ),
-                overlayData = fillOneShotOverlayData(skeletonData, perGroup),
+                // Deferred: keep the SKELETONS — the deferred completion fills
+                // them when the translation finally runs.
+                overlayData = if (perGroup != null)
+                    fillOneShotOverlayData(skeletonData, perGroup.map { it.text })
+                else skeletonData,
             )
         } catch (e: CancellationException) {
             // Let cancellation propagate; invokeOnCompletion writes Cancelled.
@@ -1691,6 +1779,7 @@ class CaptureService : Service() {
         // immediate transition into live mode (rather than a stale
         // result lingering until the first cycle lands).
         _panelState.value = PanelState.Searching
+        livePanelRecord.clear()
 
         val prefs = Prefs(this)
         val activeIds = gameDisplayIds.ifEmpty { setOf(primaryGameDisplayId()) }
@@ -1746,9 +1835,18 @@ class CaptureService : Service() {
             // Panel-only: the unified loop on ANY stream kind and backend — it
             // paints nothing, so contamination is irrelevant (design record §7).
             OverlayFlavor.IN_APP_ONLY -> ReconcilerLiveMode::class.java
-            OverlayFlavor.FURIGANA ->
-                if (clean) ReconcilerLiveMode::class.java
-                else FuriganaMode::class.java
+            // Furigana consolidated onto the legacy tier (2026-08-06): the
+            // reconciler's furigana path was a half-copy — frontier release,
+            // reveal pacing, and the settle hook each existed only on one
+            // side — and every mechanism had to be built twice. FuriganaMode
+            // carries the one full implementation on every stream kind, and
+            // keys its behavior off the frame's stamped facts: raw frames a
+            // CLEAN task mirror stamps overlay-free route straight to the
+            // clean path — the patch/compare machinery runs only on frames
+            // that actually contain rendered furigana (adversarial-review
+            // hole in the original flip: unconditional patching would have
+            // overwritten real clean-stream pixels with stale ref strips).
+            OverlayFlavor.FURIGANA -> FuriganaMode::class.java
             OverlayFlavor.TRANSLATION ->
                 if (clean) ReconcilerLiveMode::class.java
                 else PinholeOverlayMode::class.java
@@ -1875,10 +1973,7 @@ class CaptureService : Service() {
             when (flavor) {
                 OverlayFlavor.IN_APP_ONLY ->
                     ReconcilerLiveMode(this, id, PanelPresenter(this, id))
-                OverlayFlavor.FURIGANA ->
-                    if (desiredClass == ReconcilerLiveMode::class.java)
-                        ReconcilerLiveMode(this, id, FuriganaPresenter(this, id))
-                    else FuriganaMode(this, id)
+                OverlayFlavor.FURIGANA -> FuriganaMode(this, id)
                 OverlayFlavor.TRANSLATION ->
                     if (desiredClass == ReconcilerLiveMode::class.java)
                         ReconcilerLiveMode(this, id, TranslationPresenter(this, id))
@@ -1909,6 +2004,9 @@ class CaptureService : Service() {
             _liveModeState.value = willBeLive
             updateForegroundState()
             syncIconState()
+            // isLive feeds CaptureLifecycle.isActive, and the ACTIVE_TILE QS
+            // tile only re-renders on an explicit push.
+            PlayTranslateTileService.TileSync.refresh(this)
             // Display listener tracks the empty↔non-empty transition only.
             if (willBeLive) {
                 // Defensive double-unregister: harmless if not registered.
@@ -1961,6 +2059,10 @@ class CaptureService : Service() {
             _liveModeState.value = false
             updateForegroundState()
             syncIconState()
+            // Mirrors setLiveDisplays' flip block: isLive feeds
+            // CaptureLifecycle.isActive, and the ACTIVE_TILE QS tile only
+            // re-renders on an explicit push.
+            PlayTranslateTileService.TileSync.refresh(this)
             getSystemService(DisplayManager::class.java)?.unregisterDisplayListener(displayListener)
         }
     }
@@ -2303,13 +2405,21 @@ class CaptureService : Service() {
 
     /**
      * Common hold-to-preview end sequence. Cancels the one-shot (which hides
-     * its overlay), clears [holdActive], and refreshes the live mode so it
-     * resumes from a clean state. Safe to call in the pinhole-peek case
-     * where no one-shot was launched — cancel on a null job is a no-op.
+     * its overlay), clears [holdActive] and the icons' spinner, and refreshes
+     * the live mode so it resumes from a clean state. Safe to call in the
+     * pinhole-peek case where no one-shot was launched — cancel on a null job
+     * is a no-op, and the spinner was never armed there.
+     *
+     * The spinner clear lives here rather than in each caller so that every
+     * way a hold can end — lift, cancel, hotkey release — disarms it through
+     * one line. The one-shot's own terminals ([OneShotManager]) clear it too,
+     * so a gesture whose lift never arrives (window destroyed mid-hold) still
+     * ends up disarmed.
      */
     private fun endHoldPreview() {
         oneShotManager.cancel()
         holdActive = false
+        setHoldLoading(false)
         if (isLive) {
             // Refresh every per-display mode — hold paused them all globally.
             liveModes.values.forEach { it.refresh() }
@@ -2343,7 +2453,7 @@ class CaptureService : Service() {
             CaptureBackendResolver.activeOverlayUi?.hideTranslationOverlay()
             return
         }
-        _holdLoading.value = true
+        setHoldLoading(true)
         val forced = if (isLive && isFurigana) {
             OverlayMode.TRANSLATION
         } else {
@@ -2379,7 +2489,7 @@ class CaptureService : Service() {
         if (targets.isEmpty()) return
         val panelTarget = oneShotPanelDisplayId(targets)
         lastInteractedDisplayId = panelTarget
-        _holdLoading.value = true
+        setHoldLoading(true)
         val forced = if (isLive && isFurigana) {
             OverlayMode.TRANSLATION
         } else {
@@ -2390,7 +2500,6 @@ class CaptureService : Service() {
 
     /** End a hold-to-preview gesture (in-app translate button). */
     fun holdEnd() {
-        _holdLoading.value = false
         endHoldPreview()
     }
 
@@ -2402,7 +2511,6 @@ class CaptureService : Service() {
      * back to its normal render cycle.
      */
     fun holdCancel() {
-        _holdLoading.value = false
         endHoldPreview()
     }
 
@@ -2568,12 +2676,24 @@ class CaptureService : Service() {
         displayId: Int,
         frameIncludesSystemUi: Boolean,
         frameIncludesOwnOverlays: Boolean,
-        forceShow: Boolean = false
+        forceShow: Boolean = false,
+        /** Live steady-state dedup against [livePanelRecord]: the furigana
+         *  loop OFFERS every settled frame and this makes the offers
+         *  idempotent. Deliberate captures (one-shot) never dedup — the
+         *  user asked, the panel refreshes. */
+        liveDedup: Boolean = false,
     ): List<GroupTranslation>? {
         if (!forceShow) {
             val appPanelVisible = !Prefs.isSingleScreen(this) && MainActivity.isInForeground
             if (!appPanelVisible) return null
         }
+        if (liveDedup && !livePanelRecord.isNew(displayId, ocrResult.fullText, livePanelStamp())) {
+            return null
+        }
+        // No frame here — entry time (post-OCR, pre-MT) is the closest
+        // capture-boundary stamp available, and it keeps MT latency out of
+        // the result's game-audio anchor.
+        val capturedAtWallMs = System.currentTimeMillis()
         val perGroup = translateGroupsSeparately(ocrResult.groups.map { it.text })
         val translated = perGroup.joinToString("\n\n") { it.text }
         val note = perGroup.mapNotNull { it.note }.firstOrNull()
@@ -2594,8 +2714,13 @@ class CaptureService : Service() {
                     frameIncludesOwnOverlays,
                 ),
                 langContext        = Prefs(this).langContext(),
+                createdAtMs        = capturedAtWallMs,
             )
         )
+        // COMMIT ON DELIVERY: every caller of THIS function delivers what
+        // the capture display currently shows (live furigana offers,
+        // one-shot holds), so the record keeps mirroring the screen.
+        livePanelRecord.committed(displayId, ocrResult.fullText, livePanelStamp())
         return perGroup
     }
 
@@ -2603,6 +2728,25 @@ class CaptureService : Service() {
      *  the shared gate for every live tier's panel sync. */
     internal fun appPanelVisible(): Boolean =
         !Prefs.isSingleScreen(this) && MainActivity.isInForeground
+
+    /** What the panel currently shows, owned HERE at the delivery layer —
+     *  see [LivePanelRecord] for the rules and the bug history. */
+    private val livePanelRecord = LivePanelRecord()
+
+    /** Language key for [livePanelRecord]: same text under a new
+     *  source/target pair is new content. */
+    private fun livePanelStamp(): String {
+        val prefs = Prefs(this)
+        return "${prefs.sourceLangId}>${prefs.targetLang}"
+    }
+
+    /** Cheap pre-flight for the live furigana loop: would offering [text]
+     *  from [displayId] reach the panel as new content? Lets the mode skip
+     *  the screenshot JPEG on quiet cycles where the offer would be dropped
+     *  anyway. The authoritative checks run again inside
+     *  [translateAndSendToPanel]. */
+    internal fun livePanelWouldAccept(displayId: Int, text: String): Boolean =
+        appPanelVisible() && livePanelRecord.isNew(displayId, text, livePanelStamp())
 
     /** Emit a live tier's displayed state to the in-app panel — the ONE
      *  emission shape shared by the pinhole tier and the reconciler
@@ -2846,6 +2990,7 @@ class CaptureService : Service() {
             ocrProvenance: OcrProvenance?,
             overlayData: OneShotOverlayData?,
         ) -> Unit)? = null,
+        allowDeferTranslation: Boolean = false,
     ): PipelineOutcome {
         // The frame carries its own capture-time facts (CapturedFrame) —
         // nothing is re-derived from mutable state downstream.
@@ -2855,6 +3000,10 @@ class CaptureService : Service() {
             )
         val raw: Bitmap = frame.bitmap
         val frameIncludesUi = frame.includesSystemUi
+        // Shutter moment in epoch ms — see runProcessCycle's twin: the
+        // result's createdAtMs anchors game audio and must predate MT.
+        val capturedAtWallMs = System.currentTimeMillis() -
+            (android.os.SystemClock.uptimeMillis() - frame.capturedAtMs)
         onScreenshotTaken?.invoke()
         var bitmap: Bitmap? = raw
         var colorRef: Bitmap? = null
@@ -2927,25 +3076,44 @@ class CaptureService : Service() {
             // mid-flight language change must not relabel these rows.
             val recordSrc = SourceLanguageProfiles[srcId].translationCode
             val recordTgt = Prefs(this@CaptureService).targetLang
-            val perGroup = translateGroupsSeparately(ocrResult.groups.map { it.text })
+            // Deferred path: the translation section is hidden and the caller
+            // opted in, so no consumer needs MT right now — skip the backend
+            // batch entirely. Rows record translation-less (they attach later
+            // via onCaptureTranslated) and Done carries a PendingTranslation
+            // with everything the completion needs. The free source==target
+            // bypass never defers.
+            val deferTranslation = allowDeferTranslation &&
+                Prefs(this@CaptureService).hideTranslationSection &&
+                recordSrc != recordTgt
+            val perGroup = if (deferTranslation) null
+                else translateGroupsSeparately(ocrResult.groups.map { it.text })
             // Deliberate capture → recording backend, one capture session
             // per invocation (per-group pairs with rects; the recorder
-            // no-ops unless a log feature is enabled).
+            // no-ops unless a log feature is enabled). Deferred rows record
+            // with a null translation; the normal path keeps skipping rows
+            // whose translation came back blank.
+            // Logging eligibility snapshotted WITH the recording — deferral
+            // splits translate+record across time, and what the completion
+            // may write later is what the user had opted into NOW, not at
+            // reveal time (an opted-out capture must stay unrecorded even if
+            // the pref is enabled before the reveal).
+            val historyEligible = Prefs(this@CaptureService).translationHistoryEnabled
+            val contextEligible = Prefs(this@CaptureService).llmContextEnabled
             val token = translationLogRecorder.beginCaptureSession()
             ocrResult.groups.forEachIndexed { i, g ->
-                val tr = perGroup.getOrNull(i)?.text.orEmpty()
-                if (tr.isNotEmpty()) translationLogRecorder.onCaptureShown(
-                    token, g.text, tr, g.bounds, recordSrc, recordTgt,
+                val tr = perGroup?.getOrNull(i)?.text.orEmpty()
+                if (deferTranslation || tr.isNotEmpty()) translationLogRecorder.onCaptureShown(
+                    token, g.text, tr.takeIf { it.isNotEmpty() }, g.bounds, recordSrc, recordTgt,
                     com.playtranslate.translationlog.TranslationHistoryStore.PROVENANCE_ONE_SHOT,
-                    perGroup.getOrNull(i)?.backendDisplayName,
+                    perGroup?.getOrNull(i)?.backendDisplayName,
                     captureImage = screenshotPath?.let {
                         com.playtranslate.translationlog.HistoryImageStore.Source.FromPath(it)
                     },
                 )
             }
-            val translated = perGroup.joinToString("\n\n") { it.text }
-            val note = perGroup.mapNotNull { it.note }.firstOrNull()
-            val backendDisplayName = perGroup.mapNotNull { it.backendDisplayName }.firstOrNull()
+            val translated = perGroup?.joinToString("\n\n") { it.text }.orEmpty()
+            val note = perGroup?.mapNotNull { it.note }?.firstOrNull()
+            val backendDisplayName = perGroup?.mapNotNull { it.backendDisplayName }?.firstOrNull()
             val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
 
             return PipelineOutcome.Success(
@@ -2962,14 +3130,28 @@ class CaptureService : Service() {
                             ocrResult, displayId, region, srcId, frameIncludesUi,
                             frame.includesOwnOverlays,
                         ),
+                        pendingTranslation = if (deferTranslation) PendingTranslation(
+                            groupTexts = ocrResult.groups.map { it.text },
+                            sourceLangId = srcId,
+                            targetLang = recordTgt,
+                            isCapture = true,
+                            historySessionId = token.sessionId.takeIf { historyEligible },
+                            historyEligible = historyEligible,
+                            contextEligible = contextEligible,
+                        ) else null,
                         langContext        = Prefs(this@CaptureService).langContext(srcId),
+                        createdAtMs        = capturedAtWallMs,
                     ),
                     groupBounds = ocrResult.groups.map { it.bounds },
-                    groupTranslations = perGroup.map { it.text },
+                    groupTranslations = perGroup?.map { it.text } ?: List(ocrResult.groups.size) { "" },
                     cropLeft = left, cropTop = top,
                     screenshotW = rawW, screenshotH = rawH,
                     ocrResult = ocrResult,
-                    overlayData = fillOneShotOverlayData(skeletonData, perGroup),
+                    // Deferred: keep the SKELETONS — the deferred completion
+                    // fills them when the translation finally runs.
+                    overlayData = if (perGroup != null)
+                        fillOneShotOverlayData(skeletonData, perGroup.map { it.text })
+                    else skeletonData,
                 )
             )
         } catch (e: CancellationException) {
@@ -2990,7 +3172,11 @@ class CaptureService : Service() {
     /** One-shot capture: walks [state] through Capturing → final
      *  Done/NoText/Failed. Activities own the [state] flow via the
      *  [CaptureSession] returned from [captureOnce]. */
-    private suspend fun runCaptureCycle(displayId: Int, state: MutableStateFlow<CaptureState>) {
+    private suspend fun runCaptureCycle(
+        displayId: Int,
+        state: MutableStateFlow<CaptureState>,
+        allowDeferTranslation: Boolean = false,
+    ) {
         if (!isConfigured) {
             state.value = CaptureState.Failed("Not configured — tap Translate to set up")
             return
@@ -3004,6 +3190,7 @@ class CaptureService : Service() {
                 state.value =
                     CaptureState.Translating(originalText, segments, ocrProvenance, overlayData)
             },
+            allowDeferTranslation = allowDeferTranslation,
         )
         state.value = when (outcome) {
             is PipelineOutcome.Success ->
@@ -3204,25 +3391,10 @@ class CaptureService : Service() {
             com.playtranslate.ui.TextBox(
                 "", g.bounds, bgColor, textColor, g.lines.size,
                 orientation = g.orientation, alignment = g.alignment,
+                angleDeg = g.angleDeg, orientedWidth = g.orientedWidth, orientedHeight = g.orientedHeight,
             )
         }
         return OneShotOverlayData(boxes, cropLeft, cropTop, screenshotW, screenshotH)
-    }
-
-    /** Zip the per-group translations into [skeleton]'s index-aligned boxes and
-     *  drop the ones that came back blank. Null when nothing survives (count
-     *  mismatch, every translation blank) — callers then keep/clear the panel's
-     *  presentation rather than paint empty boxes. */
-    private fun fillOneShotOverlayData(
-        skeleton: OneShotOverlayData?,
-        perGroup: List<GroupTranslation>,
-    ): OneShotOverlayData? {
-        if (skeleton == null || skeleton.boxes.size != perGroup.size) return null
-        val filled = skeleton.boxes.mapIndexed { idx, box ->
-            box.copy(translatedText = perGroup[idx].text)
-        }.filter { it.translatedText.isNotBlank() }
-        if (filled.isEmpty()) return null
-        return skeleton.copy(boxes = filled)
     }
 
     /** On-demand translation for a single text string (used by edit overlay, drag-sentence, etc.). */
@@ -3231,6 +3403,52 @@ class CaptureService : Service() {
         val outcome = translate(text, target)
         setDegraded(outcome.kind)
         return GroupTranslation(target.localize(outcome.text), outcome.note, outcome.backendDisplayName)
+    }
+
+    /**
+     * Run the machine translation a deferred capture skipped ([PendingTranslation])
+     * and attach the results to the null-translation History rows recorded at
+     * capture time. Called from a surface's Main-scope the moment the translation
+     * is needed (eye reveal, bind-while-visible, "show on screen").
+     *
+     * The RECORD pair is snapshotted fresh here, not taken from the pending:
+     * [translateGroupsSeparately] translates into the CURRENT target, so rows
+     * must be labelled with that pair — a target change between capture and
+     * reveal must not write a new-target translation under the old label.
+     * The source stays pinned to the language the OCR ran as.
+     *
+     * LOGGING ELIGIBILITY, by contrast, is the pending's capture-time
+     * snapshot: History attaches only to the session recorded then
+     * (attach-only — never inserts), and the context ring is fed only when
+     * the user was opted in at capture time AND still is. The attach plan
+     * dedupes duplicate group texts (recorded as one row by the token's
+     * seen-set) so each row is offered its translation once.
+     */
+    internal suspend fun completeDeferredTranslation(
+        pending: PendingTranslation,
+    ): List<GroupTranslation> {
+        val recordSrc = SourceLanguageProfiles[pending.sourceLangId].translationCode
+        val perGroup = translateGroupsSeparately(pending.groupTexts, pending.sourceLangId)
+        // Pair staleness: the null History rows were recorded under the
+        // CAPTURE-time target. If the target changed before the reveal, the
+        // translation above is a different pair — and cross-pair translations
+        // are display-only, never attached (the deliberate flow's rule; see
+        // onHistoryEntryTranslated's KDoc). The capture rows deliberately
+        // stay translation-less, and attach-only means nothing records fresh
+        // under the new pair either. (The surfaces' langContext staleness
+        // sweeps clear most deferred results on a language change before a
+        // reveal can even happen — this is the boundary's own guard.)
+        val recordTgt = Prefs(this@CaptureService).targetLang
+        if (recordTgt != pending.targetLang) return perGroup
+        if (pending.historySessionId != null || pending.contextEligible) {
+            deferredAttachPlan(pending.groupTexts, perGroup, recordSrc).forEach { (source, tr, backend) ->
+                translationLogRecorder.onCaptureTranslated(
+                    pending.historySessionId, source, tr, recordSrc, recordTgt,
+                    pending.contextEligible, backend,
+                )
+            }
+        }
+        return perGroup
     }
 
     /**
@@ -3545,4 +3763,27 @@ class CaptureService : Service() {
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
     }
+}
+
+/** The attach plan for a deferred capture's completion: one (source,
+ *  translation, backend) triple per DISTINCT normalized key with a non-blank
+ *  translation. The capture recorded duplicate group texts as a single row
+ *  (the token's seen-set), so each row is offered its translation exactly
+ *  once — a repeat for the same key would just burn a store hop on ALREADY.
+ *  Pure, so the contract is unit-tested without the Android-heavy service. */
+internal fun deferredAttachPlan(
+    groupTexts: List<String>,
+    translations: List<CaptureService.GroupTranslation>,
+    recordSrc: String,
+): List<Triple<String, String, String?>> {
+    val attached = HashSet<String>()
+    val plan = mutableListOf<Triple<String, String, String?>>()
+    groupTexts.forEachIndexed { i, source ->
+        val tr = translations.getOrNull(i)?.text.orEmpty()
+        if (tr.isEmpty()) return@forEachIndexed
+        val key = com.playtranslate.translationlog.LogWriteGate.normalizedKey(source, recordSrc)
+        if (key.isEmpty() || !attached.add(key)) return@forEachIndexed
+        plan.add(Triple(source, tr, translations.getOrNull(i)?.backendDisplayName))
+    }
+    return plan
 }

@@ -336,9 +336,16 @@
                 android:value="OCR and translation pipeline using AccessibilityService screen capture" />
         </service>
 
-        <!-- FileProvider to share screenshot cache files with AnkiDroid -->
+        <!-- FileProvider to share screenshot cache files with AnkiDroid.
+
+             Upstream's PtFileProvider (its getType override is what keeps m4a
+             media from landing in AnkiDroid named .mp3), but with the authority
+             still derived from applicationId: hardcoding
+             com.playtranslate.fileprovider would collide with the upstream app
+             installed alongside this fork, which is the whole reason the
+             application id was changed. -->
         <provider
-            android:name="androidx.core.content.FileProvider"
+            android:name=".PtFileProvider"
             android:authorities="${applicationId}.fileprovider"
             android:exported="false"
             android:grantUriPermissions="true">

@@ -20,8 +20,12 @@ private const val TAG = "AnkiSendDispatch"
  * against `Pair<Long, List<String>>` placeholders.
  */
 private sealed interface ModelTarget {
-    /** Default (PlayTranslate) — write to v004 via the legacy path. */
-    data object Legacy : ModelTarget
+    /** Default (PlayTranslate) — the mode's field-based PlayTranslate
+     *  model ([PtModels.WORD] / [PtModels.SENTENCE]), resolved (and
+     *  lazily created) at dispatch time. */
+    data class Default(
+        val model: AnkiManager.ModelInfo,
+    ) : ModelTarget
     /**
      * Anki Basic shape ({Front, Back} or {Front, Back, Picture}).
      * Bypasses the mapping system — fields are assembled at send time
@@ -37,6 +41,29 @@ private sealed interface ModelTarget {
     ) : ModelTarget
 }
 
+/** The one field name every assembler routes the screenshot to:
+ *  [PtModels.assemble] (via `PtNote.toValues`) and
+ *  [AnkiCardTypeMapper.assembleBasicNote] both key on it literally, so a
+ *  model that lacks it drops the image no matter what we upload. */
+private const val PICTURE_FIELD = "Picture"
+
+/** True when a note assembled for this target has somewhere to put the
+ *  screenshot. False means the image was never going to appear on the
+ *  card — a plain Basic {Front, Back}, a mapping with no PICTURE source,
+ *  or one of our own models whose Picture field was renamed in AnkiDroid
+ *  — so a failed upload costs the user nothing and must not be reported
+ *  as a loss. */
+private val ModelTarget.holdsPicture: Boolean
+    get() = when (this) {
+        is ModelTarget.Default -> PICTURE_FIELD in model.fieldNames
+        is ModelTarget.Basic   -> PICTURE_FIELD in model.fieldNames
+        // Read the mapping the way [AnkiCardTypeMapper.assembleNote] does —
+        // per LIVE field name, so a stale entry left behind by a renamed
+        // field doesn't count as a destination.
+        is ModelTarget.Structured ->
+            model.fieldNames.any { mapping[it] == ContentSource.PICTURE }
+    }
+
 /**
  * Result of an attempted Anki send. Callers map this to user-visible
  * Toast / dismiss behavior.
@@ -49,15 +76,24 @@ sealed interface AnkiSendResult {
      *  [wordAudioDropped] is true when at least one per-target-word audio
      *  upload failed (requested count > uploaded count), so the
      *  corresponding word(s) in the card carry no `[sound:]` tag.
-     *  Callers surface either flag to the user. */
+     *  [imageDropped] is true when a screenshot was requested (a non-null
+     *  screenshotPath) and the target note had a field to hold it, but its
+     *  media upload failed — the card landed with an empty Picture field.
+     *  Callers surface these flags via [Success.mediaShortfallRes]. */
     data class Success(
         val audioDropped: Boolean = false,
         val wordAudioDropped: Boolean = false,
+        val imageDropped: Boolean = false,
     ) : AnkiSendResult
-    /** The send failed — the caller shows [messageRes] in an error
-     *  alert and restores the save button. [messageRes] names the cause
-     *  where the dispatcher knows it, and is generic otherwise. */
-    data class Failed(@StringRes val messageRes: Int) : AnkiSendResult
+    /** The send failed — the caller shows the error and restores the
+     *  save button. [messageRes] names the cause where the dispatcher
+     *  knows it, and is generic otherwise. [message], when non-null, is
+     *  pre-formatted text (runtime args like a field name already baked
+     *  in) that callers show INSTEAD of [messageRes]. */
+    data class Failed(
+        @StringRes val messageRes: Int,
+        val message: String? = null,
+    ) : AnkiSendResult
     /** The user's picked card type has no configured mapping. The
      *  dispatcher already showed a Toast pointing this out; callers
      *  with Fragment infrastructure open the mapping dialog for
@@ -70,13 +106,37 @@ sealed interface AnkiSendResult {
 }
 
 /**
+ * The message naming what this otherwise-successful send could not
+ * attach, or null when the card landed complete. One resolver for every
+ * send surface so a partial send reads the same everywhere: the review
+ * sheets (silent on a clean send) toast only when this is non-null,
+ * while the one-tap surfaces fall back to their mode-named success
+ * message.
+ *
+ * Screenshot and audio each get their own message, plus a combined one:
+ * whatever breaks AnkiDroid's media store tends to break it for every
+ * upload in the pass, and naming only half of what's missing leaves the
+ * user to find the rest in their deck later.
+ */
+@StringRes
+fun AnkiSendResult.Success.mediaShortfallRes(): Int? {
+    val audioMissing = audioDropped || wordAudioDropped
+    return when {
+        imageDropped && audioMissing -> R.string.anki_added_no_screenshot_or_audio
+        imageDropped -> R.string.anki_added_no_screenshot
+        audioMissing -> R.string.anki_added_no_audio
+        else -> null
+    }
+}
+
+/**
  * Shared "send a card to AnkiDroid" pipeline used by the review sheets
  * (via the [Fragment.dispatchSendToAnki] wrapper) and the one-tap
  * helpers. Resolves the chosen card type, uploads media, builds the
- * field array (legacy v004 / Basic / structured per-mapping), and
- * writes the note. Surface UX (mapping dialog open, button restore,
- * fragment-result post) is the caller's job — the dispatcher only
- * shows the explanatory Toast on the NeedsMapping and stale-sort-field
+ * field array (default PlayTranslate model / Basic / structured
+ * per-mapping), and writes the note. Surface UX (mapping dialog open,
+ * button restore, fragment-result post) is the caller's job — the
+ * dispatcher only shows the explanatory Toast on the NeedsMapping
  * branches.
  *
  * Returns [AnkiSendResult.NeedsMapping] carrying the resolved model
@@ -85,7 +145,8 @@ sealed interface AnkiSendResult {
  * dialog for that model; overlay-context callers re-launch the
  * review activity so the user can configure it inside the sheet.
  *
- * @param mode             Which sheet flow this came from — relayed
+ * @param mode             Which sheet flow this came from — picks the
+ *                         default PlayTranslate model, and is relayed
  *                         to the mapping dialog by callers that open
  *                         one (Basic-shape templates rely on `mode`
  *                         for their defaults).
@@ -93,10 +154,9 @@ sealed interface AnkiSendResult {
  *                         Picture field, or null.
  * @param audioPath        Path to the synthesized TTS audio file to
  *                         attach, or null.
- * @param legacyFront      Lazy builder for the legacy v004 front HTML.
- * @param legacyBack       Lazy builder for the legacy v004 back HTML;
- *                         receives the AnkiDroid-side image and audio
- *                         filenames.
+ * @param ptNote           Lazy builder for the default PlayTranslate
+ *                         note payload; receives the AnkiDroid-side
+ *                         image and audio filenames.
  * @param structured       Lazy builder for the structured outputs;
  *                         receives the AnkiDroid-side image and audio
  *                         filenames.
@@ -106,14 +166,13 @@ suspend fun Context.dispatchSendToAnki(
     mode: CardMode,
     screenshotPath: String?,
     audioPath: String?,
-    legacyFront: () -> String,
-    legacyBack: (imageFilename: String?, audioFilename: String?, wordAudioFilenames: Map<String, String>) -> String,
+    ptNote: (imageFilename: String?, audioFilename: String?, wordAudioFilenames: Map<String, String>) -> PtNote,
     structured: (imageFilename: String?, audioFilename: String?, wordAudioFilenames: Map<String, String>) -> CardOutputs,
     /** Per-target-word audio paths keyed by word. Uploaded individually
      *  via [AnkiManager.addMediaFromFile] in the same media pass as the
      *  screenshot and sentence audio. The returned filename map is then
-     *  threaded into [legacyBack] / [structured] so each word's row in
-     *  WORDS_TABLE can carry a `[sound:…]` tag. */
+     *  threaded into [ptNote] / [structured] so each word's row in
+     *  the words table can carry a `[sound:…]` tag. */
     wordAudioPaths: Map<String, String> = emptyMap(),
 ): AnkiSendResult {
     val ctx = this
@@ -121,16 +180,20 @@ suspend fun Context.dispatchSendToAnki(
     val anki = AnkiManager(ctx)
 
     // Resolve the target model + mapping FIRST, before uploading any
-    // media. The two common bail paths below — `Failed(models_unavailable)`
-    // and `NeedsMapping` — would otherwise leave the screenshot, sentence
-    // audio, and (now) every per-target-word audio file orphaned in
-    // AnkiDroid's media folder. Sort-field + Legacy `getOrCreateModel`
-    // failures stay after uploads: they need the assembled fields and
-    // would require a more invasive restructure for marginal additional
-    // safety.
+    // media. Every bail path below — `Failed(models_unavailable)`,
+    // `NeedsMapping`, and a default-model create failure — would
+    // otherwise leave the screenshot, sentence audio, and every
+    // per-target-word audio file orphaned in AnkiDroid's media folder.
+    // Only the mapped-but-empty first-field bail stays after uploads:
+    // it needs the assembled fields.
     val pickedId = prefs.ankiModelId
     val target: ModelTarget = when {
-        pickedId == -1L -> ModelTarget.Legacy
+        pickedId == -1L -> {
+            val model = withContext(Dispatchers.IO) {
+                anki.getOrCreatePtModel(PtModels.specFor(mode))
+            } ?: return AnkiSendResult.Failed(R.string.anki_send_failed_message)
+            ModelTarget.Default(model)
+        }
         else -> {
             val models = withContext(Dispatchers.IO) { anki.getModels() }
             // Empty list always means transient query/permission
@@ -138,10 +201,10 @@ suspend fun Context.dispatchSendToAnki(
             // Basic + Cloze note types, so a real install never has
             // zero models. Abort rather than treating it as "model
             // deleted" — that would destructively reset prefs and
-            // silently insert into the v004 legacy template, leaving
+            // silently insert into a default PlayTranslate model, leaving
             // the user with a card in the wrong place under a
             // "success" toast. The healing pass at
-            // AnkiUiHelper.applyHealing applies the same guard.
+            // AnkiUiHelper.addAnkiSection's healing applies the same guard.
             if (models.isEmpty()) {
                 return AnkiSendResult.Failed(R.string.anki_models_unavailable)
             }
@@ -150,12 +213,16 @@ suspend fun Context.dispatchSendToAnki(
                 // Card type was deleted/renamed away in AnkiDroid since
                 // the user picked it. Safe to reset prefs because we
                 // already know `models` is non-empty (the genuine
-                // "model is gone" signal).
+                // "model is gone" signal). Fall back to the default
+                // PlayTranslate model for this mode.
                 prefs.ankiModelId = -1L
                 prefs.ankiModelName = ""
                 Toast.makeText(ctx, R.string.anki_card_type_stale_fallback,
                     Toast.LENGTH_SHORT).show()
-                ModelTarget.Legacy
+                val model = withContext(Dispatchers.IO) {
+                    anki.getOrCreatePtModel(PtModels.specFor(mode))
+                } ?: return AnkiSendResult.Failed(R.string.anki_send_failed_message)
+                ModelTarget.Default(model)
             } else if (AnkiCardTypeMapper.isBasicShape(picked.fieldNames)) {
                 // Basic-shape templates don't carry a stored mapping —
                 // assembleBasicNote derives Front/Back from the current
@@ -174,16 +241,46 @@ suspend fun Context.dispatchSendToAnki(
                         Toast.LENGTH_LONG).show()
                     return AnkiSendResult.NeedsMapping(picked)
                 }
+                // First-field preflight: Anki's duplicate-detection
+                // checksum (`csum`) is computed from the note's FIRST
+                // field — NOT the model's browser sort field, which
+                // plays no role in note identity. Inserting with an
+                // empty first field gives every note the same csum, and
+                // AnkiDroid rejects the second one onwards as a
+                // duplicate (null URI → generic "Failed to add card").
+                // The canonical trigger is JPMN's leading `Key` field,
+                // which PT's defaults intentionally leave unmapped so
+                // the user picks what uniquely identifies their cards.
+                // An unmapped first field always assembles to "", so
+                // bail HERE, before the media pass below — each upload
+                // for a send that can't complete is an orphan in
+                // AnkiDroid's media store (no content dedup; every
+                // attempt mints a fresh uniquely-suffixed file). (An
+                // earlier version keyed this guard on the sort field
+                // after assembly — indistinguishable on JPMN, where
+                // `Key` is both — and hard-blocked Senren-style note
+                // types whose `freqSort` sort field sits mid-list and
+                // is legitimately empty for words with no frequency
+                // data.)
+                val firstFieldName = picked.fieldNames.firstOrNull().orEmpty()
+                if ((mapping[firstFieldName] ?: ContentSource.NONE) == ContentSource.NONE) {
+                    Toast.makeText(
+                        ctx,
+                        ctx.getString(R.string.anki_first_field_unmapped, firstFieldName),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    return AnkiSendResult.NeedsMapping(picked)
+                }
                 ModelTarget.Structured(picked, mapping)
             }
         }
     }
 
-    // Target is resolved and the common early-fail paths are past. Now
+    // Target is resolved and every preflightable bail is past. Now
     // upload media — anything we upload from here has a real shot at
-    // being attached to a successfully-inserted note (rare sort-field
-    // failures and Legacy `getOrCreateModel` failures still leave
-    // orphans, but those are uncommon and the surface is bounded).
+    // being attached to a successfully-inserted note. The residual
+    // orphan surface is the mapped-but-empty first-field bail and
+    // addNote itself failing, both only knowable post-upload.
     val imageFilename = screenshotPath?.let {
         withContext(Dispatchers.IO) { anki.addMediaFromFile(File(it)) }
     }
@@ -201,19 +298,30 @@ suspend fun Context.dispatchSendToAnki(
     }
 
     val (modelId, fields) = when (target) {
-        ModelTarget.Legacy -> {
-            val legacyModel = withContext(Dispatchers.IO) { anki.getOrCreateModel() }
-                ?: return AnkiSendResult.Failed(R.string.anki_send_failed_message)
-            // 3rd field = TargetWord. Reuse the structured builder's EXPRESSION
-            // output, which is the plain looked-up/highlighted headword for both
-            // word and sentence cards — so sentence cards persist their target
-            // word and the "already in Anki" detector can match it.
-            val targetWord = structured(imageFilename, audioFilename, wordAudioFilenames).expression
-            legacyModel to listOf(
-                legacyFront(),
-                legacyBack(imageFilename, audioFilename, wordAudioFilenames),
-                targetWord,
-            )
+        is ModelTarget.Default -> {
+            val note = ptNote(imageFilename, audioFilename, wordAudioFilenames)
+            // Assemble against the model's ACTUAL field names (read back
+            // from AnkiDroid) so user-added or reordered fields on our
+            // note types keep working.
+            val flds = PtModels.assemble(target.model.fieldNames, note)
+            Log.d(TAG, "default send: model=${target.model.name} " +
+                "fields=${flds.size} non-empty=${flds.count { it.isNotEmpty() }}")
+            // Same first-field guard as the Structured branch below: a
+            // renamed first field (assemble maps it to "") or a reorder
+            // that put an empty-able field first would hit the
+            // provider's duplicate-csum rejection as a generic
+            // "Failed to add card" on every send after the first. Fail
+            // with the actionable message instead. No NeedsMapping —
+            // the field-mapping dialog doesn't apply to our own models;
+            // the remedy is renaming the field back in AnkiDroid.
+            if (flds.firstOrNull()?.isEmpty() == true) {
+                val fieldName = target.model.fieldNames.firstOrNull().orEmpty()
+                return AnkiSendResult.Failed(
+                    R.string.anki_send_failed_message,
+                    ctx.getString(R.string.anki_first_field_empty, fieldName),
+                )
+            }
+            target.model.id to flds
         }
         is ModelTarget.Basic -> {
             val outputs = structured(imageFilename, audioFilename, wordAudioFilenames)
@@ -229,26 +337,22 @@ suspend fun Context.dispatchSendToAnki(
                 target.model.fieldNames, target.mapping, outputs)
             Log.d(TAG, "structured send: model=${target.model.name} " +
                 "fields=${flds.size} non-empty=${flds.count { it.isNotEmpty() }}")
-            // Sort field guard: AnkiDroid (and Anki desktop) compute
-            // a checksum of `fields[sortf]` for duplicate detection.
-            // An empty sort field means every note we insert has the
-            // same csum — AnkiDroid's content provider rejects the
-            // second one onwards as a duplicate (returns null URI,
-            // surfacing as a generic "Failed to add card" toast). The
-            // canonical trigger is JPMN's leading `Key` field, which
-            // PT's defaults intentionally leave unmapped so the user
-            // can pick what uniquely identifies their cards. Catch
-            // that here with a clear actionable error instead of the
-            // mysterious silent failure.
-            val sortf = target.model.sortf
-            if (sortf in flds.indices && flds[sortf].isEmpty()) {
-                val sortFieldName = target.model.fieldNames.getOrNull(sortf).orEmpty()
-                Toast.makeText(
-                    ctx,
-                    ctx.getString(R.string.anki_sort_field_empty, sortFieldName),
-                    Toast.LENGTH_LONG,
-                ).show()
-                return AnkiSendResult.NeedsMapping(target.model)
+            // First-field guard, mapped-but-empty arm — the unmapped
+            // case bailed pre-upload in the target resolution block,
+            // which also carries the full csum rationale. Here the
+            // first field IS mapped, but its source produced no value
+            // for this card (e.g. a picture source with no screenshot).
+            // Only decidable post-assembly: the value can depend on
+            // the uploaded media filenames. The mapping dialog can't
+            // conjure missing data — fail with the full explanation
+            // instead of reopening it and telling the user to map what
+            // they already mapped.
+            if (flds.firstOrNull()?.isEmpty() == true) {
+                val fieldName = target.model.fieldNames.firstOrNull().orEmpty()
+                return AnkiSendResult.Failed(
+                    R.string.anki_send_failed_message,
+                    ctx.getString(R.string.anki_first_field_empty, fieldName),
+                )
             }
             target.model.id to flds
         }
@@ -256,11 +360,16 @@ suspend fun Context.dispatchSendToAnki(
 
     val ok = withContext(Dispatchers.IO) { anki.addNote(modelId, deckId, fields) }
     if (!ok) return AnkiSendResult.Failed(R.string.anki_send_failed_message)
-    // The note was added. Flag any audio that was requested but didn't
-    // make it onto the card so callers can warn the user.
+    // The note was added. Flag any media that was requested but didn't
+    // make it onto the card so callers can warn the user. The screenshot
+    // is only a loss when the note had a field to hold it — see
+    // [holdsPicture]; the audio flags carry no such gate because their
+    // upload is already conditioned on the user's audio toggle.
     return AnkiSendResult.Success(
         audioDropped = audioPath != null && audioFilename.isNullOrEmpty(),
         wordAudioDropped = wordAudioPaths.size > wordAudioFilenames.size,
+        imageDropped = screenshotPath != null && imageFilename.isNullOrEmpty() &&
+            target.holdsPicture,
     )
 }
 
@@ -279,8 +388,7 @@ suspend fun Fragment.dispatchSendToAnki(
     mode: CardMode,
     screenshotPath: String?,
     audioPath: String?,
-    legacyFront: () -> String,
-    legacyBack: (imageFilename: String?, audioFilename: String?, wordAudioFilenames: Map<String, String>) -> String,
+    ptNote: (imageFilename: String?, audioFilename: String?, wordAudioFilenames: Map<String, String>) -> PtNote,
     structured: (imageFilename: String?, audioFilename: String?, wordAudioFilenames: Map<String, String>) -> CardOutputs,
     wordAudioPaths: Map<String, String> = emptyMap(),
 ): AnkiSendResult {
@@ -289,8 +397,7 @@ suspend fun Fragment.dispatchSendToAnki(
         mode = mode,
         screenshotPath = screenshotPath,
         audioPath = audioPath,
-        legacyFront = legacyFront,
-        legacyBack = legacyBack,
+        ptNote = ptNote,
         structured = structured,
         wordAudioPaths = wordAudioPaths,
     )

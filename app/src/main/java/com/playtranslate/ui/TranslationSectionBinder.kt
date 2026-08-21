@@ -21,6 +21,7 @@ import com.playtranslate.R
 import com.playtranslate.language.ChineseScriptVariant
 import com.playtranslate.language.HintTextKind
 import com.playtranslate.language.SourceLanguageEngines
+import com.playtranslate.language.hintAnnotations
 import com.playtranslate.language.SourceLanguageProfiles
 import com.playtranslate.model.OcrProvenance
 import com.playtranslate.model.TranslationResult
@@ -99,6 +100,26 @@ class TranslationSectionBinder(
     }
 
     private var speakButton: OriginalSpeakButton? = null
+
+    /** True once [setupSectionButtons] repurposed the copy buttons to Anki with
+     *  a one-tap long-press — the controller then maps hold-A to it. */
+    private var ankiOneTapOnCopy = false
+
+    /** The header action buttons the controller cursor can reach, in render
+     *  order, filtered to what's currently on screen. Deliberately excludes the
+     *  language labels and the OCR row — both open picker windows the
+     *  controller can't drive (and the language path dismisses the sheet). */
+    fun navigableActions(): List<NavAction> = buildList {
+        for (v in listOf(
+            btnToggleFurigana, btnSpeakOriginal, btnEditOriginal, btnCopyOriginal,
+            btnToggleOriginal,
+            btnFontSize, btnCopyTranslation, btnShowOnScreen, btnToggleTranslation,
+        )) {
+            if (!v.isShown || !v.isEnabled) continue
+            val hold = ankiOneTapOnCopy && (v === btnCopyOriginal || v === btnCopyTranslation)
+            add(NavAction(v, holdActivates = hold))
+        }
+    }
 
     /** Char range currently highlighted (a word-lookup popup is active), or null.
      *  Tracked here so [applyFurigana] can re-attach the highlight after
@@ -243,13 +264,17 @@ class TranslationSectionBinder(
             onSourceTextHeightChanged?.invoke()
             return
         }
-        // annotateForHintText tokenizes off the main thread (it's suspend); apply
-        // the furigana spans back on the main thread. Bail if a newer applyFurigana
-        // superseded us (toggle-off / re-render → token), or the displayed text
-        // changed out from under us (new result → text guard).
+        // The FULL-depth annotation resolves dictionary readings off the main
+        // thread (suspend); apply the furigana spans back on the main thread.
+        // FULL is the correctness contract: what renders is the occurrence-
+        // validated reading (一泊 → いっぱく), the same one the words panel,
+        // Anki fields, and sentence TTS quote — never a provisional reading
+        // that gets corrected later. Bail if a newer applyFurigana superseded
+        // us (toggle-off / re-render → token), or the displayed text changed
+        // out from under us (new result → text guard).
         scope.launch {
             val engine = SourceLanguageEngines.get(ctx.applicationContext, prefs.sourceLangId)
-            val annotations = engine.annotateForHintText(plainText)
+            val annotations = engine.annotate(plainText).hintAnnotations()
             if (token != furiganaRenderToken || tvOriginal.text.toString() != plainText) return@launch
             if (annotations.isEmpty()) {
                 tvOriginal.text = plainText
@@ -447,6 +472,7 @@ class TranslationSectionBinder(
                     btn.setOnLongClickListener { onAnkiOneTap(); true }
                 }
             }
+            ankiOneTapOnCopy = onAnkiOneTap != null
             // TODO(device): tvOriginal is a ClickableTextView whose onTouchEvent
             // routes through a GestureDetector and always consumes the event. Long-
             // press copy relies on View.onTouchEvent's own long-press timer firing

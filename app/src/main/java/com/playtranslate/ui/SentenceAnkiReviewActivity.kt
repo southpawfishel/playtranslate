@@ -77,9 +77,14 @@ class SentenceAnkiReviewActivity : AppCompatActivity() {
         val wordEnrichment: Map<String, WordEnrichment> =
             (intent.getSerializableExtra(EXTRA_ENRICHMENT) as? HashMap<String, WordEnrichment>)
                 ?: emptyMap()
+        @Suppress("DEPRECATION")
+        val pendingTranslation =
+            intent.getSerializableExtra(EXTRA_PENDING_TRANSLATION)
+                as? com.playtranslate.model.PendingTranslation
+        val audioAnchorMs = intent.getLongExtra(EXTRA_AUDIO_ANCHOR_MS, 0L).takeIf { it > 0 }
 
         showReviewSheet(sentence, translation, wordResults, surfaceForms,
-            wordEnrichment, screenshotPath, sourceLangId)
+            wordEnrichment, screenshotPath, sourceLangId, pendingTranslation, audioAnchorMs)
     }
 
     private fun showReviewSheet(
@@ -90,6 +95,8 @@ class SentenceAnkiReviewActivity : AppCompatActivity() {
         wordEnrichment: Map<String, WordEnrichment>,
         screenshotPath: String?,
         sourceLangId: SourceLangId,
+        pendingTranslation: com.playtranslate.model.PendingTranslation? = null,
+        audioAnchorMs: Long? = null,
     ) {
         val sheet = AnkiReviewBottomSheet.newInstance(
             original = sentence,
@@ -99,6 +106,8 @@ class SentenceAnkiReviewActivity : AppCompatActivity() {
             wordEnrichment = wordEnrichment,
             screenshotPath = screenshotPath,
             sourceLangId = sourceLangId,
+            pendingTranslation = pendingTranslation,
+            audioAnchorMs = audioAnchorMs,
         )
         sheet.onDismissListener = DialogInterface.OnDismissListener { finish() }
         sheet.show(supportFragmentManager, AnkiReviewBottomSheet.TAG)
@@ -131,5 +140,11 @@ class SentenceAnkiReviewActivity : AppCompatActivity() {
         const val EXTRA_FREQ_SCORES = "extra_freq_scores"
         const val EXTRA_SURFACES = "extra_surfaces"
         const val EXTRA_ENRICHMENT = "extra_enrichment"
+        const val EXTRA_PENDING_TRANSLATION = "extra_pending_translation"
+
+        /** Epoch ms of the sentence's capture/display moment — the game-audio
+         *  ring anchor the trim view seeds its default range from. Absent/≤0
+         *  ⇒ no anchor (default stays the buffer tail). */
+        const val EXTRA_AUDIO_ANCHOR_MS = "extra_audio_anchor_ms"
     }
 }

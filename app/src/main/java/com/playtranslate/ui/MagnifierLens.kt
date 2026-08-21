@@ -14,14 +14,16 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.hardware.input.InputManager
 import android.os.SystemClock
 import android.text.TextUtils
 import android.util.TypedValue
+import android.view.Choreographer
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.InputDevice
+import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.ViewTreeObserver
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -44,6 +46,9 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.withClip
+import kotlin.math.abs
+import kotlin.math.roundToInt
+import kotlin.math.sign
 
 /**
  * Floating magnifier lens shown while the user drags on a JP/ZH/Latin token
@@ -117,6 +122,54 @@ internal fun computeGrownCardHeight(
         safeBottom - overhang - anchoredEdgeY        // card bottom + overhang ≤ safeBottom
     }
     return desiredCardH.coerceIn(baseCardH, maxCardH.coerceAtLeast(baseCardH))
+}
+
+/**
+ * Widest the pill capsule may render inside a [viewW]-wide lens host.
+ *
+ * The chips are seated off the pill's own edges ([computeChipLaneMargins]), so
+ * every pixel the pill takes past this cap pushes them a pixel further past the
+ * host's frame — where the FrameLayout clips them away, visible disk and touch
+ * target together. At exactly this width the two chips land flush with the
+ * host's left and right edges: the resting placement they are laid out at
+ * before the reveal slides them out from under the pill.
+ *
+ * @param chipLane horizontal space one chip needs beside the pill — its
+ *   hit-halo pad, its visible disk, and the resting gap to the pill's edge.
+ */
+internal fun computeMaxPillWidth(viewW: Int, chipLane: Int): Int =
+    (viewW - 2 * chipLane).coerceAtLeast(0)
+
+/**
+ * Left and right margins that seat the chips one [chipLane] outside a
+ * [pillWidth]-wide pill centered in a [viewW]-wide host. Both come out ≥ 0
+ * exactly when [pillWidth] is within [computeMaxPillWidth].
+ */
+internal fun computeChipLaneMargins(viewW: Int, pillWidth: Int, chipLane: Int): Pair<Int, Int> {
+    val pillLeft = (viewW - pillWidth) / 2
+    val pillRight = pillLeft + pillWidth
+    return (pillLeft - chipLane) to (viewW - pillRight - chipLane)
+}
+
+/**
+ * Split what [maxPillWidth] leaves after [fixedChromeWidth] — paddings,
+ * divider, gaps, chevron — between the pill's headline and its reading, given
+ * the [readingWidth] the reading wants at its settled text size.
+ *
+ * The reading takes only what it needs, but never more than half the budget:
+ * the headline is the word being looked up, and a long reading must not starve
+ * it. Both numbers are handed to their views as maxWidths, so their sum plus
+ * the chrome is what bounds the capsule's WRAP_CONTENT width — and that bound
+ * is what keeps the chip lanes intact.
+ */
+internal fun computePillTextAllotment(
+    maxPillWidth: Int,
+    fixedChromeWidth: Int,
+    readingWidth: Int,
+): Pair<Int, Int> {
+    val budget = (maxPillWidth - fixedChromeWidth).coerceAtLeast(0)
+    val word = (budget - readingWidth.coerceAtLeast(0)).coerceAtLeast(budget - budget / 2)
+    return word to (budget - word)
 }
 
 class MagnifierLens(
@@ -231,6 +284,13 @@ class MagnifierLens(
 
     val isInteractive: Boolean get() = lensView?.isInteractive == true
 
+    /** True while the sticky lens HOLDS WINDOW FOCUS for controller input —
+     *  [makeInteractive] found a controller, so A/B/dpad/stick are driving the
+     *  lens, not the game. The a11y key filter's "game input clears the
+     *  lookup" rule must stand down for those keys while this is set. */
+    val isConsumingController: Boolean get() = isInteractive && tookControllerFocus
+    private var tookControllerFocus = false
+
     /** Zoom source, held here as well as on the view: setBitmap can arrive
      *  while the lens is hidden (the camera scene flow attaches the frame
      *  BEFORE its deferred reveal creates the view), and a view-only write
@@ -280,17 +340,20 @@ class MagnifierLens(
         val view = lensView ?: return
         val root = lensRoot ?: return
         val p = params ?: return
-        // The interactive card needs window focus only to receive analog-
-        // stick motion for stick-nudge dismissal. With no game controller
-        // attached there is no stick, so stay non-focusable: that keeps the
+        // The interactive card needs window focus only for key/stick
+        // navigation (dpad + A over the pill/chips, stick scroll, B/Escape
+        // dismiss). With no gamepad or hardware keyboard attached there is
+        // nothing to navigate WITH, so stay non-focusable: that keeps the
         // window from becoming the system-bar owner and showing the nav
         // pill over an immersive game. Touch and outside-touch dismissal
         // work either way — neither needs focus.
         var flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-            WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-        if (!hasGameController()) {
+            WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+        tookControllerFocus = hasNavInputDevice(rawCtx)
+        if (!tookControllerFocus) {
             flags = flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         }
         // The window is already full-screen (set in show()); this flag change
@@ -299,9 +362,11 @@ class MagnifierLens(
         p.flags = flags
         try { wm.updateViewLayout(root, p) } catch (_: Exception) {}
         // Sticky now: the root catches off-card taps to dismiss (and consumes
-        // them so they don't reach the app/game behind).
+        // them so they don't reach the app/game behind), and — while focusable
+        // for the controller — the B button dismisses the same way.
         root.interactive = true
         root.onOffCardTap = { dismiss() }
+        root.onDismissKey = { dismiss() }
         view.attachInteractiveListeners(onDismissRequest = { dismiss() })
         // Arrow x stays inside the card region (in lens-local coords) — clamped
         // so the triangle's tip lands over the card, not the chip-halo padding.
@@ -313,6 +378,13 @@ class MagnifierLens(
         // Release commit: grow the card to fit the dictionary, animated inside
         // the fixed window (definitions were bound just above).
         fitHeightToContent()
+    }
+
+    /** Controller-opened lens: ring the pill from the start, so the next A
+     *  drills straight into the detail screen. A touch-opened lens selects on
+     *  the first controller input instead (the sheet's first-press rule). */
+    fun focusPillForController() {
+        lensView?.focusPill()
     }
 
     /** Grow the card to fit newly-bound definitions on an ALREADY-interactive
@@ -395,33 +467,21 @@ class MagnifierLens(
         view.setCardGeometry(h, cardTop)
     }
 
-    /** True when a physical game controller (gamepad / joystick) is
-     *  connected — including a handheld's built-in controls, which report
-     *  as a real SOURCE_GAMEPAD / SOURCE_JOYSTICK device. Gates whether the
-     *  interactive card takes window focus; see [makeInteractive]. */
-    private fun hasGameController(): Boolean {
-        val inputManager = rawCtx.getSystemService(InputManager::class.java)
-            ?: return false
-        for (id in inputManager.inputDeviceIds) {
-            val sources = inputManager.getInputDevice(id)?.sources ?: continue
-            if (sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
-                sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
-            ) {
-                return true
-            }
-        }
-        return false
-    }
-
     /** Window flags for the lens in its non-interactive (zoom) state. On the
      *  MediaProjection backend the window must stay touchable: a non-touchable
      *  TYPE_APPLICATION_OVERLAY is opacity-capped by the anti-tapjacking rule
      *  and renders washed out. The drag gesture is owned by the floating
      *  icon's window, so a touchable lens window does not steal it. */
     private fun zoomWindowFlags(): Int {
+        // HARDWARE_ACCELERATED: only read at addView time (OverlayHost also
+        // stamps it centrally), carried here so the wholesale flag rewrites
+        // in resetToZoom/makeInteractive keep params honest — and so the
+        // non-host (in-app activity window) path gets it too. The styled
+        // definitions panel hosts a WebView, which needs the HW pipeline.
         var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
         if (overlayHost?.windowType != WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY) {
             flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         }
@@ -559,6 +619,19 @@ class MagnifierLens(
      *  user-initiated dismissal). */
     private fun removeOverlayInternal() {
         val root = lensRoot ?: return
+        // Full interactive teardown BEFORE the window goes — this is the one
+        // removal path every dismissal funnels through, and the stick-scroll
+        // Choreographer callback re-posts itself: without this, dismissing
+        // mid-deflection leaves it running per-frame against the detached
+        // view (holding it) forever. resetToZoom() detaches separately; a
+        // second detach here is idempotent.
+        lensView?.detachInteractiveListeners()
+        // The styled renderer's native WebView must be destroy()ed, not
+        // just dropped with the window: a removed-but-undestroyed WebView
+        // holds renderer resources and its context graph until GC, so
+        // repeated lens open/dismiss churn accumulates the most expensive
+        // object in the app (Codex adversarial catch).
+        lensView?.releaseStyledView()
         heightAnimator?.cancel()
         heightAnimator = null
         lensCardHeight = lensH
@@ -600,6 +673,7 @@ class MagnifierLens(
             onAnkiLongPress = { onAnkiLongPress?.invoke() },
             onSpeakTap = { onSpeakTap?.invoke() },
             showAnkiChip = showAnkiChip,
+            onStyledHeightChanged = { fitHeightToContent() },
         )
         val root = LensRoot(themedCtx, view, viewW)
         val windowType = if (useActivityWindow)
@@ -656,14 +730,52 @@ class MagnifierLens(
          *  (Taps inside the column but off the chrome band are dismissed by
          *  [lens] itself; both are consumed by this full-screen window.) */
         var onOffCardTap: (() -> Unit)? = null
+        /** Controller B / back while the sticky lens holds window focus (it
+         *  goes focusable when a controller is attached — [makeInteractive]).
+         *  A separate hook from [onOffCardTap]: same dismissal, different
+         *  intent. */
+        var onDismissKey: (() -> Unit)? = null
+
+        /** True between a consumed B DOWN and its UP, so dismissal fires only
+         *  for a press that began on this window. */
+        private var backDownSeen = false
+
+        override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
+            if (interactive && ControllerKeys.isBack(ev.keyCode)) {
+                // Fire on UP, not DOWN: dismissing removes this FOCUSED window,
+                // and acting on the DOWN would orphan the UP into whatever sits
+                // beneath — the game itself in the drag-lookup flow. Release-
+                // to-dismiss is also the console idiom. The down-seen gate
+                // keeps a B held from before the lens appeared from dismissing
+                // it on release.
+                when (ev.action) {
+                    KeyEvent.ACTION_DOWN -> if (ev.repeatCount == 0) backDownSeen = true
+                    KeyEvent.ACTION_UP -> if (backDownSeen) {
+                        backDownSeen = false
+                        onDismissKey?.invoke()
+                    }
+                }
+                return true
+            }
+            if (interactive && lens.handleNavKey(ev)) return true
+            return super.dispatchKeyEvent(ev)
+        }
 
         init {
             // Transparent: only [lens] paints. The rest of the screen-sized
             // root is an invisible touch catcher.
             background = null
+            // Absolute LEFT, not relative START: this is a root WindowManager
+            // window, so ViewRootImpl stamps the configuration's layout
+            // direction on it and an Arabic system locale turns it RTL — where
+            // START resolves to RIGHT and lays the column out at
+            // `viewW - lensW` before [setLensX]'s translationX is even added.
+            // That also desynchronises [dispatchTouchEvent], which hit-tests
+            // the column as `lens.translationX ..+ lensW` on the assumption
+            // that lens.left is 0.
             addView(
                 lens,
-                LayoutParams(lensW, LayoutParams.MATCH_PARENT, Gravity.TOP or Gravity.START),
+                LayoutParams(lensW, LayoutParams.MATCH_PARENT, Gravity.TOP or Gravity.LEFT),
             )
         }
 
@@ -715,8 +827,17 @@ class MagnifierLens(
         private val onAnkiLongPress: () -> Unit,
         private val onSpeakTap: () -> Unit,
         private val showAnkiChip: Boolean,
+        /** Styled body reported a (new) painted height — the owner re-runs
+         *  its card-height fit (LensView is not an inner class). */
+        private val onStyledHeightChanged: () -> Unit,
     ) : FrameLayout(ctx) {
         private fun dp(v: Float): Int = (density * v).toInt()
+        /** sp → px through the display metrics, so the pill's fit measures text
+         *  the way [TextView.setTextSize] will render it. [density] alone
+         *  ignores the user's font scale and under-measures every string on a
+         *  large-text device — which lets the fitted pill overrun its cap. */
+        private fun spPx(v: Float): Float =
+            TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, v, resources.displayMetrics)
         /** Replace the alpha byte of [color] with [alpha] (0..255). Used to
          *  layer the spec's design alphas onto themed RGB tokens — e.g.
          *  the card border is the theme's primary-text color at 16%. */
@@ -993,6 +1114,18 @@ class MagnifierLens(
         // Chips: Speak (left) and Anki (right) route through the lens's
         // [onSpeakTap] / [onAnkiTap] callbacks — wired in [DragLookupController].
         // -----------------------------------------------------------------
+        /** Gap between the chip's visible disk and the pill's outer edge
+         *  in the resting (post-reveal) layout. */
+        private val chipPillGapPx = dp(14f)
+        /** Horizontal space one chip claims beside the pill: the outer half of
+         *  its hit halo, its visible disk, and the gap to the pill. */
+        private val chipLanePx = chipHaloPadPx + chipVisDiameterPx + chipPillGapPx
+        /** Hard cap on the pill's width — what's left of the host view once
+         *  both chip lanes are reserved. [fitPillText] sizes and bounds the
+         *  pill's text against it, which is what keeps [revealChips] able to
+         *  seat both chips inside the frame however long the word is. */
+        private val pillMaxWidthPx = computeMaxPillWidth(viewW, chipLanePx)
+
         // Speak chip's loading spinner — swapped in for the icon while a TTS
         // request is in flight (see [setSpeakChipLoading]).
         private val leftChipSpinner = ProgressBar(
@@ -1103,6 +1236,15 @@ class MagnifierLens(
             // both the drag lens and the in-app tap-word lens.
             emptyPlaceholder = ctx.getString(R.string.word_detail_no_definitions)
         }
+        /** The scroll's single child: the flat renderer plus (lazily) the
+         *  styled WebView renderer, visibility-swapped per bind. Keeping
+         *  the ScrollView as the ONE scroller preserves the stick-scroll
+         *  repeater and the clip/translation grow animation unchanged —
+         *  the styled view is always sized to its full content height and
+         *  never scrolls itself ([YomitanDefinitionsView]'s contract). */
+        private val bodyContainer = FrameLayout(ctx).apply {
+            addView(definitionsContent)
+        }
         private val definitionsScroll = ScrollView(ctx).apply {
             isVerticalScrollBarEnabled = true
             isFillViewport = false
@@ -1116,8 +1258,129 @@ class MagnifierLens(
             clipToPadding = false
             // Default pad: pill is at the top, so the bigger pad is on top.
             setPadding(0, bodyPillSidePadPx, 0, bodyOuterSidePadPx)
-            addView(definitionsContent)
+            addView(bodyContainer)
             visibility = GONE
+        }
+
+        // ── Styled (WebView) definitions state ────────────────────────
+        private var styledView: YomitanDefinitionsView? = null
+        /** Construction failed once (no WebView provider) — don't retry
+         *  per bind. */
+        private var styledUnavailable = false
+        /** A styled bind is in flight: flat content is showing and the
+         *  page hasn't reported its painted height yet. */
+        private var pendingStyledSwap = false
+        /** The styled view is the visible body (drives height fitting). */
+        var styledActive = false
+            private set
+        private var styledContentHeight = 0
+
+        private fun ensureStyledView(): YomitanDefinitionsView? {
+            styledView?.let { return it }
+            if (styledUnavailable) return null
+            val v = YomitanDefinitionsView(
+                context,
+                DefinitionsDocument.Tokens(
+                    text = context.themeColor(R.attr.ptText),
+                    textMuted = context.themeColor(R.attr.ptTextMuted),
+                    textHint = context.themeColor(R.attr.ptTextHint),
+                    accent = accentColor,
+                    panel = context.themeColor(R.attr.ptSurface),
+                    baseFontSizePx = 16.5f * LENS_DEFINITIONS_SCALE,
+                ),
+            )
+            if (!v.isUsable()) {
+                styledUnavailable = true
+                return null
+            }
+            // Same optical inset as the flat renderer.
+            v.setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx + dp(2f), 0)
+            // INVISIBLE at 1px, never GONE: a GONE view is never laid out,
+            // so the page's viewport would stay zero-width and the first
+            // swap would measure content wrapped at every character — the
+            // enormous bogus height that then sticks. INVISIBLE keeps the
+            // WebView laid out at the container's real width (JS still
+            // runs; only drawing is skipped) while contributing 1px to the
+            // container until the first real height arrives.
+            v.visibility = INVISIBLE
+            v.onContentHeight = { h -> onStyledContentHeight(h) }
+            v.onRendererGone = { onStyledRendererGone() }
+            // Non-link taps on the page open the detail view — the page's
+            // own hit testing decides, replacing the tap detector over this
+            // area (see [isTapEligible]). Same debounce as the detector
+            // path, so a gesture crossing both regions can't double-fire.
+            v.onBodyTap = { fireOpenTap() }
+            bodyContainer.addView(v, LayoutParams(LayoutParams.MATCH_PARENT, 1))
+            styledView = v
+            return v
+        }
+
+        /** Painted-height report from the page: size the styled view, and
+         *  if this bind was waiting to swap, reveal it now — the flat
+         *  content showed instantly and the styled render replaces it only
+         *  once it actually has pixels (no blank-panel gap). */
+        private fun onStyledContentHeight(h: Int) {
+            val sv = styledView ?: return
+            if (h <= 0) {
+                pendingStyledSwap = false
+                return
+            }
+            styledContentHeight = h
+            sv.layoutParams = (sv.layoutParams as? LayoutParams
+                ?: LayoutParams(LayoutParams.MATCH_PARENT, h)).apply { height = h }
+            if (pendingStyledSwap) {
+                pendingStyledSwap = false
+                styledActive = true
+                sv.visibility = VISIBLE
+                definitionsContent.visibility = GONE
+            }
+            if (styledActive) onStyledHeightChanged()
+        }
+
+        /** Full teardown of the styled renderer, for the window-removal
+         *  funnel ([removeOverlayInternal]). Safe to call with no styled
+         *  view; idempotent. */
+        fun releaseStyledView() {
+            styledView?.let {
+                it.destroy()
+                bodyContainer.removeView(it)
+            }
+            styledView = null
+            styledActive = false
+            pendingStyledSwap = false
+        }
+
+        /** Render process death: drop the instance and stay flat — the
+         *  flat content of the current bind is already in the tree. */
+        private fun onStyledRendererGone() {
+            styledView?.let { bodyContainer.removeView(it) }
+            styledView = null
+            styledUnavailable = true
+            styledActive = false
+            pendingStyledSwap = false
+            definitionsContent.visibility = VISIBLE
+        }
+
+        /** Back to the flat renderer as the visible body (loading, ZOOM,
+         *  or a bind with no styled payload). The styled view drops to
+         *  INVISIBLE at 1px — not GONE (it must stay laid out at real
+         *  width for the next swap's measurement), and not its old height
+         *  (an INVISIBLE view still counts toward the container's
+         *  wrap-content measure; a stale tall view would leave the scroll
+         *  full of blank space under the flat content). */
+        private fun showFlatBody() {
+            styledActive = false
+            pendingStyledSwap = false
+            styledView?.let { sv ->
+                sv.visibility = INVISIBLE
+                (sv.layoutParams as? LayoutParams)?.let { lp ->
+                    if (lp.height != 1) {
+                        lp.height = 1
+                        sv.layoutParams = lp
+                    }
+                }
+            }
+            definitionsContent.visibility = VISIBLE
         }
 
         private val clipPath = Path()
@@ -1131,6 +1394,9 @@ class MagnifierLens(
         private var sourceY = 0f
         private var sourceScreenW = 0
         private var sourceScreenH = 0
+
+        /** Controller cursor's ring — same renderer as the capture sheet's. */
+        private val focusRing = FocusRingView(ctx)
 
         init {
             setWillNotDraw(false)
@@ -1151,6 +1417,9 @@ class MagnifierLens(
             addView(leftChip)
             addView(rightChip)
             addView(pillView)
+            // Topmost; a plain non-clickable View, so lens touches fall
+            // through it to the pill/chips/card beneath.
+            addView(focusRing, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
             rebuildClipPath()
             updateChromeLayout()
         }
@@ -1182,11 +1451,17 @@ class MagnifierLens(
             val scrollTopPad = if (lensFlipped) bodyOuterSidePadPx else bodyPillSidePadPx
             val scrollBottomPad = if (lensFlipped) bodyPillSidePadPx else bodyOuterSidePadPx
             definitionsScroll.setPadding(0, scrollTopPad, 0, scrollBottomPad)
+            // Absolute LEFT + leftMargin throughout this method (never
+            // START/marginStart): every offset here is a view-pixel coordinate
+            // shared with the Canvas geometry — [cardLeftInView], the clip
+            // path, the crosshair — and canvas coordinates do not mirror. Under
+            // an RTL system locale the relative spelling would slide the placed
+            // chrome off the card the clip path still paints in place.
             definitionsScroll.layoutParams = LayoutParams(
                 cardW - 2 * bodyEdgeBufferPx, cardHeightPx - 2 * bodyEdgeBufferPx,
-                Gravity.START or Gravity.TOP,
+                Gravity.LEFT or Gravity.TOP,
             ).apply {
-                marginStart = chipHaloXPx + bodyEdgeBufferPx
+                leftMargin = chipHaloXPx + bodyEdgeBufferPx
                 topMargin = bodyTopOffset + bodyEdgeBufferPx
             }
 
@@ -1203,11 +1478,11 @@ class MagnifierLens(
             val chipTopMargin = pillAnchorY - chipHitSizePx / 2
             leftChip.layoutParams = LayoutParams(
                 chipHitSizePx, chipHitSizePx,
-                Gravity.START or Gravity.TOP,
+                Gravity.LEFT or Gravity.TOP,
             ).apply { topMargin = chipTopMargin }
             rightChip.layoutParams = LayoutParams(
                 chipHitSizePx, chipHitSizePx,
-                Gravity.END or Gravity.TOP,
+                Gravity.RIGHT or Gravity.TOP,
             ).apply { topMargin = chipTopMargin }
         }
 
@@ -1346,11 +1621,18 @@ class MagnifierLens(
          *  bottom. Measured against the currently bound [definitionsContent];
          *  call only after [setDefinitions] has bound a word. */
         fun desiredCardHeightForContent(): Int {
+            val chrome = bodyPillSidePadPx + bodyOuterSidePadPx + 2 * bodyEdgeBufferPx
+            // Styled body: a WebView can't report a synchronous measured
+            // height — use the page's own painted-height report (which
+            // re-runs [MagnifierLens.fitHeightToContent] whenever it lands,
+            // so the card converges even though the number arrives late).
+            if (styledActive && styledContentHeight > 0) {
+                return styledContentHeight + chrome
+            }
             definitionsContent.measure(
                 MeasureSpec.makeMeasureSpec(cardW - 2 * bodyEdgeBufferPx, MeasureSpec.EXACTLY),
                 MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED),
             )
-            val chrome = bodyPillSidePadPx + bodyOuterSidePadPx + 2 * bodyEdgeBufferPx
             return definitionsContent.measuredHeight + chrome
         }
 
@@ -1428,7 +1710,28 @@ class MagnifierLens(
             if (y >= arrowTop && y < arrowBottom) return false
             if (isInChipBounds(leftChip, x, y)) return false
             if (isInChipBounds(rightChip, x, y)) return false
+            // The styled definitions area belongs to the WebView: the page
+            // reports what a tap actually hit — a link navigates and hands
+            // off to the browser, anything else comes back as a body tap
+            // (wired to [fireOpenTap] in [ensureStyledView]). Running the
+            // detector here too would race that handoff: the open tap
+            // lands first, tears the lens down, and destroys the WebView
+            // before the click ever processes.
+            if (isInStyledView(x, y)) return false
             return true
+        }
+
+        /** Whether a LensView-space point lands on the styled view (visible
+         *  and active only). getLocationInWindow on both ends absorbs the
+         *  definitions scroller's current scroll offset. */
+        private fun isInStyledView(x: Float, y: Float): Boolean {
+            val sv = styledView ?: return false
+            if (!styledActive || sv.visibility != VISIBLE) return false
+            val svLoc = IntArray(2).also { sv.getLocationInWindow(it) }
+            val myLoc = IntArray(2).also { getLocationInWindow(it) }
+            val lx = x + myLoc[0] - svLoc[0]
+            val ly = y + myLoc[1] - svLoc[1]
+            return lx >= 0 && lx < sv.width && ly >= 0 && ly < sv.height
         }
 
         private fun isInChipBounds(chip: View, x: Float, y: Float): Boolean {
@@ -1536,7 +1839,10 @@ class MagnifierLens(
                 } else {
                     pillWordView.text = newWord
                 }
-                fitPillWordSize(newWord, suffix)
+                fitPillText(
+                    word = if (suffix.isEmpty()) newWord else "$newWord $suffix",
+                    reading = "",
+                )
                 val pad = if (newPitch.isNotEmpty())
                     (pillWordView.textSize * 0.22f).toInt() else 0
                 pillWordView.setPadding(0, pad, 0, 0)
@@ -1548,13 +1854,11 @@ class MagnifierLens(
                 pillWordView.text = newWord
                 if (newPitch.isEmpty()) {
                     pillReadingView.text = newReading
-                    fitPillReadingSize(newWord, newReading)
+                    fitPillText(newWord, newReading)
                     pillReadingView.setPadding(0, 0, 0, 0)
                 } else {
                     pillReadingView.text = buildPitchAnnotatedReading(newReading, newPitch)
-                    // Fit against reading + suffix; the suffix is measured at
-                    // full size though it renders at 0.75× — erring roomy.
-                    fitPillReadingSize(
+                    fitPillText(
                         newWord,
                         newReading + " " + newPitch.joinToString("·") { "[$it]" },
                     )
@@ -1642,67 +1946,72 @@ class MagnifierLens(
             return pillView.measuredWidth
         }
 
-        /** Shrink the reading text 1sp at a time down to 11sp until the
-         *  whole pill fits inside the card width. Stateless across calls.
-         *  Returning to max sp on short readings is automatic — every call
-         *  starts the search from [pillReadingMaxSp]. */
-        private fun fitPillReadingSize(word: String, reading: String) {
-            pillReadingView.setTextSize(TypedValue.COMPLEX_UNIT_SP, pillReadingMaxSp)
-            if (reading.isEmpty() || word.isEmpty()) return
-            // The pill can grow to (at most) the inside-the-card-padding
-            // width minus a safety margin. We don't have an authoritative
-            // visual budget, so cap at cardW - 2 × bodyHPaddingPx to leave
-            // breathing room on each side; the chip's visible disks sit
-            // ~36dp inside the card edge on each side anyway, so the pill
-            // comfortably owns the middle.
-            val available = (cardW - 2 * bodyHPaddingPx).toFloat()
-            pillWordSizingPaint.textSize = pillWordSp * density
-            val wordWidth = pillWordSizingPaint.measureText(word)
-            val fixed = wordWidth +
-                pillDividerWidth.toFloat() +
-                pillChevronSize.toFloat() +
-                (pillGap * 2).toFloat() +
-                pillChevronMarginStart.toFloat() +
-                pillPaddingLead.toFloat() +
-                pillPaddingTrail.toFloat()
-            val readingAvailable = (available - fixed).coerceAtLeast(0f)
-            var sp = pillReadingMaxSp
-            while (sp > pillReadingMinSp) {
-                pillReadingSizingPaint.textSize = sp * density
-                if (pillReadingSizingPaint.measureText(reading) <= readingAvailable) break
-                sp -= 1f
-            }
-            pillReadingView.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
-        }
+        /**
+         * Size and bound the pill's headline and reading so the capsule can
+         * never outgrow [pillMaxWidthPx] — the width past which [revealChips]
+         * has nowhere left to seat the chips but off the frame.
+         *
+         * [word] and [reading] are the strings the two slots will draw, pitch
+         * `[n]` suffix included (measured at full size though it renders at
+         * 0.75×, which errs roomy). Pass an empty [reading] for the states with
+         * no reading slot: the kana-only pill, where the headline carries the
+         * accent itself, and words that have no reading at all.
+         *
+         * The reading yields first, shrinking 14→11sp against a full-size
+         * headline — the long-standing rule, so a pill that fits today is
+         * untouched. The headline then yields against what the reading settled
+         * at, shrinking 24sp down to the same 11sp floor rather than
+         * ellipsizing away the identity of the word. Whatever neither step can
+         * save is ellipsized by the maxWidths, which is also what makes the
+         * capsule's natural width bounded by construction rather than by
+         * measurement luck.
+         *
+         * Stateless across calls: every call starts its search from the max
+         * sizes, so a short label returns to full size on its own.
+         */
+        private fun fitPillText(word: String, reading: String) {
+            val showReading = reading.isNotEmpty()
+            val fixedChrome = pillPaddingLead + pillPaddingTrail +
+                pillChevronSize + pillChevronMarginStart +
+                if (showReading) pillDividerWidth + 2 * pillGap else 0
+            val textBudget = (pillMaxWidthPx - fixedChrome).coerceAtLeast(0).toFloat()
 
-        /** Shrink the kana-only headline (plus its [n] suffix) down to the card
-         *  budget, mirroring [fitPillReadingSize] — here the headline carries the
-         *  accent and there's no reading slot to absorb the width. Stateless:
-         *  starts each call from [pillWordSp]. */
-        private fun fitPillWordSize(word: String, suffix: String) {
-            pillWordView.setTextSize(TypedValue.COMPLEX_UNIT_SP, pillWordSp)
-            if (word.isEmpty()) return
-            val available = (cardW - 2 * bodyHPaddingPx).toFloat()
-            // No divider/reading/gap in the kana-only pill — just word + chevron.
-            val fixed = pillChevronSize.toFloat() +
-                pillChevronMarginStart.toFloat() +
-                pillPaddingLead.toFloat() +
-                pillPaddingTrail.toFloat()
-            val wordAvailable = (available - fixed).coerceAtLeast(0f)
-            val measured = if (suffix.isEmpty()) word else "$word $suffix"
-            var sp = pillWordSp
-            while (sp > pillReadingMinSp) {
-                pillWordSizingPaint.textSize = sp * density
-                if (pillWordSizingPaint.measureText(measured) <= wordAvailable) break
-                sp -= 1f
+            pillWordSizingPaint.textSize = spPx(pillWordSp)
+            val readingRoom = textBudget - pillWordSizingPaint.measureText(word)
+            var readingSp = pillReadingMaxSp
+            if (showReading) {
+                while (readingSp > pillReadingMinSp) {
+                    pillReadingSizingPaint.textSize = spPx(readingSp)
+                    if (pillReadingSizingPaint.measureText(reading) <= readingRoom) break
+                    readingSp -= 1f
+                }
+                pillReadingSizingPaint.textSize = spPx(readingSp)
             }
-            pillWordView.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
+            val readingWidth =
+                if (showReading) pillReadingSizingPaint.measureText(reading) else 0f
+            val (wordAllot, readingAllot) = computePillTextAllotment(
+                maxPillWidth = pillMaxWidthPx,
+                fixedChromeWidth = fixedChrome,
+                readingWidth = readingWidth.roundToInt(),
+            )
+
+            var wordSp = pillWordSp
+            while (wordSp > pillReadingMinSp) {
+                pillWordSizingPaint.textSize = spPx(wordSp)
+                if (pillWordSizingPaint.measureText(word) <= wordAllot) break
+                wordSp -= 1f
+            }
+            pillWordView.setTextSize(TypedValue.COMPLEX_UNIT_SP, wordSp)
+            pillWordView.maxWidth = wordAllot
+            pillReadingView.setTextSize(TypedValue.COMPLEX_UNIT_SP, readingSp)
+            pillReadingView.maxWidth = readingAllot
         }
 
         fun setDefinitions(data: WordDefinitionData?, label: String?) {
             if (data == null) {
                 if (mode == Mode.ZOOM) return
                 mode = Mode.ZOOM
+                showFlatBody()
                 definitionsScroll.visibility = GONE
                 leftChip.visibility = GONE
                 rightChip.visibility = GONE
@@ -1713,7 +2022,34 @@ class MagnifierLens(
             setLabel(data.word, data.reading, data.pitch)
             // Drag lens keeps its compact layout — no misc line. The detail
             // sheet reached on tap-through still shows misc (it re-resolves).
+            // The flat renderer binds UNCONDITIONALLY: it is the instant
+            // content of every lookup and the standing fallback the styled
+            // path degrades to (renderer death, empty render).
             definitionsContent.bind(data, label, LENS_DEFINITIONS_SCALE, showMisc = false)
+            showFlatBody()
+            val styledData = data.styled
+            val sv = if (styledData != null && styledData.structured.isNotEmpty()) {
+                ensureStyledView()
+            } else {
+                null
+            }
+            if (sv != null) {
+                // Styled upgrade: swap over the flat content when the page
+                // reports painted height (see [onStyledContentHeight]).
+                pendingStyledSwap = true
+                sv.setContent(
+                    DefinitionsDocument.contentHtml(
+                        data,
+                        styledData!!.structured,
+                        localizePos = { context.localizePos(it) },
+                        showMisc = false,
+                        metaChips = styledMetaChips(context, data),
+                        label = label,
+                    ),
+                    styledData.dictStyles,
+                    styledData.sourceLanguage,
+                )
+            }
             definitionsScroll.scrollTo(0, 0)
             definitionsScroll.visibility = VISIBLE
             // Chip visibility is owned by [attachInteractiveListeners] —
@@ -1724,6 +2060,7 @@ class MagnifierLens(
         fun setLoading(word: String?, reading: String?) {
             mode = Mode.LOADING
             setLabel(word, reading)
+            showFlatBody()
             populateLoading()
             definitionsScroll.scrollTo(0, 0)
             definitionsScroll.visibility = VISIBLE
@@ -1775,17 +2112,14 @@ class MagnifierLens(
                     false
                 } else false
             }
-            setOnGenericMotionListener { _, event ->
-                if (event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
-                    && event.action == MotionEvent.ACTION_MOVE
-                ) {
-                    val axisX = event.getAxisValue(MotionEvent.AXIS_X)
-                    val axisY = event.getAxisValue(MotionEvent.AXIS_Y)
-                    if (axisX * axisX + axisY * axisY > 0.25f) {
-                        onDismissRequest()
-                        true
-                    } else false
-                } else false
+            // Right stick scrolls the definitions — the sheet's scroll hand
+            // (the left stick was the original driver, and before that a
+            // nudge-to-dismiss; B carries dismissal now, and a dictionary
+            // long enough to scroll is exactly when a stick flick must not
+            // close it).
+            setOnGenericMotionListener { _, event -> handleNavMotion(event) }
+            navPreDraw = ViewTreeObserver.OnPreDrawListener { syncNavRing(); true }.also {
+                viewTreeObserver.addOnPreDrawListener(it)
             }
             requestFocus()
             isInteractive = true
@@ -1801,6 +2135,12 @@ class MagnifierLens(
         fun detachInteractiveListeners() {
             setOnTouchListener(null)
             setOnGenericMotionListener(null)
+            navPreDraw?.let { viewTreeObserver.removeOnPreDrawListener(it) }
+            navPreDraw = null
+            stopNavScroll()
+            navCursor = null
+            navConsumedDown.clear()
+            focusRing.setTarget(null, null)
             dismissRequest = null
             clearFocus()
             isInteractive = false
@@ -1810,6 +2150,188 @@ class MagnifierLens(
             rightChip.translationX = 0f
             leftChip.visibility = GONE
             rightChip.visibility = GONE
+        }
+
+        // ── Controller nav: cursor over the pill + chips, stick scroll ────
+
+        private var navCursor: View? = null
+        private var navPreDraw: ViewTreeObserver.OnPreDrawListener? = null
+        /** Keycodes whose DOWN we consumed, so the matching UP is too — and
+         *  so the A that OPENED the lens (pressed on the sheet, released over
+         *  this freshly-focused window) can't instantly activate the pill. */
+        private val navConsumedDown = mutableSetOf<Int>()
+        private val navItemLoc = IntArray(2)
+        private val navSelfLoc = IntArray(2)
+        private val navTmp = Rect()
+
+        /** Auto-select for a controller-opened lens: the pill rings from the
+         *  start, so the very next A drills into the detail screen. */
+        fun focusPill() {
+            navCursor = pillView
+            syncNavRing()
+        }
+
+        private fun navCandidates(): List<View> =
+            listOf(pillView, leftChip, rightChip).filter { it.isShown }
+
+        /** Item rect in THIS view's coordinates. Chips ring their 32dp visible
+         *  disk, not the 48dp hit halo. */
+        private fun navRectInView(v: View, out: Rect): Boolean {
+            if (!v.isShown || v.width <= 0 || v.height <= 0) return false
+            v.getLocationOnScreen(navItemLoc)
+            getLocationOnScreen(navSelfLoc)
+            val l = navItemLoc[0] - navSelfLoc[0]
+            val t = navItemLoc[1] - navSelfLoc[1]
+            out.set(l, t, l + v.width, t + v.height)
+            if (v === leftChip || v === rightChip) {
+                val inset = (chipHitSizePx - chipVisDiameterPx) / 2
+                out.inset(inset, inset)
+            }
+            return true
+        }
+
+        private fun syncNavRing() {
+            val cur = navCursor
+            if (cur == null || !navRectInView(cur, navTmp)) {
+                focusRing.setTarget(null, null)
+                return
+            }
+            focusRing.setTarget(navTmp, null)
+        }
+
+        /** Dpad + A for the sticky lens (B stays in [LensRoot]). A fires on
+         *  UP: the pill and the Anki chip tear this focused window down
+         *  (detail / review launch), so the pair must be consumed first —
+         *  the same invariant as the sheet's activations. */
+        fun handleNavKey(ev: KeyEvent): Boolean {
+            if (!isInteractive) return false
+            if (ev.action == KeyEvent.ACTION_UP) {
+                if (!navConsumedDown.remove(ev.keyCode)) return false
+                if (ControllerKeys.isActivate(ev.keyCode)) {
+                    val cur = navCursor
+                    // First A selects the pill; only a second activates.
+                    if (cur == null || !cur.isShown) focusPill() else activateNav(cur)
+                }
+                return true
+            }
+            if (ev.action != KeyEvent.ACTION_DOWN) return false
+            val dir = ControllerKeys.direction(ev.keyCode)
+            if (dir == null && !ControllerKeys.isActivate(ev.keyCode)) return false
+            if (dir != null) {
+                val cur = navCursor
+                if (cur == null || !cur.isShown) focusPill() else moveNav(cur, dir)
+            }
+            navConsumedDown.add(ev.keyCode)
+            return true
+        }
+
+        private fun moveNav(cur: View, dir: SheetNavGeometry.Dir) {
+            val cands = navCandidates()
+            val fromIdx = cands.indexOf(cur)
+            if (fromIdx < 0) {
+                focusPill()
+                return
+            }
+            val rects = cands.map { v ->
+                val r = Rect()
+                navRectInView(v, r)
+                SheetNavGeometry.NavRect(r.left, r.top, r.right, r.bottom)
+            }
+            val next = SheetNavGeometry.nextInDirection(rects[fromIdx], rects, dir) ?: return
+            navCursor = cands[next]
+            syncNavRing()
+        }
+
+        private fun activateNav(v: View) {
+            when {
+                v === pillView -> fireOpenTap()
+                v === leftChip -> onSpeakTap()
+                v === rightChip -> onAnkiTap()
+            }
+        }
+
+        // Stick scroll of the definitions body — the sheet's repeater pattern
+        // (dt-clamped, shared speed/dead-zone dials), minus the modal checks
+        // the lens doesn't have. Stopped by [detachInteractiveListeners],
+        // which [removeOverlayInternal] runs on every dismissal (the repeater
+        // re-posts itself, so an un-detached removal would leak the view).
+
+        private var navScrollActive = false
+        private var navScrollY = 0f
+        private var navScrollDead = CaptureSheetControllerNav.STICK_DEAD_ZONE
+        private var navScrollRepeating = false
+        private var navScrollLastNs = 0L
+        private val navScrollFrame = object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                if (!navScrollRepeating) return
+                val dt = ((frameTimeNanos - navScrollLastNs) / 1e9f).coerceIn(0f, 0.05f)
+                navScrollLastNs = frameTimeNanos
+                val mag = ((abs(navScrollY) - navScrollDead) / (1f - navScrollDead)).coerceIn(0f, 1f)
+                definitionsScroll.scrollBy(
+                    0,
+                    (sign(navScrollY) * mag *
+                        CaptureSheetControllerNav.STICK_MAX_DP_PER_SEC * density * dt).roundToInt(),
+                )
+                Choreographer.getInstance().postFrameCallback(this)
+            }
+        }
+
+        private fun handleNavMotion(event: MotionEvent): Boolean {
+            if (!isInteractive) return false
+            if (event.actionMasked != MotionEvent.ACTION_MOVE) return false
+            if (event.source and InputDevice.SOURCE_JOYSTICK != InputDevice.SOURCE_JOYSTICK) {
+                return false
+            }
+            // Hat-driven dpads must keep synthesizing DPAD keys — leave their
+            // MOVEs unconsumed (same guard as the sheet).
+            if (event.getAxisValue(MotionEvent.AXIS_HAT_X) != 0f ||
+                event.getAxisValue(MotionEvent.AXIS_HAT_Y) != 0f
+            ) {
+                return false
+            }
+            // The scroll rides the RIGHT stick's vertical axis, as the
+            // sheet's does: Z/RZ under the standard mapping, RX/RY on a
+            // controller that declares no RZ range.
+            val device = event.device
+            val ryAxis =
+                if (device?.getMotionRange(MotionEvent.AXIS_RZ, event.source) != null) {
+                    MotionEvent.AXIS_RZ
+                } else {
+                    MotionEvent.AXIS_RY
+                }
+            val flat = device?.getMotionRange(ryAxis, event.source)?.flat ?: 0f
+            navScrollDead = maxOf(flat, CaptureSheetControllerNav.STICK_DEAD_ZONE)
+            val ry = event.getAxisValue(ryAxis)
+            if (abs(ry) <= navScrollDead) {
+                val was = navScrollActive
+                navScrollActive = false
+                stopNavScroll()
+                // Consume the centering event of a deflection we owned — and
+                // any left-stick push, which drives nothing here now but is
+                // still claimed: X/Y are the axes ViewRootImpl synthesizes
+                // DPAD keys from, and the cursor walks by hat/dpad alone.
+                val leftDead = maxOf(
+                    device?.getMotionRange(MotionEvent.AXIS_Y, event.source)?.flat ?: 0f,
+                    CaptureSheetControllerNav.STICK_DEAD_ZONE,
+                )
+                return was ||
+                    abs(event.getAxisValue(MotionEvent.AXIS_Y)) > leftDead ||
+                    abs(event.getAxisValue(MotionEvent.AXIS_X)) > leftDead
+            }
+            navScrollActive = true
+            navScrollY = ry
+            if (!navScrollRepeating) {
+                navScrollRepeating = true
+                navScrollLastNs = System.nanoTime()
+                Choreographer.getInstance().postFrameCallback(navScrollFrame)
+            }
+            return true
+        }
+
+        private fun stopNavScroll() {
+            if (!navScrollRepeating) return
+            navScrollRepeating = false
+            Choreographer.getInstance().removeFrameCallback(navScrollFrame)
         }
 
         /** Run [revealChips] now if no pill width animation is in flight;
@@ -1831,19 +2353,21 @@ class MagnifierLens(
             })
         }
 
-        /** Gap between the chip's visible disk and the pill's outer edge
-         *  in the resting (post-reveal) layout. */
-        private val chipPillGapPx = dp(14f)
-
         /** Lay the chips at their final positions — visible disks
          *  [chipPillGapPx] away from the pill's left and right edges —
          *  then translate them back inward so they sit under the pill,
          *  set visibility, and animate translationX back to 0 so they
          *  slide out from under the pill to their resting places. */
         private fun revealChips() {
-            val pillNaturalWidth = measurePillNaturalWidth()
-            val pillLeft = (viewW - pillNaturalWidth) / 2
-            val pillRight = pillLeft + pillNaturalWidth
+            // [fitPillText] bounds the capsule at [pillMaxWidthPx], so both
+            // lanes come out ≥ 0 however long the word is — a wide pill walks
+            // the chips out to the host's edges and stops there, instead of
+            // walking them past the frame that clips them.
+            val (leftLaneMargin, rightLaneMargin) = computeChipLaneMargins(
+                viewW = viewW,
+                pillWidth = measurePillNaturalWidth(),
+                chipLane = chipLanePx,
+            )
             // The vertical anchor is OWNED by applyCardHeightGeometry — keep
             // whatever it last wrote. Recomputing from the live pillAnchorY
             // here reads the ANIMATED card top when the reveal was deferred
@@ -1856,18 +2380,22 @@ class MagnifierLens(
             val chipTopMargin = (leftChip.layoutParams as? LayoutParams)?.topMargin
                 ?: (pillAnchorY - chipHitSizePx / 2)
 
+            // Absolute LEFT/RIGHT + left/rightMargin: the lane margins are
+            // view-pixel coordinates measured off [viewW], so pairing them with
+            // relative START/END margins would mirror the pair under an RTL
+            // locale and swap the two chips — prev/next would read backwards.
             leftChip.layoutParams = LayoutParams(
                 chipHitSizePx, chipHitSizePx,
-                Gravity.START or Gravity.TOP,
+                Gravity.LEFT or Gravity.TOP,
             ).apply {
-                marginStart = pillLeft - chipVisDiameterPx - chipHaloPadPx - chipPillGapPx
+                leftMargin = leftLaneMargin
                 topMargin = chipTopMargin
             }
             rightChip.layoutParams = LayoutParams(
                 chipHitSizePx, chipHitSizePx,
-                Gravity.END or Gravity.TOP,
+                Gravity.RIGHT or Gravity.TOP,
             ).apply {
-                marginEnd = (viewW - pillRight) - chipVisDiameterPx - chipHaloPadPx - chipPillGapPx
+                rightMargin = rightLaneMargin
                 topMargin = chipTopMargin
             }
 

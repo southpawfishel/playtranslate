@@ -1799,6 +1799,9 @@ object LayoutAnalyzer {
          *  instruments (the grouping harness catalog) pass their own;
          *  production call sites never do. */
         strategy: GroupingStrategy? = null,
+        /** Same-angle admission cap for the shell's slant clustering — the
+         *  harness sweeps it; production always runs the default. */
+        angleToleranceDeg: Float = DeskewGeometry.DEFAULT_CLUSTER_CAP_DEG,
     ): List<LayoutGroup> {
         if (regions.isEmpty()) return emptyList()
         val profile = SourceLanguageProfiles.forCode(sourceLang)
@@ -1821,7 +1824,27 @@ object LayoutAnalyzer {
         // bootstrap hole that prior was built for. Import seeds are the way to
         // check that claim rather than assume it.
         val active = strategy ?: FlowGraphStrategy()
-        val proposed = active.group(regions, ctx)
+        // ONE grouping path for every horizontal angle, 0° included: measured
+        // angles cluster uniformly ([DeskewGeometry.clusterByAngle]); each
+        // slanted cluster runs the SAME strategy on synthetic upright copies
+        // in its deskewed frame; the measured-upright mass runs the strategy
+        // directly (its frame is the identity); and UNMEASURED boxes
+        // ([OcrBox.angleUnmeasured] — the producer withheld the angle) join a
+        // slanted cluster on positional evidence, confirmed only when the
+        // strategy actually groups them with a measured member. The AABB
+        // kernel never sees a slanted envelope, and a mixed-length slanted
+        // sentence — long words measured, short words unmeasured — reunites
+        // instead of splitting at a bucket boundary.
+        val proposed = if (regions.none { it.box.isRotated }) {
+            // Fast path, an OPTIMIZATION not a semantic fork: with no measured
+            // slant there are no slanted clusters, so [groupWithAngles]
+            // reduces to exactly this one strategy run over the regions in
+            // input order. Kept because it is provably byte-identical for
+            // every upright-only frame (the corpus fence's proof obligation).
+            active.group(regions, ctx)
+        } else {
+            groupWithAngles(regions, active, ctx, sourceLang, angleToleranceDeg)
+        }
         // Join a group's lines with a space only for whitespace-delimited
         // languages; CJK/Thai (wordsSeparatedByWhitespace = false) get no
         // separator so the merged paragraph reads naturally AND the translator
@@ -1829,7 +1852,45 @@ object LayoutAnalyzer {
         // a space when the profile is unknown — only languages we KNOW omit
         // inter-word spaces drop it, so every other language keeps prior behavior.
         val lineJoin = if (ctx.spacedScript) " " else ""
-        return proposed.mapNotNull { buildLayoutGroup(it, lineJoin) }
+        return orderByReading(proposed.mapNotNull { buildLayoutGroup(it, lineJoin) }, ctx.rtl)
+    }
+
+    /**
+     * Global reading order over the final groups — the ONE emission-order
+     * policy, applied to every frame on every surface. Replaces the old
+     * emission order (strategy output, then vertical groups, then slant
+     * clusters), which segregated the list by KIND: an upright group low on
+     * the page emitted before an angled or tategaki group above it.
+     *
+     * Policy: horizontal bands built by top-proximity — a group joins the
+     * current band when its top sits within half the shorter height of the
+     * band's first member (local, so a tall sidebar can't swallow the page
+     * into one band); bands read top-to-bottom; within a band, left-to-right
+     * — right-to-left when the source is RTL or the band contains tategaki
+     * columns (columns read right-to-left; an enumerated fact of the
+     * language matrix). Slanted groups participate by their screen AABB.
+     */
+    private fun orderByReading(groups: List<LayoutGroup>, rtl: Boolean): List<LayoutGroup> {
+        if (groups.size <= 1) return groups
+        val byTop = groups.sortedBy { it.bounds.top }
+        val bands = mutableListOf<MutableList<LayoutGroup>>()
+        for (g in byTop) {
+            val band = bands.lastOrNull()
+            val ref = band?.first()
+            if (ref != null &&
+                g.bounds.top <= ref.bounds.top +
+                minOf(g.bounds.height(), ref.bounds.height()) / 2
+            ) {
+                band.add(g)
+            } else {
+                bands.add(mutableListOf(g))
+            }
+        }
+        return bands.flatMap { band ->
+            val columnar = rtl || band.any { it.orientation == TextOrientation.VERTICAL }
+            if (columnar) band.sortedByDescending { it.bounds.right }
+            else band.sortedBy { it.bounds.left }
+        }
     }
 
     /** Extract boxes + align-left hints + text-flow cues from sorted regions,
@@ -2002,6 +2063,206 @@ object LayoutAnalyzer {
         }
     }
 
+    /**
+     * Group one angle cluster in its deskewed frame. Singleton clusters skip
+     * the strategy entirely — v1's standalone emission, byte-identical.
+     * Multi-member clusters run the strategy on synthetic upright copies
+     * (`copy(box = upright(deskew(...)))` — the ONLY field the strategies
+     * read geometrically) and swap the ORIGINAL instances back before
+     * assembly: deskewed geometry must never escape, because the group's
+     * lines pass verbatim to every downstream consumer. Identity map, never
+     * data-class equality — byte-identical duplicate regions collide under
+     * equality (see the note in the harness's LabelStackStrategy).
+     */
+    /**
+     * The unified angle shell (reached only when some measured slant exists;
+     * see the fast path in [analyze]):
+     *  1. MEASURED regions — every angle, 0 included — cluster uniformly.
+     *     No pre-filtering: the source-script decision is group-level
+     *     everywhere (strategy-internal for every strategy run; the
+     *     letterless-singleton check on the standalone emission below), so
+     *     letterless lines live or die WITH their neighbors, slanted exactly
+     *     as upright.
+     *  2. Each SLANTED cluster (θ̄ ≠ 0) runs the strategy on synthetic
+     *     upright copies in its deskewed frame, at the real screen width.
+     *     UNMEASURED regions are admitted provisionally by position
+     *     ([DeskewGeometry.admitUnmeasured]) and kept only when the strategy
+     *     actually groups them with a measured member — over-admission costs
+     *     nothing (the region falls back to the upright pool), so admission
+     *     errs generous.
+     *  3. The upright pool — measured-0 cluster members (including any
+     *     light-slant members the clusterer absorbed within its designed
+     *     tolerance) plus unclaimed unmeasured regions — runs the strategy
+     *     directly, in ORIGINAL input order (order feeds the walks).
+     * Emission: pool groups then cluster groups; [orderByReading] owns the
+     * user-visible order downstream.
+     */
+    private fun groupWithAngles(
+        regions: List<RecognizedRegion>,
+        active: GroupingStrategy,
+        ctx: GroupingContext,
+        sourceLang: String,
+        angleToleranceDeg: Float,
+    ): List<ProposedGroup> {
+        // No pre-filter on measured-slant regions: the source-script decision
+        // is GROUP-level everywhere else (the strategies drop letterless
+        // GROUPS, so a letterless line survives by grouping with letter-
+        // bearing neighbors), and pre-dropping slanted letterless lines broke
+        // that — garble that lived inside letter groups upright died the
+        // moment stitching made it slanted. Letterless slanted singletons
+        // fall back to the pool below and meet the same group-level filter
+        // as any upright region; framed groups are strategy output and
+        // already filtered.
+        val unmeasured = regions.filter { it.box.angleUnmeasured }
+        val measured = regions.filter { !it.box.angleUnmeasured }
+        val clusters = DeskewGeometry.clusterByAngle(
+            measured.map { it.box.angleDeg },
+            measured.map { it.box.orientedWidth },
+            measured.map { it.box.orientedHeight },
+            angleToleranceDeg,
+        )
+        val claimed = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<RecognizedRegion, Boolean>(),
+        )
+        val unplaced = mutableListOf<RecognizedRegion>()
+        val clusterGroups = mutableListOf<ProposedGroup>()
+        for (cluster in clusters) {
+            if (cluster.angleDeg == 0f) continue // the measured-upright mass runs in the pool
+            val members = cluster.memberIndices.map { measured[it] }
+            // Frame anchor: the MEASURED members' AABB-union center — a pure
+            // function of the cluster, independent of admission outcomes, so
+            // the frame (and everything derived in it) is deterministic.
+            val union = Rect(members[0].box.bounds)
+            for (m in members.drop(1)) union.union(m.box.bounds)
+            val frame = AngleFrame(cluster.angleDeg, union.centerX(), union.centerY())
+            val memberBoxes = members.map { it.box }
+            val admitted = unmeasured.filter {
+                it !in claimed && DeskewGeometry.admitUnmeasured(it.box, frame, memberBoxes)
+            }
+            if (members.size == 1 && admitted.isEmpty()) {
+                if (members[0].text.any { isSourceLangChar(it, sourceLang) }) {
+                    // Lone slanted region, nothing to try: the v1 standalone
+                    // singleton, byte-compatible with the old bypass.
+                    clusterGroups.add(ProposedGroup(members))
+                } else {
+                    // Letterless: the pool's group-level filter decides —
+                    // grouped with letter neighbors it lives (as upright
+                    // garble always has), isolated it drops (as v1 dropped
+                    // non-source rotated singletons).
+                    unplaced.add(members[0])
+                }
+                continue
+            }
+            val outcome = runFramed(members, admitted, frame, active, ctx)
+            clusterGroups.addAll(outcome.groups)
+            claimed.addAll(outcome.claimed)
+            unplaced.addAll(outcome.unplaced)
+        }
+        val poolable = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<RecognizedRegion, Boolean>(),
+        )
+        // Fallbacks resolve against the FINAL claimed state — a region can be
+        // rejected by an early cluster and confirmed by a later one, and the
+        // early fallback must not also route it through the pool (the
+        // exactly-once invariant; outside-review finding, twin had it right).
+        for (r in unplaced) if (r !in claimed) poolable.add(r)
+        for (cluster in clusters) {
+            if (cluster.angleDeg != 0f) continue
+            for (i in cluster.memberIndices) poolable.add(measured[i])
+        }
+        for (u in unmeasured) if (u !in claimed) poolable.add(u)
+        val pool = regions.filter { it in poolable }
+        val poolGroups = if (pool.isEmpty()) emptyList() else active.group(pool, ctx)
+        return poolGroups + clusterGroups
+    }
+
+    private class FramedOutcome(
+        val groups: List<ProposedGroup>,
+        /** Admitted unmeasured regions a confirmed group kept. */
+        val claimed: List<RecognizedRegion>,
+        /** Members returning to the upright pool: everyone from groups with
+         *  no carried-slant evidence, plus strategy no-shows. The pool is the
+         *  universal fallback — the cluster boundary must never strand or
+         *  silently drop a region its neighbors would have kept alive. */
+        val unplaced: List<RecognizedRegion>,
+    )
+
+    /**
+     * One slanted cluster's framed strategy run over measured [members] plus
+     * provisionally [admitted] unmeasured regions. The real screen width
+     * passes through: deskew is an isometry, so an in-frame row extent is a
+     * genuine pixel length and the width-keyed logic (menu split, FlowGraph's
+     * list rows) stays dimensionally sound. Output triage:
+     *  - a group with NO measured member is unconfirmed — its regions return
+     *    to the upright pool (positional admission was provisional; only
+     *    grouping WITH a measured member is slant evidence);
+     *  - a lone measured region without pins keeps the v1 standalone-singleton
+     *    emission (byte-compatible: the framed round-trip is the identity for
+     *    a group that merged with nothing);
+     *  - everything else emits framed, with FRAME-SPACE pins consumed by
+     *    [buildLayoutGroup] before the back-rotation.
+     */
+    private fun runFramed(
+        members: List<RecognizedRegion>,
+        admitted: List<RecognizedRegion>,
+        frame: AngleFrame,
+        active: GroupingStrategy,
+        ctx: GroupingContext,
+    ): FramedOutcome {
+        val all = members + admitted
+        val synth = all.map { it.copy(box = OcrBox.upright(DeskewGeometry.deskew(it.box, frame))) }
+        val backMap = java.util.IdentityHashMap<RecognizedRegion, RecognizedRegion>()
+        for (i in synth.indices) backMap[synth[i]] = all[i]
+        val framedGroups = active.group(synth, ctx)
+        // Defensive: a strategy that returns instances it wasn't given (a
+        // copy() somewhere) can't be swapped back, and deskewed coordinates
+        // must not escape. Degrade to v1 singletons for the measured members,
+        // loudly; admitted regions fall back to the pool unclaimed.
+        if (framedGroups.any { g -> g.regions.any { it !in backMap } }) {
+            android.util.Log.w(
+                "LayoutAnalyzer",
+                "angle-cluster fallback: ${active.javaClass.simpleName} returned unknown region instances",
+            )
+            return FramedOutcome(members.map { ProposedGroup(listOf(it)) }, emptyList(), emptyList())
+        }
+        val groups = mutableListOf<ProposedGroup>()
+        val claimed = mutableListOf<RecognizedRegion>()
+        val fallback = mutableListOf<RecognizedRegion>()
+        val placed = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<RecognizedRegion, Boolean>(),
+        )
+        for (g in framedGroups) {
+            val originals = g.regions.map { backMap.getValue(it) }
+            placed.addAll(originals)
+            // Confirmation = CARRIED-SLANT evidence: a group stays in the
+            // frame only if some member actually carries an angle. Groups of
+            // only absorbed measured-0s and provisional admits have no slant
+            // evidence — every member falls back to the upright pool, where
+            // its original neighbors are (never DISCARD: two fence
+            // regressions came from members stranded on this boundary — the
+            // tilted-photo mass loss, then the FF-VI garble fragmenting away
+            // from the letter-bearing line-mates that kept it alive through
+            // the source filter).
+            val carried = originals.count { it.box.isRotated }
+            when {
+                carried == 0 -> fallback.addAll(originals)
+                originals.size == 1 && g.parentLeft == null && g.parentRight == null ->
+                    groups.add(ProposedGroup(originals))
+                else -> {
+                    groups.add(
+                        ProposedGroup(originals, g.parentLeft, g.parentRight, frame = frame),
+                    )
+                    for (o in originals) if (o.box.angleUnmeasured) claimed.add(o)
+                }
+            }
+        }
+        // Strategy no-shows (its internal filter dropped a letterless group)
+        // fall back the same way; the pool's own run decides their fate with
+        // their neighbors present, exactly as the pre-partition pipeline did.
+        fallback.addAll(all.filter { it !in placed && !it.box.angleUnmeasured })
+        return FramedOutcome(groups, claimed, fallback)
+    }
+
     private fun buildLayoutGroup(sg: ProposedGroup, lineJoin: String): LayoutGroup? {
         val raw = sg.regions
         if (raw.isEmpty()) return null
@@ -2012,17 +2273,76 @@ object LayoutAnalyzer {
         // row left-to-right for horizontal), so a same-line inline pair like
         // "Gust Area Damage:" + "4 (every…)" joins by position — robust to OCR
         // top-edge jitter that could otherwise put the value ahead of its label.
-        val regions = readingOrderIndices(raw.map { it.box.bounds }, orientation).map { raw[it] }
+        // Every geometric decision reads ONE rect list: the DESKEWED rects for
+        // a framed group — screen-space banding scrambles slanted stacks
+        // (their AABBs overlap in screen-Y, so rowBands merges distinct lines
+        // and left-sorts them) and screen-space alignment drifts by pitch·sinθ
+        // per row — and the plain screen bounds otherwise.
+        val frame = sg.frame
+        val geomRects =
+            if (frame != null) raw.map { DeskewGeometry.deskew(it.box, frame) }
+            else raw.map { it.box.bounds }
+        val regions = readingOrderIndices(geomRects, orientation).map { raw[it] }
         val text = regions.joinToString(lineJoin) { it.text }.trim()
         if (text.isBlank()) return null
         val lines = regions.flatMap { it.lines }
-        val rects = regions.map { it.box.bounds }
-        val left = sg.parentLeft ?: rects.minOf { it.left }
-        val right = sg.parentRight ?: rects.maxOf { it.right }
-        val bounds = Rect(left, rects.minOf { it.top }, right, rects.maxOf { it.bottom })
+        if (frame != null) {
+            // Framed group: oriented union in-frame, exact AABB back in screen
+            // space — bounds.center == the oriented rect's center (±0.5px) and
+            // bounds ⊇ the drawn footprint: the two properties the renderer,
+            // pinhole fill, gate exclusion, and debug overlay all pin on.
+            // Framed members are HORIZONTAL by the producer invariant. Pins
+            // are frame-space u-values (see groupCluster) and clamp the
+            // in-frame union's reading-axis extent BEFORE the back-rotation —
+            // the pinned union is still an oriented rect, so the premise holds.
+            val union = Rect(geomRects[0])
+            for (r in geomRects.drop(1)) union.union(r)
+            val pinned = Rect(
+                sg.parentLeft ?: union.left, union.top,
+                sg.parentRight ?: union.right, union.bottom,
+            )
+            val alignment = classifyGroupAlignment(
+                lines.map { DeskewGeometry.deskew(it.box, frame) },
+                lines.map { effectiveAlignLeftFramed(it, frame) },
+            )
+            return LayoutGroup(
+                text, lines, DeskewGeometry.screenAabbOf(pinned, frame), orientation, alignment,
+                angleDeg = frame.angleDeg,
+                orientedWidth = pinned.width().toFloat(),
+                orientedHeight = pinned.height().toFloat(),
+            )
+        }
+        val left = sg.parentLeft ?: geomRects.minOf { it.left }
+        val right = sg.parentRight ?: geomRects.maxOf { it.right }
+        val bounds = Rect(left, geomRects.minOf { it.top }, right, geomRects.maxOf { it.bottom })
         val alignment =
             if (orientation == TextOrientation.VERTICAL) TextAlignment.LEFT else classifyGroupAlignment(lines)
-        return LayoutGroup(text, lines, bounds, orientation, alignment)
+        // A standalone rotated singleton carries its slant onto the group (a
+        // single-member cluster — emitted frameless so this path stays
+        // byte-identical to v1). Guarded on no parent pins: pinned bounds are
+        // wider than the region's own AABB, which would break the renderer's
+        // center-pin premise (group bounds == the oriented rect's exact AABB).
+        val rot = if (sg.parentLeft == null && sg.parentRight == null) {
+            raw.singleOrNull()?.box?.takeIf { it.isRotated }
+        } else null
+        return LayoutGroup(
+            text, lines, bounds, orientation, alignment,
+            angleDeg = rot?.angleDeg ?: 0f,
+            orientedWidth = rot?.orientedWidth ?: 0f,
+            orientedHeight = rot?.orientedHeight ?: 0f,
+        )
+    }
+
+    /** [effectiveAlignLeft] for a deskewed frame: the same hanging-punct text
+     *  test, geometry from the frame rect, and the char-precise branch skipped
+     *  — chars are empty on rotated Paddle lines (PaddleRecognizer suppresses
+     *  them until the oriented char-synthesis stage) and ML Kit char AABBs are
+     *  screen-space; the height fallback matches the punct-width intent. */
+    private fun effectiveAlignLeftFramed(line: RecognizedLine, frame: AngleFrame): Int {
+        val rect = DeskewGeometry.deskew(line.box, frame)
+        val firstIdx = line.text.indexOfFirst { !it.isWhitespace() }
+        if (firstIdx < 0) return rect.left
+        return if (line.text[firstIdx] in HANGING_PUNCT_LEFT) rect.left + rect.height() else rect.left
     }
 
     /**
@@ -2072,13 +2392,17 @@ object LayoutAnalyzer {
      * ties — same-width left-aligned lines satisfy both checks and we never falsely
      * center actually-left text.
      */
-    internal fun classifyGroupAlignment(lines: List<RecognizedLine>): TextAlignment {
-        if (lines.size < 2) return TextAlignment.LEFT
-        val boxes = lines.map { it.box.bounds }
+    internal fun classifyGroupAlignment(lines: List<RecognizedLine>): TextAlignment =
+        classifyGroupAlignment(lines.map { it.box.bounds }, lines.map { effectiveAlignLeft(it) })
+
+    /** Rects-taking core, shared by the screen-space wrapper above and the
+     *  deskewed-frame path in [buildLayoutGroup] (which supplies frame rects +
+     *  frame-computed align-lefts). */
+    internal fun classifyGroupAlignment(boxes: List<Rect>, lefts: List<Int>): TextAlignment {
+        if (boxes.size < 2) return TextAlignment.LEFT
         val refH = boxes.maxOf { it.height() }
         if (refH <= 0) return TextAlignment.LEFT
         val tol = (refH * 0.5f).toInt()
-        val lefts = lines.map { effectiveAlignLeft(it) }
         val leftSpread = lefts.max() - lefts.min()
         val centerXs = boxes.map { it.centerX() }
         val centerSpread = centerXs.max() - centerXs.min()
@@ -2093,6 +2417,14 @@ object LayoutAnalyzer {
  * [lines] it contains, an axis-aligned [bounds] in the analyze input coordinate
  * space, and the voted [orientation] + classified [alignment]. The pipeline
  * flattens these into the final OcrResult, normalizing coords to original.
+ *
+ * [angleDeg] + [orientedWidth]/[orientedHeight] are non-zero for the two
+ * angle-carrying shapes layout emits: a rotated singleton (angle + dims from
+ * the region's own [OcrBox], verbatim) and an angle-cluster group (angle = the
+ * cluster frame's θ̄ — itself a verbatim member angle — with dims from the
+ * deskewed union and [bounds] its exact back-rotated AABB). Same coordinate
+ * space as [bounds]. All three ride together: the oriented dims cannot be
+ * re-derived from bounds+angle downstream (singular at 45°).
  */
 data class LayoutGroup(
     val text: String,
@@ -2100,4 +2432,7 @@ data class LayoutGroup(
     val bounds: Rect,
     val orientation: TextOrientation,
     val alignment: TextAlignment,
+    val angleDeg: Float = 0f,
+    val orientedWidth: Float = 0f,
+    val orientedHeight: Float = 0f,
 )

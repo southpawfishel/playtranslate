@@ -18,6 +18,11 @@ data class DictionaryResponse(
 
 data class DictionaryEntry(
     val slug: String,
+    /** The pack's `entry.id` row for entries built from the JMdict pack;
+     *  null for entries synthesized from imported Yomitan term dictionaries
+     *  (YomitanEnrichment) — key EntryRef/hydration on this, never on
+     *  [slug], which is display text. */
+    val packId: Long? = null,
     val isCommon: Boolean?,
     val tags: List<String>,
     val jlpt: List<String>,
@@ -42,6 +47,11 @@ data class ImportedSenseGroup(
     /** Per-dictionary accent override (ARGB) for this group's title; null =
      *  the default muted header. */
     val accentColor: Int? = null,
+    /** Owning dictionary's id — the styled renderer's key for scoping the
+     *  dictionary's CSS to its own group ([data-dictionary]) and resolving
+     *  media paths. Empty on legacy/synthetic groups; the flat tier never
+     *  reads it. */
+    val dictId: String = "",
 )
 
 /** One imported definition. [pos] is the entry's part-of-speech tags
@@ -50,6 +60,11 @@ data class ImportedSenseGroup(
 data class ImportedSense(
     val definition: String,
     val pos: String = "",
+    /** `term` table rowid when this sense's source entry retained a
+     *  structured-content glossary (a `term_sc` row exists to fetch); null =
+     *  flat text is all there is. Never serialized — these types stay
+     *  in-process on [DictionaryEntry]. */
+    val scRowid: Long? = null,
 )
 
 /**

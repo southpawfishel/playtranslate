@@ -3,6 +3,7 @@ package com.playtranslate
 import android.graphics.Rect
 import com.playtranslate.language.TextAlignment
 import com.playtranslate.language.TextOrientation
+import com.playtranslate.ocr.core.DeskewGeometry
 import com.playtranslate.ocr.core.LayoutAnalyzer
 import com.playtranslate.ui.TextBox
 import kotlin.math.abs
@@ -99,6 +100,34 @@ object ScanlineReconciler {
      *  static text — repositioning that would make boxes shiver every cycle. */
     private const val REPOSITION_HYSTERESIS_PX = 5
 
+    /** Slant-hold release valve 1: max per-axis SIZE drift (px) between the held
+     *  box and the fresh upright read. Size jitter on static text stays inside
+     *  the same few-px envelope as position jitter (2× the reposition
+     *  hysteresis); a real re-layout jumps by a text-size step. */
+    private const val SLANT_HOLD_MAX_SIZE_DRIFT_PX = 10
+
+    /** Slant-hold release valve 2: consecutive upright re-reads before a held
+     *  angle yields. The acceptance flap the hold exists for alternates
+     *  angled/upright and never builds this streak; a genuine upright
+     *  transition releases in a few cycles instead of the box's lifetime. */
+    private const val SLANT_HOLD_RELEASE_READS = 5
+
+    /** Drift seen on the DRAWN chip, not just the AABB: when either side is
+     *  slanted, the kept box refreshes iff some corner of the oriented
+     *  footprint moved beyond [REPOSITION_HYSTERESIS_PX]. Length-dependent by
+     *  construction — a pure rotation moves corners `2·r·sin(δ/2)` at the
+     *  corner radius — so a short line's snap-boundary flip (tiny corner
+     *  motion) stays sticky under detector jitter while a long banner's
+     *  rotation or 0↔non-zero transition moves real pixels and refreshes;
+     *  no per-case special-casing. Upright pairs never reach it
+     *  ([boundsDrifted] owns that path, unchanged). */
+    private fun slantDrifted(box: TextBox, g: OcrManager.OcrGroup): Boolean =
+        (box.angleDeg != 0f || g.angleDeg != 0f) &&
+            DeskewGeometry.footprintCornerDelta(
+                box.bounds, box.angleDeg, box.orientedWidth, box.orientedHeight,
+                g.bounds, g.angleDeg, g.orientedWidth, g.orientedHeight,
+            ) > REPOSITION_HYSTERESIS_PX
+
     /** The data the mode needs to (re)build one box: an OCR group reduced to
      *  the fields [OverlayToolkit.buildPlaceholderBoxes] and
      *  [OverlayToolkit.translatePlaceholders] consume. */
@@ -114,9 +143,13 @@ object ScanlineReconciler {
          *  CHANGED verdicts only — NEW text must never wait. */
         val replacesBox: TextBox? = null,
         /** The OCR group this region was reduced from — presenters needing
-         *  line-level data (furigana annotation placement) read it. Null only
-         *  in hand-built test fixtures. */
+         *  line-level data read it. Null only in hand-built test fixtures. */
         val group: OcrManager.OcrGroup? = null,
+        /** Slant carried from the group (see [OcrManager.OcrGroup.angleDeg]);
+         *  oriented dims ride with it, 0 when upright. */
+        val angleDeg: Float = 0f,
+        val orientedWidth: Float = 0f,
+        val orientedHeight: Float = 0f,
     )
 
     /**
@@ -233,6 +266,9 @@ object ScanlineReconciler {
             alignment = g.alignment,
             replacesBox = replaces,
             group = g,
+            angleDeg = g.angleDeg,
+            orientedWidth = g.orientedWidth,
+            orientedHeight = g.orientedHeight,
         )
 
         // Displayed boxes → KEEP / RETRANSLATE / REMOVE.
@@ -303,19 +339,63 @@ object ScanlineReconciler {
                         )
                         pref == ReadingArbiter.Preference.CHALLENGER
                     }
+                    // Slant hysteresis: a kept box's measured angle is HELD when
+                    // the fresh read of the SAME text comes back upright. Angle
+                    // evidence is asymmetric — gaining one took an estimator
+                    // measurement, three producer gates, and a confidence win,
+                    // while losing one only takes the retry not firing this
+                    // cycle — so on animating pages acceptance flips cycle to
+                    // cycle and the chip flickered angled↔upright (Thor, P3R
+                    // activity screen). A fresh MEASURED angle (θ→θ') still
+                    // updates through slantDrifted as before, and two valves
+                    // release a hold that outlives its evidence:
+                    //  - the fresh geometry changed SIZE (a re-layout is real
+                    //    evidence the scene changed; stale oriented dims on
+                    //    fresh bounds would draw the chip at the wrong scale);
+                    //  - the upright verdict persisted [SLANT_HOLD_RELEASE_READS]
+                    //    consecutive reads (the acceptance flap alternates and
+                    //    never builds a streak; a genuine upright transition
+                    //    clears in seconds instead of sticking for the box's
+                    //    life). Otherwise the hold dies with the box (text
+                    //    change, removal).
+                    val uprightFlip = box.angleDeg != 0f && g.angleDeg == 0f
+                    val holdSlant = uprightFlip &&
+                        abs(box.bounds.width() - g.bounds.width()) <= SLANT_HOLD_MAX_SIZE_DRIFT_PX &&
+                        abs(box.bounds.height() - g.bounds.height()) <= SLANT_HOLD_MAX_SIZE_DRIFT_PX &&
+                        box.slantUprightStreak + 1 < SLANT_HOLD_RELEASE_READS
+                    val streak = if (holdSlant) box.slantUprightStreak + 1 else 0
                     if (upgrade) {
                         toTranslate.add(regionOf(g, replaces = box)); cCount++; upCount++
-                    } else if (boundsDrifted(box.bounds, g.bounds)) {
-                        // Region DRIFTED beyond OCR jitter (a scroll/pan):
-                        // carry the box's existing translation onto the
-                        // group's fresh bounds so the overlay tracks the
-                        // moving text — no re-translate. Below the
-                        // hysteresis it passes through verbatim so static
-                        // text does not shiver. Either way it counts as
-                        // unchanged; drift is tallied in [Verdicts.repositioned].
-                        kept.add(box.copy(bounds = g.bounds)); rCount++; uCount++
+                    } else if (boundsDrifted(box.bounds, g.bounds) ||
+                        (slantDrifted(box, g) && !holdSlant)
+                    ) {
+                        // Region DRIFTED beyond OCR jitter (a scroll/pan), or a
+                        // slanted box's angle drifted past its own hysteresis
+                        // (a rotation bounds can miss on short lines): carry
+                        // the box's existing translation onto the group's
+                        // fresh bounds so the overlay tracks the moving text
+                        // — no re-translate. Below both hystereses it passes
+                        // through verbatim so static text does not shiver.
+                        // Either way it counts as unchanged; drift is tallied
+                        // in [Verdicts.repositioned].
+                        // The slant moves with the bounds — it belongs to the
+                        // fresh read's geometry, not the stale box's — EXCEPT
+                        // a held slant (above), which rides the fresh bounds.
+                        kept.add(box.copy(
+                            bounds = g.bounds,
+                            angleDeg = if (holdSlant) box.angleDeg else g.angleDeg,
+                            orientedWidth = if (holdSlant) box.orientedWidth else g.orientedWidth,
+                            orientedHeight = if (holdSlant) box.orientedHeight else g.orientedHeight,
+                            slantUprightStreak = streak,
+                        )); rCount++; uCount++
                     } else {
-                        kept.add(box); uCount++
+                        // Verbatim keep still tracks the streak (a sub-hysteresis
+                        // upright flip is invisible on screen but is evidence).
+                        kept.add(
+                            if (box.slantUprightStreak == streak) box
+                            else box.copy(slantUprightStreak = streak),
+                        )
+                        uCount++
                     }
                 }
             }

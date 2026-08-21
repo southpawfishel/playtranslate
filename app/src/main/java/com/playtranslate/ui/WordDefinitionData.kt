@@ -3,6 +3,7 @@ package com.playtranslate.ui
 import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.bunpro.GrammarMatch
 import com.playtranslate.model.FrequencyTag
+import com.playtranslate.model.ImportedSenseGroup
 import com.playtranslate.model.ReadingRow
 
 /**
@@ -44,6 +45,15 @@ data class WordDefinitionData(
      *  page), occurrence flagged. [WordResultCell] lists these below the title
      *  when there's more than one or the inline reading won't fit. */
     val readingRows: List<ReadingRow> = emptyList(),
+    /** The imported groups BEHIND the flattened imported rows in [senses] —
+     *  same data, structured form, for the styled WebView surfaces
+     *  ([YomitanDefinitionsView]). Flat surfaces ignore this. In-process
+     *  only: [WordDefinitionData] never rides an intent. */
+    val importedGroups: List<ImportedSenseGroup> = emptyList(),
+    /** Prefetched structured glossaries + dictionary CSS for
+     *  [importedGroups]; null = render flat (toggle off / nothing
+     *  structured retained). See [fetchYomitanStyledData]. */
+    val styled: YomitanStyledData? = null,
 )
 
 /** A single rendered sense: its part(s) of speech (whole English tokens) and
@@ -65,4 +75,15 @@ data class SenseDisplay(
     /** Per-dictionary accent override (ARGB) for an imported row's title;
      *  null = the default muted header. */
     val accentColor: Int? = null,
-)
+    /** `term_sc` rowid when this imported row's source entry retained a
+     *  structured glossary — rides the enrichment transport so the Anki
+     *  SENTENCE pipeline (which only ever sees flattened rows) can fetch
+     *  structured card HTML at send time. Null everywhere else; flat
+     *  renderers ignore it. */
+    val scRowid: Long? = null,
+    /** Owning dictionary id for [scRowid] rows (the card markup's
+     *  data-dictionary + media key). */
+    val dictId: String? = null,
+    // Serializable so senses can ride [WordEnrichment] through the sentence
+    // Anki review's intent/args snapshots (same transport as pitch/frequencies).
+) : java.io.Serializable

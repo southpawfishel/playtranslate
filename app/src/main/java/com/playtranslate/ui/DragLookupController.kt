@@ -29,6 +29,7 @@ import com.playtranslate.language.SourceLanguageEngines
 import com.playtranslate.language.TargetGlossDatabaseProvider
 import com.playtranslate.model.DictionaryEntry
 import com.playtranslate.model.FrequencyTag
+import com.playtranslate.yomitan.YomitanDataStore
 import com.playtranslate.model.headwordDisplay
 import com.playtranslate.model.selectHeadword
 import kotlinx.coroutines.*
@@ -88,6 +89,13 @@ class DragLookupController(
     private var lastReading: String? = null
     /** Path to the screenshot captured at drag start. */
     private var screenshotPath: String? = null
+    /** When the drag's frame was captured (epoch ms) — the game-audio ring
+     *  anchor for Anki launches from this lens: the text (and its voice
+     *  line's neighborhood) was on screen at this moment, however long the
+     *  user then dwells in the lens/detail before adding a card. Set with
+     *  [screenshotPath] and, like it, deliberately not cleared on lens
+     *  dismissal — each new drag overwrites it. */
+    private var dragCapturedAtMs: Long? = null
     private var currentSentence: String? = null
     private var lastSentSentence: String? = null
     private var wordLookupJob: Job? = null
@@ -97,7 +105,12 @@ class DragLookupController(
     private val lensActions = SourceLensActions(
         context, displayId, overlayHost, magnifier,
         showAnkiNotInstalled = showAnkiNotInstalled,
-    ) { LensActionContext(lastWord, lastReading, currentEntry, currentSentence, screenshotPath) }
+    ) {
+        LensActionContext(
+            lastWord, lastReading, currentEntry, currentSentence, screenshotPath,
+            audioAnchorMs = dragCapturedAtMs,
+        )
+    }
 
     /** Screenshot bitmap captured at drag start, kept alive for the magnifier
      *  through the entire drag. Recycled on drag end (or when superseded by a
@@ -219,6 +232,10 @@ class DragLookupController(
      *  the lens is the single source of truth for its own mode. */
     val isPopupShowing: Boolean get() = magnifier.isInteractive
 
+    /** Whether the sticky lens holds window focus for controller navigation —
+     *  see [MagnifierLens.isConsumingController]. */
+    val isPopupConsumingController: Boolean get() = magnifier.isConsumingController
+
     companion object {
         private const val TAG = "DragLookup"
         /** Hold time before dwell triggers definitions. */
@@ -285,6 +302,29 @@ class DragLookupController(
          * @param vertical When true, token extents come from symbol top/bottom
          *   and fallback uses character height instead of width.
          */
+        /** Finger position along a SLANTED line's baseline (u, measured from
+         *  the AABB center; clockwise-positive y-down rotation). Pairs with
+         *  [uSpaceSymbols] so extents and finger share one axis. */
+        internal fun flowU(line: OcrManager.OcrLine, x: Int, y: Int): Float {
+            val rad = Math.toRadians(line.angleDeg.toDouble())
+            val c = kotlin.math.cos(rad).toFloat()
+            val s = kotlin.math.sin(rad).toFloat()
+            val dx = x - line.bounds.exactCenterX()
+            val dy = y - line.bounds.exactCenterY()
+            return dx * c + dy * s
+        }
+
+        /** A slanted line's symbols mapped onto its baseline axis: each cell
+         *  (an upright rect riding the baseline) becomes a u-extent about its
+         *  center's projection, so [findClosestToken] runs its horizontal math
+         *  unchanged with u-space inputs. */
+        internal fun uSpaceSymbols(line: OcrManager.OcrLine): List<OcrManager.SymbolBox> =
+            line.symbols.map { s ->
+                val u = flowU(line, s.bounds.centerX(), s.bounds.centerY())
+                val half = s.bounds.width() / 2f
+                s.copy(bounds = Rect((u - half).toInt(), 0, (u + half).toInt(), s.bounds.height()))
+            }
+
         internal fun findClosestToken(
             lineText: String,
             tokens: List<String>,
@@ -349,6 +389,18 @@ class DragLookupController(
      * popup is committed at release ([onDragEnd]).
      */
     fun onDragStart(existingScreenshotPath: String? = null) {
+        // Pre-pay the first-WebView-in-process provider init while the user
+        // is still dragging toward a word, so the first styled panel doesn't
+        // stall on it. Gated on styling actually being live; warmUp itself
+        // is once-per-process.
+        scope.launch {
+            if (YomitanDataStore.stylingFor(
+                    context, Prefs(context).sourceLangId.yomitanConsumingLang(),
+                ).stylingActive
+            ) {
+                YomitanDefinitionsView.warmUp(context)
+            }
+        }
         // Tear down everything left over from the previous drag. Previous
         // drag's lift-time lookupJob may still be in flight; cancel it so it
         // doesn't transition the lens after this drag has started. Hand the
@@ -664,15 +716,29 @@ class DragLookupController(
         val tokens = cache[lineText] ?: return null
         if (tokens.isEmpty()) return null
         val isVertical = hitLine.orientation == com.playtranslate.language.TextOrientation.VERTICAL
-        val lineExtent = if (isVertical) hitLine.bounds.height().toFloat()
-            else hitLine.bounds.width().toFloat()
+        val rotated = hitLine.angleDeg != 0f
+        val lineExtent = when {
+            rotated -> hitLine.orientedWidth
+            isVertical -> hitLine.bounds.height().toFloat()
+            else -> hitLine.bounds.width().toFloat()
+        }
         val charExtent = lineExtent / lineText.length
         val match = findClosestToken(
             lineText = lineText,
             tokens = tokens.map { it.surface },
-            fingerPos = if (isVertical) rawY else rawX,
-            symbols = hitLine.symbols,
-            fallbackLineStart = if (isVertical) hitLine.bounds.top else hitLine.bounds.left,
+            // Slanted lines run the same horizontal math on the baseline axis:
+            // finger and symbol extents both projected to u (center-anchored).
+            fingerPos = when {
+                rotated -> Math.round(flowU(hitLine, rawX, rawY))
+                isVertical -> rawY
+                else -> rawX
+            },
+            symbols = if (rotated) uSpaceSymbols(hitLine) else hitLine.symbols,
+            fallbackLineStart = when {
+                rotated -> Math.round(-hitLine.orientedWidth / 2f)
+                isVertical -> hitLine.bounds.top
+                else -> hitLine.bounds.left
+            },
             fallbackCharExtent = charExtent,
             vertical = isVertical,
         ) ?: return null
@@ -691,32 +757,15 @@ class DragLookupController(
      *  synchronously during onDragMove. Called from the OCR coroutine
      *  after recognition completes.
      *
-     *  Two phases for speed + correctness:
-     *
-     *  **Phase 1** — kuromoji tokenize per line, cache the surface span /
-     *  base form / surface-form reading. Cheap (single-digit ms per line)
-     *  so the label can appear under the finger almost immediately after
-     *  OCR finishes. Surface-form readings are sometimes wrong for
-     *  inflected verbs/adjectives — kuromoji tags 住ん with reading スン
-     *  even though the base form 住む reads すむ — and sometimes absent
-     *  (n-gram phrase matches in `tokenizeWithSurfaces` carry null
-     *  readings).
-     *
-     *  **Phase 2** — canonicalize each unique (lookupForm, reading) pair
-     *  against the dictionary. Dedupe keys on the pair, not the form
-     *  alone, so kuromoji's per-token reading can ride along as a
-     *  disambiguation hint: a homograph kanji (人 → ひと "person" vs にん
-     *  "counter for people") then resolves to the entry that matches the
-     *  surface, instead of whichever entry happens to win the reading-
-     *  blind ranking. The pair count barely exceeds the form count — a
-     *  form appearing with two readings on one screen is uncommon — so a
-     *  240-token screen still collapses to ~50-ish SQLite queries, not
-     *  240. Each resolved pair patches every cache entry that uses it —
-     *  fixes both the wrong-reading case (replaces kuromoji's surface
-     *  reading with JMdict's lemma reading) and the missing-reading case
-     *  (fills in what tokenizeWithSurfaces left null). Reader (onDragMove)
-     *  re-reads the cache on every tick so the label updates in place as
-     *  Phase 2 progresses.
+     *  One FULL-depth annotation per line (the same single analysis every
+     *  other reading surface projects from): spans arrive with canonical
+     *  written forms, occurrence-validated readings, and real offsets, so
+     *  labels are correct at first paint — the old two-phase
+     *  tokenize-then-patch pass (and its mid-drag label upgrades) is gone.
+     *  Homograph disambiguation rides the annotator's per-occurrence
+     *  resolution (人 → ひと vs にん by context hint), and the engine's
+     *  annotation LRU makes repeat drags over an unchanged screen
+     *  near-free.
      *
      *  Re-throws [CancellationException] before the generic catch so a
      *  cancelled drag's coroutine actually exits without overwriting
@@ -728,35 +777,36 @@ class DragLookupController(
         val engine = SourceLanguageEngines.get(context, Prefs(context).sourceLangId)
         val cache = mutableMapOf<String, List<LabelToken>>()
 
-        // Phase 1: kuromoji-only pass.
+        // One FULL-depth annotation per line: spans arrive with canonical
+        // written forms and occurrence-validated readings already resolved,
+        // so the label is correct at FIRST paint — no patch-in-place upgrade
+        // pass, no mid-drag label flicker. The engine's annotation LRU makes
+        // repeat drags over the same screen near-free. Offsets come from the
+        // spans themselves — no indexOf re-finding.
         for (line in lines) {
             if (line.text.isEmpty() || cache.containsKey(line.text)) continue
             try {
-                val results = engine.tokenize(line.text)
+                val ann = engine.annotate(line.text)
                 val labels = mutableListOf<LabelToken>()
-                var pos = 0
-                for (r in results) {
-                    val idx = line.text.indexOf(r.surface, pos)
-                    if (idx < 0) continue
-                    // Same "show reading when it adds info" gate the
-                    // popup applies internally: drop blanks, drop reading
-                    // equal to the word, drop readings for words with no
-                    // kanji (kuromoji can return a katakana reading for
-                    // a hiragana word, etc.).
-                    val reading = r.reading?.takeIf { readingAddsInfo(r.lookupForm, it) }
+                for (s in ann.spans) {
+                    if (s.start < 0) continue
+                    val form = s.word ?: s.lookupForm ?: continue
+                    // Same "show reading when it adds info" gate the popup
+                    // applies internally: drop blanks, drop reading equal
+                    // to the word, drop readings for kanji-free words.
+                    val reading = s.reading?.takeIf { readingAddsInfo(form, it) }
                     labels += LabelToken(
-                        surface = r.surface,
-                        lookupForm = r.lookupForm,
+                        surface = s.surface,
+                        lookupForm = form,
                         reading = reading,
-                        charOffset = idx,
+                        charOffset = s.start,
                     )
-                    pos = idx + r.surface.length
                 }
                 cache[line.text] = labels
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w(TAG, "pretokenize phase 1 failed for line: ${e.message}")
+                Log.w(TAG, "pretokenize failed for line: ${e.message}")
             }
             // Publish progressively so labels for earlier lines become
             // hit-testable without waiting for the rest. Both reader
@@ -766,47 +816,6 @@ class DragLookupController(
             // Re-evaluate at the finger's last position. If the user
             // stopped moving before this line's cache landed, this is
             // what arms the dwell timer that onDragMove couldn't.
-            refreshLabelAndDwell()
-        }
-
-        // Phase 2: per-unique-(lookupForm, reading) canonicalization.
-        // Keying on the pair — not the form alone — lets the lookup pass
-        // kuromoji's reading as a hint so a homograph kanji resolves to
-        // the matching entry instead of the top reading-blind one.
-        val uniqueKeys = LinkedHashSet<Pair<String, String?>>()
-        for (tokens in cache.values) for (t in tokens) uniqueKeys.add(t.lookupForm to t.reading)
-        for ((form, hintReading) in uniqueKeys) {
-            val (canonicalWord, canonicalReading) = try {
-                // selectHeadword honours the occurrence [hintReading] (明日 read
-                // あす wins over the entry's primary あした) but falls back to the
-                // primary headword when the hint matches none, so a wrong/missing
-                // tokenizer reading still canonicalizes exactly as before.
-                val head = engine.lookup(form, hintReading)?.entries?.firstOrNull()
-                    ?.selectHeadword(form, form, hintReading)
-                if (head != null) (head.written ?: head.reading ?: form) to head.reading
-                else continue  // not in dict — leave Phase 1 entry as-is
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "pretokenize phase 2 failed for $form [$hintReading]: ${e.message}")
-                continue
-            }
-            val gatedReading = canonicalReading?.takeIf { readingAddsInfo(canonicalWord, it) }
-            for ((lineText, tokens) in cache.toMap()) {
-                var dirty = false
-                val patched = tokens.map { t ->
-                    if (t.lookupForm == form && t.reading == hintReading &&
-                        (t.lookupForm != canonicalWord || t.reading != gatedReading)
-                    ) {
-                        dirty = true
-                        t.copy(lookupForm = canonicalWord, reading = gatedReading)
-                    } else t
-                }
-                if (dirty) cache[lineText] = patched
-            }
-            lineTokensCache = cache
-            // Phase 2 patches the label's lookupForm/reading; refresh so
-            // the visible label upgrades to the canonical form mid-drag.
             refreshLabelAndDwell()
         }
     }
@@ -1041,6 +1050,7 @@ class DragLookupController(
         handOffDragBitmap()
         dragBitmap = bitmap
         screenshotPath = path
+        dragCapturedAtMs = System.currentTimeMillis()
         magnifier.setBitmap(bitmap)
         if (!dragInProgress) {
             // Drag ended between screenshot capture and this callback (user
@@ -1156,8 +1166,14 @@ class DragLookupController(
 
         val lineText = hitLine.text
         val isVertical = hitLine.orientation == com.playtranslate.language.TextOrientation.VERTICAL
-        // For vertical text, characters stack along the height; for horizontal, along the width.
-        val lineExtent = if (isVertical) hitLine.bounds.height().toFloat() else hitLine.bounds.width().toFloat()
+        val rotated = hitLine.angleDeg != 0f
+        // For vertical text, characters stack along the height; for horizontal,
+        // along the width; for slanted lines, along the oriented width.
+        val lineExtent = when {
+            rotated -> hitLine.orientedWidth
+            isVertical -> hitLine.bounds.height().toFloat()
+            else -> hitLine.bounds.width().toFloat()
+        }
         val charExtent = lineExtent / lineText.length
 
         // Tokenize the line (surface spans for position mapping, lookup forms for dictionary)
@@ -1172,9 +1188,17 @@ class DragLookupController(
         val tokenMatch = findClosestToken(
             lineText = lineText,
             tokens = surfaceTokens,
-            fingerPos = if (isVertical) fingerY else fingerX,
-            symbols = hitLine.symbols,
-            fallbackLineStart = if (isVertical) hitLine.bounds.top else hitLine.bounds.left,
+            fingerPos = when {
+                rotated -> Math.round(flowU(hitLine, fingerX, fingerY))
+                isVertical -> fingerY
+                else -> fingerX
+            },
+            symbols = if (rotated) uSpaceSymbols(hitLine) else hitLine.symbols,
+            fallbackLineStart = when {
+                rotated -> Math.round(-hitLine.orientedWidth / 2f)
+                isVertical -> hitLine.bounds.top
+                else -> hitLine.bounds.left
+            },
             fallbackCharExtent = charExtent,
             vertical = isVertical,
         )
@@ -1207,182 +1231,56 @@ class DragLookupController(
             ChineseScriptConverter.forTarget(prefs.targetLang, prefs.targetChineseVariant))
         val defResult = withContext(Dispatchers.IO) { resolver.lookup(lookupForm, matchedToken?.reading) }
         val response = defResult?.response
-        // Wiktionary source packs split each POS section into its own entry;
-        // [primary] drives the popup's word/reading/freq fields while
-        // [flatSenses] feeds the sense rows so multi-POS headwords (e.g.
-        // English "man" — noun + verb) don't lose senses. JMdict (single
-        // entry per surface) flatSenses == primary.senses, so behavior is
-        // unchanged for JA.
         val entries = response?.entries.orEmpty()
         val entry = entries.firstOrNull()
-        val flatSenses = entries.flatMap { it.senses }
-        // Imported term-dictionary rows lead every entry-backed branch —
-        // final text, outside the MT tiers.
-        val importedRows = importedSenseDisplays(entry?.importedSenses.orEmpty())
 
-        // Build popup data based on DefinitionResult tier.
+        // Build popup data. The sense rows come from the shared tier
+        // cascade every definitions surface uses ([buildSenseDisplays]:
+        // imported rows lead, then Native target-driven / MT /
+        // English-fallback branching, flattened across every entry so
+        // Wiktionary's per-POS entry split doesn't lose senses). This
+        // replaced a hand-rolled copy of that cascade — the last one
+        // outside the shared builder.
         val reading = matchedToken?.reading
-        val popupData: PopupData = when {
-            entry != null && defResult is DefinitionResult.Native -> {
-                val display = entry.headwordDisplay(
-                    entry.selectHeadword(matchedSurface, lookupForm, matchedToken?.reading),
-                    matchedSurface,
-                )
-                // Target-driven for non-English targets: render the pack's
-                // sense list directly, no JMdict-position alignment (which
-                // is unrecoverable — see WordDetailBottomSheet for full
-                // explanation). For English targets, keep the by-ordinal
-                // alignment using English glosses + per-sense MT fallback.
-                val targetSenses = defResult.targetSenses.sortedBy { it.senseOrd }
-                val isTargetDriven = prefs.targetLang != "en" && targetSenses.isNotEmpty()
-                val senses = if (isTargetDriven) {
-                    // Blank-pos target rows (PanLex) inherit the source-
-                    // entry POS only when entries agree; multi-POS source
-                    // (e.g. "surprise" → noun + verb + intj) yields an
-                    // empty fallback so we don't mislabel cells.
-                    val fallbackPos = com.playtranslate.model.unambiguousFallbackPos(entries)
-                    targetSenses.map { target ->
-                        val pos = target.pos.filter { it.isNotBlank() }.ifEmpty { fallbackPos }
-                        SenseDisplay(
-                            pos = pos,
-                            definition = target.glosses.joinToString("; "),
-                            misc = target.misc,
-                        )
-                    }
-                } else {
-                    // English-target or empty-targetSenses defensive path —
-                    // flat-sense ordinals across all entries, no MT bridge
-                    // (Native no longer carries one).
-                    val targetByOrd = targetSenses.associateBy { it.senseOrd }
-                    flatSenses.mapIndexed { i, sense ->
-                        val target = targetByOrd[i]
-                        if (target != null) {
-                            SenseDisplay(
-                                pos = target.pos,
-                                definition = target.glosses.joinToString("; "),
-                                misc = target.misc,
-                            )
-                        } else {
-                            SenseDisplay(
-                                pos = sense.partsOfSpeech,
-                                definition = sense.targetDefinitions.joinToString("; "),
-                                misc = sense.misc,
-                            )
-                        }
-                    }
-                }
-                PopupData(
-                    word = display.written,
-                    reading = display.reading,
-                    senses = importedRows + senses,
-                    freqScore = entry.freqScore,
-                    isCommon = entry.isCommon == true,
-                    entry = entry,
-                    pitch = display.pitch,
-                    frequencies = display.frequencies,
-                )
-            }
-            entry != null && defResult is DefinitionResult.MachineTranslated -> {
-                val display = entry.headwordDisplay(
-                    entry.selectHeadword(matchedSurface, lookupForm, matchedToken?.reading),
-                    matchedSurface,
-                )
-                val defs = defResult.translatedDefinitions
-                PopupData(
-                    word = display.written,
-                    reading = display.reading,
-                    senses = importedRows + if (defs != null) {
-                        // Translated definitions available — show them directly
-                        flatSenses.mapIndexed { i, sense ->
-                            SenseDisplay(
-                                pos = sense.partsOfSpeech,
-                                definition = defs.getOrElse(i) { sense.targetDefinitions.joinToString("; ") },
-                                misc = sense.misc,
-                            )
-                        }
-                    } else {
-                        // No translated definitions — headword + English context
-                        buildList {
-                            add(SenseDisplay(pos = emptyList(), definition = defResult.translatedHeadword, misc = emptyList()))
-                            flatSenses.forEach { sense ->
-                                add(SenseDisplay(
-                                    pos = sense.partsOfSpeech,
-                                    definition = sense.targetDefinitions.joinToString("; "),
-                                    misc = sense.misc,
-                                ))
-                            }
-                        }
-                    },
-                    freqScore = entry.freqScore,
-                    isCommon = entry.isCommon == true,
-                    entry = entry,
-                    machineTranslated = true,
-                    pitch = display.pitch,
-                    frequencies = display.frequencies,
-                )
-            }
-            entry != null && defResult is DefinitionResult.EnglishFallback && defResult.translatedDefinitions != null -> {
-                // Translated definitions without headword translation
-                val display = entry.headwordDisplay(
-                    entry.selectHeadword(matchedSurface, lookupForm, matchedToken?.reading),
-                    matchedSurface,
-                )
-                val defs = defResult.translatedDefinitions
-                PopupData(
-                    word = display.written,
-                    reading = display.reading,
-                    senses = importedRows + flatSenses.mapIndexed { i, sense ->
-                        SenseDisplay(
-                            pos = sense.partsOfSpeech,
-                            definition = defs.getOrElse(i) { sense.targetDefinitions.joinToString("; ") },
-                            misc = sense.misc,
-                        )
-                    },
-                    freqScore = entry.freqScore,
-                    isCommon = entry.isCommon == true,
-                    entry = entry,
-                    machineTranslated = true,
-                    pitch = display.pitch,
-                    frequencies = display.frequencies,
-                )
-            }
-            entry != null -> {
-                // EnglishFallback with no translations — show English as-is
-                val display = entry.headwordDisplay(
-                    entry.selectHeadword(matchedSurface, lookupForm, matchedToken?.reading),
-                    matchedSurface,
-                )
-                PopupData(
-                    word = display.written,
-                    reading = display.reading,
-                    senses = importedRows + flatSenses.map { sense ->
-                        SenseDisplay(
-                            pos = sense.partsOfSpeech,
-                            definition = sense.targetDefinitions.joinToString("; "),
-                            misc = sense.misc,
-                        )
-                    },
-                    freqScore = entry.freqScore,
-                    isCommon = entry.isCommon == true,
-                    entry = entry,
-                    pitch = display.pitch,
-                    frequencies = display.frequencies,
-                )
-            }
-            else -> {
-                // No dictionary entry. Keep the lens up with an empty sense
-                // list — the lens's WordDefinitionsView renders its
-                // "No definitions found." placeholder. (The genuine "no token
-                // under the finger" cases already returned null above.)
-                PopupData(
-                    word = lookupForm,
-                    reading = reading,
-                    senses = emptyList(),
-                    freqScore = 0,
-                    isCommon = false,
-                    entry = null,
-                )
-            }
+        val popupData: PopupData = if (entry != null && defResult != null) {
+            val display = entry.headwordDisplay(
+                entry.selectHeadword(matchedSurface, lookupForm, matchedToken?.reading),
+                matchedSurface,
+            )
+            PopupData(
+                word = display.written,
+                reading = display.reading,
+                senses = buildSenseDisplays(defResult, entries, prefs.targetLang),
+                freqScore = entry.freqScore,
+                isCommon = entry.isCommon == true,
+                entry = entry,
+                // The MT badge marks tiers whose TEXT came through a
+                // translator: all of MachineTranslated, and EnglishFallback
+                // only when it carries translated definitions — the same
+                // rule the old per-branch flags encoded.
+                machineTranslated = defResult is DefinitionResult.MachineTranslated ||
+                    (defResult is DefinitionResult.EnglishFallback &&
+                        defResult.translatedDefinitions != null),
+                pitch = display.pitch,
+                frequencies = display.frequencies,
+                importedGroups = entry.importedSenses,
+                styled = fetchYomitanStyledData(
+                    context, prefs.sourceLangId.yomitanConsumingLang(), entry.importedSenses,
+                ),
+            )
+        } else {
+            // No dictionary entry. Keep the lens up with an empty sense
+            // list — the lens's WordDefinitionsView renders its
+            // "No definitions found." placeholder. (The genuine "no token
+            // under the finger" cases already returned null above.)
+            PopupData(
+                word = lookupForm,
+                reading = reading,
+                senses = emptyList(),
+                freqScore = 0,
+                isCommon = false,
+                entry = null,
+            )
         }
 
         Log.d(TAG, "Found: $matchedSurface ($lookupForm) → ${entry?.slug ?: "(fallback)"}")
@@ -1416,6 +1314,8 @@ class DragLookupController(
             isCommon = isCommon,
             pitch = pitch,
             frequencies = frequencies,
+            importedGroups = importedGroups,
+            styled = styled,
         )
 
     private fun PopupData.machineTranslatedLabel(): String? =
@@ -1435,6 +1335,10 @@ class DragLookupController(
         val pitch: List<Int> = emptyList(),
         /** Per-dictionary frequency chips from the displayed headword. */
         val frequencies: List<FrequencyTag> = emptyList(),
+        /** Structured imported groups + prefetched styled payload — see
+         *  [WordDefinitionData.importedGroups]/[WordDefinitionData.styled]. */
+        val importedGroups: List<com.playtranslate.model.ImportedSenseGroup> = emptyList(),
+        val styled: YomitanStyledData? = null,
     )
 
     private fun findLineAt(x: Int, y: Int, lines: List<OcrManager.OcrLine>): OcrManager.OcrLine? {
@@ -1448,6 +1352,29 @@ class DragLookupController(
             var bestLine: OcrManager.OcrLine? = null
             var bestDist = Long.MAX_VALUE
             for (line in lines) {
+                if (line.angleDeg != 0f) {
+                    // Slanted line (always horizontal flow): un-rotate the
+                    // finger into the line's frame and test the ORIENTED rect
+                    // with the same expansion — the inflated AABB would claim
+                    // touches on the empty corners. Cross-baseline distance
+                    // weighted 3× like the upright horizontal path.
+                    val rad = Math.toRadians(line.angleDeg.toDouble())
+                    val c = kotlin.math.cos(rad).toFloat()
+                    val s = kotlin.math.sin(rad).toFloat()
+                    val dx = x - line.bounds.exactCenterX()
+                    val dy = y - line.bounds.exactCenterY()
+                    val u = dx * c + dy * s
+                    val v = -dx * s + dy * c
+                    if (kotlin.math.abs(u) > line.orientedWidth / 2f + expandX ||
+                        kotlin.math.abs(v) > line.orientedHeight / 2f + expandY
+                    ) continue
+                    val dist = (u * u + v * v * 9).toLong()
+                    if (dist < bestDist) {
+                        bestDist = dist
+                        bestLine = line
+                    }
+                    continue
+                }
                 val expanded = Rect(line.bounds).apply {
                     top -= expandY
                     bottom += expandY

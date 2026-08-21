@@ -4,12 +4,14 @@ import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.BitmapFactory
 import android.graphics.Bitmap
 import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Outline
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.InsetDrawable
 import android.graphics.Paint
@@ -18,8 +20,10 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.os.Build
 import android.text.InputType
+import android.text.Layout
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.WindowInsets
 import android.view.MotionEvent
 import android.view.VelocityTracker
@@ -38,6 +42,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.widget.NestedScrollView
@@ -47,6 +52,7 @@ import com.playtranslate.CaptureSession
 import com.playtranslate.CaptureState
 import com.playtranslate.OneShotOverlayData
 import com.playtranslate.PlayTranslateApplication
+import com.playtranslate.fillOneShotOverlayData
 import com.playtranslate.Prefs
 import com.playtranslate.R
 import com.playtranslate.language.OcrBackend
@@ -58,6 +64,7 @@ import com.playtranslate.ocr.registry.OcrModelManager
 import com.playtranslate.ocr.registry.selectionToken
 import com.playtranslate.model.TextSegments
 import com.playtranslate.model.OcrProvenance
+import com.playtranslate.model.PendingTranslation
 import com.playtranslate.model.TranslationResult
 import com.playtranslate.overlay.OverlayHost
 import com.playtranslate.overlayThemedContext
@@ -167,6 +174,29 @@ class CaptureResultOverlay(
      *  translateOnce. */
     var retranslate: (suspend (String) -> PanelTranslation?)? = null
 
+    /** Deferred-translation completion: the bound result skipped MT because the
+     *  translation section was hidden ([TranslationResult.pendingTranslation])
+     *  and a consumer now needs it. Default (null): the capture service's
+     *  [CaptureService.completeDeferredTranslation], which also attaches the
+     *  capture's History rows. Hosts on the CameraTranslator stack (Process-
+     *  Text) substitute their own translator. Returning null means "no
+     *  translator available" — the pending stays set and the next trigger
+     *  retries; a non-null return is terminal for the pending. */
+    var completeDeferred: (suspend (PendingTranslation) -> List<PanelTranslation>?)? = null
+
+    /** Bumped per deferred-completion launch so a stale run can't rebind over
+     *  a newer trigger's result (mirror of the edit path's editGeneration). */
+    private var deferredGeneration = 0
+
+    /** The pending the in-flight completion launch is working on. A repeat
+     *  trigger for the SAME pending (eye reveal + show-on-screen back to
+     *  back) must not launch a second backend batch — the duplicate's History
+     *  attach would find the rows already filled and fresh-insert spurious
+     *  ones. A DIFFERENT pending (newer result) is not blocked; it supersedes
+     *  the old run via the generation bump. Cleared in the launch's finally
+     *  (generation-checked) so a kept-pending failure can retry later. */
+    private var deferredInFlight: PendingTranslation? = null
+
     /** The OCR-engine affordance (a Ready result's gear + the no-text
      *  status). Default (null): the overlay-window picker + in-place
      *  service re-OCR. */
@@ -222,6 +252,19 @@ class CaptureResultOverlay(
      *  at the resize floor, outside taps are consumed and ignored). */
     var dismissOnGesture: Boolean = true
 
+    /** Controller (dpad / stick / A / B) navigation of this sheet. Requires an
+     *  overlay-window host: the window takes input focus while the sheet is up
+     *  — INCLUDING the sliver — which takes the controller away from the game.
+     *  Off by default (against this block's over-game-default convention,
+     *  deliberately: stealing the game's controller must be an explicit act);
+     *  the over-game flow opts in, and only a connected controller at show()
+     *  time actually arms it. In-activity hosts keep their Activity's own
+     *  back/focus handling. */
+    var controllerNavEnabled: Boolean = false
+
+    /** Live only while [controllerNavEnabled] found a controller at show(). */
+    private var nav: CaptureSheetControllerNav? = null
+
     /** Firms up the sheet + text-card fills for hosts with no screenshot
      *  behind the panel: the translucency is tuned for the frosted backdrop,
      *  and un-blurred live app content bleeding through reads as distracting
@@ -253,12 +296,58 @@ class CaptureResultOverlay(
      *  in place ([updateChips]) vs present fresh, and hide paths can no-op. */
     private var boxesShown = false
 
-    /** Sliver-only "drag up for more options" hint (see the body's addView). */
+    /** Sliver-only hint text (see the body's addView). Two modes, switched by
+     *  [updateSliverHint]: the idle "tap for more options" advertisement, and
+     *  the live loading status ("Recognizing text…") while a capture is still
+     *  working — a parked sheet is otherwise the ONLY thing on screen during
+     *  OCR (the boxes don't exist until Translating), so without this the
+     *  collapsed flow reads as finished before it has started. */
     private val sliverHint = TextView(ctx)
+
+    /** Loading spinner beside [sliverHint]. Sized to the hint's own leading
+     *  glyph so the two modes occupy the same strip — [SLIVER_SHEET_DP] is
+     *  fixed (a taller sliver covers bottom-anchored game dialogue) and this
+     *  must not push against it. GONE outside the loading mode, which also
+     *  stops its animation: nothing spins over the game once a result lands. */
+    private val sliverSpinner = ProgressBar(ctx, null, android.R.attr.progressBarStyleSmall)
+
+    /** [sliverSpinner] + [sliverHint] as one centered row — the unit the
+     *  collapse crossfade drives (see [applyCollapseCrossfade]). */
+    private val sliverRow = LinearLayout(ctx)
+
+    /** The idle hint's leading glyph, held so [updateSliverHint] can take it
+     *  away for the loading mode (where the spinner leads instead). */
+    private var touchAppHintIcon: Drawable? = null
+
+    /** The message of the status currently in [statusText], or null when a
+     *  result (not a status) is bound. Drives the sliver's loading mode:
+     *  [statusText] itself is faded to nothing by the collapse crossfade, so
+     *  its text can't be read off the screen while parked. */
+    private var statusMessage: String? = null
 
     /** The panel height when the sliver collapse started, so a tap-expand can
      *  return to it (the sliver itself parks the height at [sliverHeightPx]). */
     private var preSliverHeightPx = 0
+
+    /** Set once the USER has stated a posture for this sheet — a tap-expand, a
+     *  drag out of the park, a stick resize. It stands down the automatic
+     *  re-park at [CaptureState.Translating], which otherwise re-reads the
+     *  PREF and would slam the sheet shut the moment OCR lands, undoing the
+     *  tap that was made to watch that very work. Cleared by a deliberate
+     *  re-park, so parking the sheet again hands control back to the pref.
+     *
+     *  Deliberately NOT set inside [expandFromSliver]: that path is also the
+     *  automatic recovery for "boxes were expected but refused", which is the
+     *  sheet rescuing itself, not the user choosing anything. */
+    private var userStatedPosture = false
+
+    /** True while the only reason the sheet is out of its park is a tap during
+     *  a LOADING phase — a peek at progress, not a posture. [recordPosture]
+     *  keeps writing the collapsed posture through it, so watching one capture
+     *  work doesn't silently retire a collapsed default. Any real posture
+     *  gesture afterwards (drag, resize, re-park) clears it and records
+     *  normally. */
+    private var loadingPeekExpand = false
 
     /** End target of the height animation currently in [heightAnimator];
      *  meaningful only while it runs, stamped by the two starters
@@ -311,6 +400,10 @@ class CaptureResultOverlay(
     // into [shadowBitmap]; the view only blits it and is repositioned via
     // translationY as the sheet grows/slides — never re-blurred (see [bakeEdgeShadow]).
     private val edgeShadow = EdgeShadowView(ctx)
+    // The controller cursor's accent ring, drawn at ROOT level (over the panel,
+    // under the font popover's late-added scrim) so it can outline buttons and
+    // word spans alike without fighting any child clipping.
+    private val focusRing = FocusRingView(ctx)
     private var shadowBitmap: Bitmap? = null
     // The shadow tracks the sheet through a single pre-draw hook (see [syncShadow])
     // rather than per-mover wiring — so no drag/animation path can move the sheet
@@ -388,27 +481,47 @@ class CaptureResultOverlay(
             val pad = dp(24)
             setPadding(pad, pad, pad, pad)
         }
+        val hintColor = ctx.themeColor(R.attr.ptTextHint)
+        // A touch_app glyph leads the idle text — the collapsed sheet's gesture
+        // is a TAP, and the up-arrows that used to flank this said the
+        // opposite. RELATIVE (start-side) so it leads in RTL too, tinted
+        // with the text and sized to its line — the 24dp intrinsic would
+        // dwarf 11sp text. The loading mode drops it: the spinner is that
+        // mode's leading glyph, and two icons would not fit the strip.
+        touchAppHintIcon = ctx.getDrawable(R.drawable.ic_touch_app)?.mutate()?.apply {
+            setTint(hintColor)
+            setBounds(0, 0, dp(HINT_GLYPH_DP), dp(HINT_GLYPH_DP))
+        }
         sliverHint.apply {
-            setText(R.string.capture_sliver_expand_hint)
-            val hintColor = ctx.themeColor(R.attr.ptTextHint)
             setTextColor(hintColor)
             textSize = 11f
             isSingleLine = true
-            // A touch_app glyph leads the text — the collapsed sheet's gesture
-            // is a TAP, and the up-arrows that used to flank this said the
-            // opposite. RELATIVE (start-side) so it leads in RTL too, tinted
-            // with the text and sized to its line — the 24dp intrinsic would
-            // dwarf 11sp text.
-            val iconPx = dp(16)
-            val icon = ctx.getDrawable(R.drawable.ic_touch_app)?.mutate()?.apply {
-                setTint(hintColor)
-                setBounds(0, 0, iconPx, iconPx)
-            }
-            setCompoundDrawablesRelative(icon, null, null, null)
+            // Status messages are written for the 18sp status block, not this
+            // strip; a long locale must trail off rather than run out of the
+            // sheet. (The idle hint is authored to fit — this only ever bites
+            // the borrowed loading text.)
+            ellipsize = android.text.TextUtils.TruncateAt.END
             compoundDrawablePadding = dp(4)
+        }
+        sliverSpinner.apply {
+            isIndeterminate = true
+            indeterminateTintList = ColorStateList.valueOf(hintColor)
+            visibility = View.GONE
+        }
+        sliverRow.apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(
+                sliverSpinner,
+                LinearLayout.LayoutParams(dp(HINT_GLYPH_DP), dp(HINT_GLYPH_DP)).apply {
+                    marginEnd = dp(6)
+                },
+            )
+            addView(sliverHint, LinearLayout.LayoutParams(WRAP, WRAP))
             visibility = View.GONE
             alpha = 0f
         }
+        updateSliverHint()
         scroll.apply {
             isFillViewport = true
             visibility = View.GONE
@@ -495,12 +608,14 @@ class CaptureResultOverlay(
                 FrameLayout.LayoutParams(MATCH, WRAP, Gravity.CENTER),
             )
             addView(editContainer, FrameLayout.LayoutParams(MATCH, MATCH))
-            // Sliver-only "drag up" hint: lives in the sheet strip the
-            // collapse leaves visible ([SLIVER_SHEET_DP] is sized to fit it),
-            // fading in as the sections fade out. Non-clickable — taps fall
-            // through to the root's sliver rules (tap = expand).
+            // Sliver-only hint row: lives in the sheet strip the collapse
+            // leaves visible ([SLIVER_SHEET_DP] is sized to fit it), fading in
+            // as the sections fade out. Non-clickable — taps fall through to
+            // the root's sliver rules (tap = expand). The spinner and the idle
+            // glyph are the same [HINT_GLYPH_DP] box, so the loading mode
+            // occupies exactly the strip the hint always did.
             addView(
-                sliverHint,
+                sliverRow,
                 FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
                     .apply { topMargin = dp(3) },
             )
@@ -516,6 +631,9 @@ class CaptureResultOverlay(
         // soft fade cast above its top edge.
         root.addView(edgeShadow, FrameLayout.LayoutParams(MATCH, shadowHeightPx, Gravity.TOP))
         root.addView(panel, FrameLayout.LayoutParams(MATCH, 0, Gravity.BOTTOM))
+        // After the panel so the ring draws over the sheet; a plain non-clickable
+        // View, so in-panel touches fall through it to the panel below.
+        root.addView(focusRing, FrameLayout.LayoutParams(MATCH, MATCH))
         // One-shot after each bind: park the scroll just past the hidden
         // translation section's collapsed header (see hiddenTopPx). Layout-
         // driven because the needed scroll range only exists once the grow
@@ -549,6 +667,11 @@ class CaptureResultOverlay(
         if (dismissed) return
         this.screenW = screenW
         this.screenH = screenH
+        // Bound the sliver hint now that the display width is known: its row is
+        // WRAP and centered, so nothing else would stop the borrowed status
+        // text of a long locale from running out past the sheet's edges.
+        sliverHint.maxWidth =
+            (screenW - dp(HINT_GLYPH_DP + SLIVER_HINT_SIDE_PAD_DP * 2)).coerceAtLeast(dp(48))
         // Inset the body's content below the status bar (the sheet fill, drawn on
         // the full body bounds, still reaches the screen top). Explicit side-zeros
         // keep overriding the InsetDrawable's reported negative top padding.
@@ -630,9 +753,17 @@ class CaptureResultOverlay(
             // A section was hidden/shown — grow/shrink the panel to the new content.
             // Two frames: the collapse AND the other column's re-widen must settle
             // before we measure, else we'd size to the stale pre-collapse layout.
+            // Same settle window before the controller cursor re-targets: its
+            // activated eye may have swapped a whole column for its strip.
             contentRow.post {
-                contentRow.post { if (!dismissed && lastResult != null) autoSizeAndFit() }
+                contentRow.post {
+                    if (dismissed) return@post
+                    if (lastResult != null) autoSizeAndFit()
+                    nav?.revalidateCursor()
+                }
             }
+            // Eye reveal on a deferred result: run the skipped translation now.
+            maybeCompleteDeferred()
         }
         // Furigana changes the source's rendered height (async on / sync off) — re-fit.
         b.onSourceTextHeightChanged = { if (!dismissed) autoSizeAndFit() }
@@ -704,12 +835,32 @@ class CaptureResultOverlay(
             }
             insets
         }
-        sheetHost.attach(root, screenW, screenH)
+        // Controller navigation arms only when the over-game flow opted in AND
+        // a nav-capable device is actually attached (gamepad, or a hardware
+        // keyboard whose Escape/arrows/Enter mirror B/dpad/A) — evaluated
+        // once, here: no device listener, so a device plugged in later gets
+        // nav on the NEXT sheet. The window is created already-focusable (no
+        // async flag flip to race), which also lands the OverlayHost
+        // focusable-overlay paper trail on add.
+        val navActive = controllerNavEnabled && hasNavInputDevice(ctx)
+        sheetHost.attach(root, screenW, screenH, focusable = navActive)
+        if (navActive) {
+            // The root holds VIEW focus so the framework's restoreDefaultFocus
+            // can't wander into an ImageButton on window-focus gain and paint a
+            // stock highlight next to our ring — and suppress the full-root
+            // focus rectangle, same as MagnifierLens's interactive card.
+            root.isFocusable = true
+            root.isFocusableInTouchMode = true
+            root.defaultFocusHighlightEnabled = false
+            root.requestFocus()
+            nav = CaptureSheetControllerNav(ctx, navHost)
+        }
         // ONE place that keeps the drop shadow glued to the sheet: a pre-draw hook
         // re-reads the panel's live position every frame, so the shadow follows
         // through any move (handle drag, body swipe/fling, resize, entrance/exit)
-        // with no per-mover wiring to forget.
-        shadowSync = ViewTreeObserver.OnPreDrawListener { syncShadow(); true }.also {
+        // with no per-mover wiring to forget. The controller focus ring rides the
+        // same hook for the same reason.
+        shadowSync = ViewTreeObserver.OnPreDrawListener { syncShadow(); nav?.syncRing(); true }.also {
             root.viewTreeObserver.addOnPreDrawListener(it)
         }
         // Ease in from the bottom — a plain decelerate, no overshoot/bounce.
@@ -729,7 +880,7 @@ class CaptureResultOverlay(
         sessionJob = scope.launch {
             session.state.collect { state ->
                 when (state) {
-                    is CaptureState.InProgress -> setStatus(state.message)
+                    is CaptureState.InProgress -> setStatus(state.message, loading = true)
                     // OCR done: show the source now with a "Translating…" placeholder
                     // (blank translatedText renders it); Done fills it in + re-fits.
                     is CaptureState.Translating -> {
@@ -767,11 +918,17 @@ class CaptureResultOverlay(
                         // NOTHING readable, so the panel comes (or stays) up
                         // instead: the old success-gated collapse, split across
                         // the two axes.
+                        //
+                        // ...and only while the user hasn't overruled it. This
+                        // test re-reads the PREF, so without that term a tap
+                        // during the loading arc would be undone by the very
+                        // work it was made to watch: OCR lands, and the sheet
+                        // the user just opened slams shut in the same frame.
                         val sliverJustified =
                             boxesShown || !presentationPrefs.boxesEnabled
                         val startsCollapsed = CaptureResultGeometry
                             .isCollapsedPosture(effectiveStartPosture())
-                        if (startsCollapsed && sliverJustified) {
+                        if (startsCollapsed && sliverJustified && !userStatedPosture) {
                             collapseToSliver()
                         } else if (sliverMode && !sliverJustified) {
                             expandFromSliver()
@@ -886,8 +1043,17 @@ class CaptureResultOverlay(
      *  moment it's tapped. */
     private fun recordPosture() {
         if (lastResult == null || scroll.visibility != View.VISIBLE) return
-        presentationPrefs.startPosture =
-            CaptureResultGeometry.postureFor(autoMaxPx, screenH, collapsed = sliverMode)
+        presentationPrefs.startPosture = CaptureResultGeometry.postureFor(
+            autoMaxPx,
+            screenH,
+            // A sheet that is only open because the user looked in on the
+            // loading arc still records as PARKED: watching one capture work
+            // is not a change of mind about where the sheet lives, and letting
+            // it write an expanded posture would retire a collapsed default
+            // behind a single tap. Any real height gesture afterwards clears
+            // the peek and records normally (see [loadingPeekExpand]).
+            collapsed = sliverMode || loadingPeekExpand,
+        )
     }
 
     /** Re-show entry point for the controller's stash-and-rebind path: set up the
@@ -913,6 +1079,8 @@ class CaptureResultOverlay(
         captureSession?.cancel()
         captureSession = null
         binder?.release()
+        nav?.release()
+        nav = null
         shadowSync?.let { root.viewTreeObserver.removeOnPreDrawListener(it) }
         shadowSync = null
         sheetHost.detach(root)
@@ -935,6 +1103,7 @@ class CaptureResultOverlay(
         animatingOut = true
         dismissWordLens()
         fontPopover?.dismiss()
+        nav?.clearCursor()   // no ring riding the exit slide
         panel.animate()
             .translationY(panelHeightPx.toFloat())
             .setDuration(EXIT_DURATION_MS)
@@ -1011,6 +1180,9 @@ class CaptureResultOverlay(
         } else {
             val data = overlayData ?: return
             presentationPrefs.boxesEnabled = showChips(data)
+            // Boxes on a deferred result went up as skeletons — run the skipped
+            // translation now so they fill instead of pulsing forever.
+            maybeCompleteDeferred()
         }
         updateShowOnScreenAction()
     }
@@ -1026,9 +1198,15 @@ class CaptureResultOverlay(
         if (dismissed || animatingOut || sliverMode) return
         if (editContainer.visibility == View.VISIBLE) return
         sliverMode = true
+        // Parking hands the wheel back to the pref: whatever the user stated
+        // before, they are stating the sliver now. (No-op on the automatic
+        // park — that one only runs while nothing was stated.)
+        userStatedPosture = false
+        loadingPeekExpand = false
         dismissWordLens()
         // The sections it edits are about to fade out under the collapse.
         fontPopover?.dismiss()
+        nav?.clearCursor()   // the cursor's targets are fading out
         preSliverHeightPx = panelHeightPx
         animateSliverHeight(sliverHeightPx())
     }
@@ -1069,6 +1247,42 @@ class CaptureResultOverlay(
         animateSliverHeight(CaptureResultGeometry.minPanelHeight(screenH)) {
             updateShowOnScreenAction()
         }
+        // Apply the floor to the animation we just started. The KDoc's "every
+        // setStatus retargets" covers the paths that expand BEFORE their status
+        // arrives (Failed/NoText); a tap-expand has the opposite order — the
+        // loading status landed long ago and no further setStatus is coming —
+        // so nothing would rescue a landscape sheet whose 20% floor is shorter
+        // than the status block. Grow-only and no-op when it already fits.
+        applyStatusFloor()
+    }
+
+    /** The USER pulling the sheet out of its park: the sliver tap and the
+     *  controller's mirror of it. Distinct from [expandFromSliver], which is
+     *  ALSO the sheet's automatic rescue when boxes were expected but refused
+     *  — that is the sheet saving itself, not the user choosing anything, and
+     *  only a real gesture may stand down the re-park at Translating.
+     *
+     *  A tap during a LOADING phase expands to status height rather than the
+     *  remembered reading height: on a re-run while parked (the camera's
+     *  region change drives its loading status straight through the sliver)
+     *  [preSliverHeightPx] holds the PREVIOUS scene's fitted height, and
+     *  restoring it balloons a mostly-empty sheet open over a one-line
+     *  "Recognizing text…" — the fault [expandFromSliverForStatus] exists for. */
+    private fun userExpandFromSliver() {
+        if (dismissed || animatingOut || !sliverMode) return
+        userStatedPosture = true
+        // Two different questions, deliberately keyed to two different facts.
+        // HEIGHT: any status at all takes the status-sized expansion — the
+        // ballooning fault is about the sheet's size against a one-line block,
+        // whatever that block says. PEEK: only a status still in flight is a
+        // look at progress; anything else is the user opening the sheet to
+        // read it, which is a posture like any other.
+        loadingPeekExpand = statusMessage != null
+        if (statusText.visibility == View.VISIBLE) {
+            expandFromSliverForStatus()
+        } else {
+            expandFromSliver()
+        }
     }
 
     /** The sliver drag has passed touch slop: the user is pulling the sheet edge
@@ -1100,11 +1314,19 @@ class CaptureResultOverlay(
         if (dismissed) return
         if (panelHeightPx >= CaptureResultGeometry.minPanelHeight(screenH)) {
             sliverMode = false
+            // A dragged-to height IS a posture: it stands down the auto-park,
+            // and it supersedes any loading peek that opened the sheet first.
+            userStatedPosture = true
+            loadingPeekExpand = false
             // Adopt the dragged height like endResize does, so re-fits keep it.
             autoMaxPx = committedCeiling()
             reFitText()
             updateShowOnScreenAction()
         } else {
+            // Pulled and let fall back: the user kept it parked, so the pref
+            // takes the wheel again.
+            userStatedPosture = false
+            loadingPeekExpand = false
             animateSliverHeight(sliverHeightPx())
         }
     }
@@ -1174,9 +1396,12 @@ class CaptureResultOverlay(
         }
         scroll.alpha = f
         statusText.alpha = f
-        sliverHint.animate().cancel()
-        sliverHint.alpha = 1f - f
-        sliverHint.visibility = if (f >= 1f) View.GONE else View.VISIBLE
+        sliverRow.animate().cancel()
+        sliverRow.alpha = 1f - f
+        // GONE above the band also stops the loading spinner: a parent that
+        // isn't laid out doesn't animate its children, so an expanded sheet
+        // never pays for a spinner nobody can see.
+        sliverRow.visibility = if (f >= 1f) View.GONE else View.VISIBLE
         // The pill goes with the content. Parked, it would sit inside the
         // system's bottom-edge home gesture band — a "grab me" invitation to
         // start a drag Android usually wins, taking the user out of the game
@@ -1185,6 +1410,33 @@ class CaptureResultOverlay(
         // it, and the band it starts from reaches well above the gesture zone;
         // it just isn't advertised any more.)
         handle.alpha = f
+    }
+
+    /** The sliver strip's two modes, switched by [statusMessage].
+     *
+     *  LOADING — a capture phase still in flight — shows a spinner and the
+     *  live status text. That text is BORROWED from the expanded block rather
+     *  than restated: `status_ocr` and its siblings are already authored and
+     *  translated for exactly this moment, and a sliver that said something
+     *  different from what a tap reveals would be two vocabularies for one
+     *  phase. (It is also why this needs no new string in any of the twelve
+     *  locales.)
+     *
+     *  IDLE restores the tap advertisement. Only one glyph is ever up: the
+     *  spinner leads while loading, the touch_app icon otherwise — the strip
+     *  has room for one, and the tap hint is redundant under a spinner
+     *  anyway (tapping is what the whole band does, loading or not). */
+    private fun updateSliverHint() {
+        val loading = statusMessage
+        if (loading != null) {
+            sliverHint.text = loading
+            sliverHint.setCompoundDrawablesRelative(null, null, null, null)
+            sliverSpinner.visibility = View.VISIBLE
+        } else {
+            sliverHint.setText(R.string.capture_sliver_expand_hint)
+            sliverHint.setCompoundDrawablesRelative(touchAppHintIcon, null, null, null)
+            sliverSpinner.visibility = View.GONE
+        }
     }
 
     /** The target header's boxes toggle is offered whenever there is something
@@ -1225,7 +1477,14 @@ class CaptureResultOverlay(
 
     // ── State rendering ──────────────────────────────────────────────────
 
-    private fun setStatus(message: String, ocrProvenance: OcrProvenance? = null, screenshotPath: String? = null) {
+    private fun setStatus(
+        message: String,
+        ocrProvenance: OcrProvenance? = null,
+        screenshotPath: String? = null,
+        /** This status is a phase still in flight, not a terminal outcome —
+         *  the only kind the collapsed sliver echoes (see [updateSliverHint]). */
+        loading: Boolean = false,
+    ) {
         // No-text status affordances, each its own tappable span (so tapping one can't
         // trigger the other): the source-language name is accent-colored → source picker
         // (same as the source header); the gear → OCR picker, shown only when a pinned
@@ -1243,6 +1502,13 @@ class CaptureResultOverlay(
         // A status means no shown result — whatever boxes the session produced
         // earlier (e.g. skeletons before a translation failure) are off the table.
         overlayData = null
+        // Echo it in the sliver too — the crossfade fades statusText to nothing
+        // while parked, and during OCR there are no boxes yet either, so a
+        // collapsed flow would otherwise show no sign of the work at all.
+        // Terminal statuses are excluded: they expand out of the park anyway,
+        // and a spinner beside "no text found" claims work that has stopped.
+        statusMessage = message.takeIf { loading }
+        updateSliverHint()
         updateShowOnScreenAction()
         // The proportional loading floor (20% of screen height) is SHORTER than
         // the status block itself on a landscape screen — "Recognizing text"
@@ -1293,8 +1559,14 @@ class CaptureResultOverlay(
         val b = binder ?: return
         lastResult = result
         populateSentenceCache(result)
+        nav?.clearCursor()   // fresh content: word indices + layout are stale
         statusText.visibility = View.GONE
         scroll.visibility = View.VISIBLE
+        // The loading arc ends here — at Translating, where the skeleton boxes
+        // take over as the on-screen sign of work in flight. The sliver goes
+        // back to advertising its tap.
+        statusMessage = null
+        updateSliverHint()
         updateShowOnScreenAction()
         // Fresh result with the translation section hidden: park its collapsed
         // header above the scroll fold once the fit lays out (see hiddenTopPx).
@@ -1326,6 +1598,83 @@ class CaptureResultOverlay(
             scroll.post {
                 if (dismissed) return@post
                 autoSizeAndFit()
+            }
+        }
+        // Bind-while-needed covers the triggers no callback fires for: a Done
+        // that landed with the section already visible (cross-surface pref flip
+        // — the pref is global SharedPreferences and nothing listens for it),
+        // and boxes toggled ON during the Translating window.
+        maybeCompleteDeferred()
+    }
+
+    /** DEFERRED-TRANSLATION funnel. The bound result skipped MT because the
+     *  translation section was hidden; run it the moment a consumer needs it:
+     *  the section is (or just became) visible, or the on-frame boxes are in
+     *  play. Generation-guarded like [commitEdit]'s re-translate; exactly one
+     *  completion rebinds with [TranslationResult.pendingTranslation] cleared.
+     *  No-ops for results without a pending, so it's safe on every bind. */
+    private fun maybeCompleteDeferred() {
+        val bound = lastResult ?: return
+        val pending = bound.pendingTranslation ?: return
+        val needed = !prefs.hideTranslationSection || boxesShown || presentationPrefs.boxesEnabled
+        if (!needed) return
+        // Same pending already completing (double trigger): one batch only.
+        if (deferredInFlight == pending) return
+        val gen = ++deferredGeneration
+        deferredInFlight = pending
+        scope.launch {
+            try {
+                val perGroup: List<PanelTranslation>? = try {
+                    val custom = completeDeferred
+                    if (custom != null) {
+                        custom(pending)
+                    } else {
+                        CaptureService.instance?.completeDeferredTranslation(pending)?.map {
+                            PanelTranslation(it.text, it.note, it.backendDisplayName)
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    emptyList()   // attempted and failed → terminal "—" below
+                }
+                if (dismissed || gen != deferredGeneration) return@launch
+                // The result moved on (edit commit, new session): this run is stale.
+                val current = lastResult
+                if (current?.pendingTranslation != pending) return@launch
+                // Null = no translator available (service dead, no host hook): keep
+                // the pending so the next trigger retries — distinct from a run that
+                // failed, which must land terminal or the visible card would read
+                // "Translating…" forever.
+                if (perGroup == null) return@launch
+                val joined = perGroup.joinToString("\n\n") { it.text }
+                if (joined.isBlank()) {
+                    bindResult(current.copy(translatedText = "—", pendingTranslation = null))
+                    return@launch
+                }
+                // Fill the skeletons BEFORE the rebind so the show-on-screen pill
+                // reads the filled data. Null-tolerant: the stash-reshow overlay
+                // carries no overlayData at all.
+                overlayData = fillOneShotOverlayData(overlayData, perGroup.map { it.text })
+                val filled = overlayData
+                bindResult(
+                    current.copy(
+                        translatedText = joined,
+                        note = perGroup.mapNotNull { it.note }.firstOrNull(),
+                        backendDisplayName = perGroup.mapNotNull { it.backendDisplayName }.firstOrNull(),
+                        pendingTranslation = null,
+                    )
+                )
+                // Promote any skeletons already up; nothing paintable → take them
+                // down rather than leave them pulsing (Done's data == null recovery).
+                if (boxesShown) {
+                    if (filled != null) updateChips(filled) else hideChips()
+                }
+                updateShowOnScreenAction()
+            } finally {
+                // Only the run that still owns the generation releases the
+                // marker — a superseding launch already stamped its own.
+                if (gen == deferredGeneration) deferredInFlight = null
             }
         }
     }
@@ -1570,40 +1919,28 @@ class CaptureResultOverlay(
             if (dismissed) return@launch
             val b = binder ?: return@launch
             wordSpans = SourceWordLookup.computeSpans(b.displayedSourceText(), tokens, emptyMap())
+            nav?.onWordSpansChanged()
         }
     }
 
     /** Resolve the tapped word and show a display+speak lens over the game,
-     *  anchored on the tapped line (no Anki / open-detail — see [showAnkiChip]). */
-    private fun onSourceTapped(offset: Int) {
+     *  anchored on the tapped line (no Anki / open-detail — see [showAnkiChip]).
+     *  [fromController] (the cursor's A press) pre-selects the lens pill so the
+     *  next A opens the detail screen; a touch tap leaves the lens unselected
+     *  until its first controller input. */
+    private fun onSourceTapped(offset: Int, fromController: Boolean = false) {
         if (!wordLensEnabled) return
         val span = wordSpans.firstOrNull { offset in it.first } ?: return
         val b = binder ?: return
-        val tv = b.tvOriginal
         scope.launch {
             try {
                 val resolved = SourceWordLookup.resolve(ctx.applicationContext, span.second, span.third)
                 if (dismissed) return@launch
-                val layout = tv.layout ?: return@launch
-                val lineStart = layout.getLineForOffset(span.first.first)
-                val xStart = layout.getPrimaryHorizontal(span.first.first)
-                // The offset just past the word can land on the NEXT line (the word
-                // ends a wrapped line) — getPrimaryHorizontal then returns that line's
-                // start (~0), collapsing the center to mid-screen and throwing off the
-                // lens/arrow for right-edge words. Fall back to the line's right edge.
-                val endOffset = span.first.last + 1
-                val xEnd = if (layout.getLineForOffset(endOffset) == lineStart) {
-                    layout.getPrimaryHorizontal(endOffset)
-                } else {
-                    layout.getLineRight(lineStart)
-                }
-                val wordCenterX = ((xStart + xEnd) / 2).toInt() + tv.paddingLeft
-                val lineTop = layout.getLineTop(lineStart) - tv.scrollY + tv.paddingTop
-                val lineH = layout.getLineBottom(lineStart) - layout.getLineTop(lineStart)
-                val loc = IntArray(2)
-                tv.getLocationOnScreen(loc)
-                val screenX = loc[0] + wordCenterX
-                val anchorY = loc[1] + lineTop
+                val wordRect = Rect()
+                if (!wordRectOnScreen(span.first, wordRect)) return@launch
+                val screenX = wordRect.centerX()
+                val anchorY = wordRect.top
+                val lineH = wordRect.height()
                 dismissWordLens()
                 // Null host = the lens's activity-window mode (see
                 // [wordLensInActivity]); the camera panel's wm IS its
@@ -1659,18 +1996,58 @@ class CaptureResultOverlay(
                         resolved.entry,
                         lastResult?.originalText,
                         lastResult?.screenshotPath,
+                        audioAnchorMs = lastResult?.createdAtMs?.takeIf { it > 0 },
                     )
                 }
                 b.setWordHighlight(span.first)
                 lens.show(screenX, anchorY, screenW, screenH, anchorHeight = lineH)
                 lens.setDefinitions(resolved.data, resolved.label)
                 lens.makeInteractive()
+                if (fromController) lens.focusPillForController()
             } catch (_: Exception) {}
         }
     }
 
     private fun dismissWordLens() {
         wordLens?.dismiss()
+    }
+
+    private val wordLocTmp = IntArray(2)
+
+    /** Screen rect of [span]'s FIRST line box inside tvOriginal, or false while
+     *  the text isn't laid out. The ONE word-geometry implementation, shared by
+     *  the lens anchor ([onSourceTapped]) and the controller cursor's ring, so
+     *  the two can never drift. A wrapped word rings/anchors on its first line. */
+    private fun wordRectOnScreen(span: IntRange, out: Rect): Boolean {
+        val tv = binder?.tvOriginal ?: return false
+        if (!tv.isShown) return false
+        val layout = tv.layout ?: return false
+        val endOffset = span.last + 1
+        if (span.first < 0 || endOffset > layout.text.length) return false
+        val lineStart = layout.getLineForOffset(span.first)
+        val xStart = layout.getPrimaryHorizontal(span.first)
+        // The offset just past the word can land on the NEXT line (the word
+        // ends a wrapped line) — getPrimaryHorizontal then returns that line's
+        // start (~0), collapsing the box to mid-screen and throwing off the
+        // lens/arrow for right-edge words. Fall back to the line's right edge.
+        val xEnd = if (layout.getLineForOffset(endOffset) == lineStart) {
+            layout.getPrimaryHorizontal(endOffset)
+        } else {
+            layout.getLineRight(lineStart)
+        }
+        // min/max, not start/end: an RTL run's primary horizontals arrive inverted.
+        var left = minOf(xStart, xEnd).toInt() + tv.paddingLeft
+        var right = maxOf(xStart, xEnd).toInt() + tv.paddingLeft
+        if (right <= left) right = left + 1
+        val top = layout.getLineTop(lineStart) - tv.scrollY + tv.paddingTop
+        val bottom = layout.getLineBottom(lineStart) - tv.scrollY + tv.paddingTop
+        if (bottom <= top) return false
+        tv.getLocationOnScreen(wordLocTmp)
+        out.set(
+            wordLocTmp[0] + left, wordLocTmp[1] + top,
+            wordLocTmp[0] + right, wordLocTmp[1] + bottom,
+        )
+        return true
     }
 
     // ── OCR tool switcher ────────────────────────────────────────────────
@@ -1771,8 +2148,11 @@ class CaptureResultOverlay(
                 ?: showAnkiNotInstalledDialog(ctx, overlayHost, wm, displayId)
             return
         }
-        val cached = LastSentenceCache.takeIf { it.original == sentence }
-        val words = cached?.wordResults?.takeIf { it.isNotEmpty() }
+        // One locked snapshot for every word extra below. NOT gated direct
+        // field reads: the blank-meaning transport requires the meaning
+        // slots and EXTRA_ENRICHMENT to come from the SAME maps, and the
+        // singleton's fields can rotate between separate reads.
+        val words = LastSentenceCache.snapshotFor(sentence)
         SentenceAnkiReviewActivity.finishCurrentIfAny()
         AnkiPermissionActivity.finishCurrentIfAny()
         val intent = Intent(app, AnkiPermissionActivity::class.java).apply {
@@ -1780,23 +2160,40 @@ class CaptureResultOverlay(
             putExtra(AnkiPermissionActivity.EXTRA_FORWARD_TARGET, AnkiPermissionActivity.TARGET_SENTENCE)
             putExtra(SentenceAnkiReviewActivity.EXTRA_SENTENCE, sentence)
             putExtra(SentenceAnkiReviewActivity.EXTRA_TRANSLATION, result.translatedText)
+            // A deferred result's translation is blank — carry the pending so
+            // the sheet's lazy fill runs the deferred COMPLETION (History rows
+            // fill too). This panel dismisses on launch (its own funnel dies
+            // with its scope), so the sheet is the completion's only carrier.
+            result.pendingTranslation?.let {
+                putExtra(SentenceAnkiReviewActivity.EXTRA_PENDING_TRANSLATION, it)
+            }
             result.screenshotPath?.let { putExtra(SentenceAnkiReviewActivity.EXTRA_SCREENSHOT_PATH, it) }
             putExtra(SentenceAnkiReviewActivity.EXTRA_SOURCE_LANG, prefs.sourceLangId.code)
-            words?.let { wr ->
-                val keys = wr.keys.toTypedArray()
+            // Game-audio ring anchor: when this capture happened, so the trim
+            // view opens at the line's own moment instead of the buffer tail.
+            if (result.createdAtMs > 0) {
+                putExtra(SentenceAnkiReviewActivity.EXTRA_AUDIO_ANCHOR_MS, result.createdAtMs)
+            }
+            words?.let { snap ->
+                val keys = snap.results.keys.toTypedArray()
+                // Size-gated pair: normally senses ride EXTRA_ENRICHMENT and
+                // sense-bearing meaning slots are blanked (definition text
+                // crosses the binder once; meaningFromTransport re-derives on
+                // the sheet's read side). An oversized senses payload ships
+                // stripped enrichment + real flat meanings instead — see
+                // transportPayloadFor. Safe ONLY because every extra reads
+                // the same [snap]: a blank slot's senses are the senses that
+                // cross.
+                val transport = transportPayloadFor(keys, snap.results, snap.enrichment)
                 putExtra(SentenceAnkiReviewActivity.EXTRA_WORDS, keys)
-                putExtra(SentenceAnkiReviewActivity.EXTRA_READINGS, wr.values.map { it.first }.toTypedArray())
-                putExtra(SentenceAnkiReviewActivity.EXTRA_MEANINGS, wr.values.map { it.second }.toTypedArray())
-                putExtra(SentenceAnkiReviewActivity.EXTRA_FREQ_SCORES, wr.values.map { it.third }.toIntArray())
-                // Carry surfaces (parallel to keys) + pitch/frequency enrichment
-                // from the SAME `cached` snapshot, atomically — so the review
-                // can't pair these words with another sentence's enrichment that
-                // a later capture wrote to the global cache while the permission
-                // trampoline was up.
+                putExtra(SentenceAnkiReviewActivity.EXTRA_READINGS,
+                    snap.results.values.map { it.first }.toTypedArray())
+                putExtra(SentenceAnkiReviewActivity.EXTRA_MEANINGS, transport.meanings)
+                putExtra(SentenceAnkiReviewActivity.EXTRA_FREQ_SCORES,
+                    snap.results.values.map { it.third }.toIntArray())
                 putExtra(SentenceAnkiReviewActivity.EXTRA_SURFACES,
-                    keys.map { cached?.surfaceForms?.get(it) ?: "" }.toTypedArray())
-                putExtra(SentenceAnkiReviewActivity.EXTRA_ENRICHMENT,
-                    HashMap(cached?.wordEnrichment.orEmpty()))
+                    keys.map { snap.surfaces[it] ?: "" }.toTypedArray())
+                putExtra(SentenceAnkiReviewActivity.EXTRA_ENRICHMENT, transport.enrichment)
             }
         }
         val targetDisplay = PlayTranslateApplication.foregroundDisplayId() ?: displayId
@@ -1821,11 +2218,10 @@ class CaptureResultOverlay(
             openSentenceAnkiReview()
             return
         }
-        val cached = LastSentenceCache.takeIf { it.original == sentence }
-        val words = cached?.wordResults?.takeIf { it.isNotEmpty() }
-        val payload = words?.let {
-            LastSentenceCache.WordsPayload(it, cached.surfaceForms.orEmpty(), cached.wordEnrichment.orEmpty())
-        }
+        // Locked snapshot — the hand-assembled payload from three separate
+        // field reads could pair one sentence's words with another's
+        // surfaces/enrichment across a mid-read rotation.
+        val payload = LastSentenceCache.snapshotFor(sentence)
         val translation = result.translatedText.takeIf { it.isNotEmpty() }
         val langId = prefs.sourceLangId
         android.widget.Toast.makeText(app, R.string.anki_adding_in_progress, android.widget.Toast.LENGTH_SHORT).show()
@@ -1837,6 +2233,10 @@ class CaptureResultOverlay(
             val sendResult = app.oneTapSendSentence(
                 original = sentence, translation = translation, wordsPayload = payload,
                 screenshotPath = result.screenshotPath, sourceLangId = langId,
+                // Deferred result: the lazy translate runs the deferred
+                // COMPLETION (History rows fill too). This scope outlives the
+                // panel, so the attach survives a dismissal mid-send.
+                pendingTranslation = result.pendingTranslation,
             )
             when (sendResult) {
                 // Reopening the review is the mapping recovery — but only
@@ -1847,7 +2247,7 @@ class CaptureResultOverlay(
                 // paths' degraded contract instead. Both this coroutine and
                 // dismiss() run on Main, so the read doesn't race.
                 is AnkiSendResult.NeedsMapping -> if (!dismissed) openSentenceAnkiReview()
-                else -> oneTapResultToast(app, sendResult)
+                else -> oneTapResultToast(app, sendResult, CardMode.SENTENCE)
             }
         }
     }
@@ -1861,11 +2261,12 @@ class CaptureResultOverlay(
         dismissWordLens()
         // The editor covers the sections the popover sizes.
         fontPopover?.dismiss()
+        nav?.clearCursor()             // the editor covers the cursor's targets
         editText.setText(current)
         editText.setSelection(editText.text.length)
         editContainer.visibility = View.VISIBLE
         editText.requestFocus()        // view-focus first, so the IME targets this field
-        setWindowFocusable(true)
+        applyWindowFocusPolicy()
         // Flipping the window focusable runs through wm.updateViewLayout, which is
         // async — the window is NOT focusable yet in this frame, so an immediate
         // showSoftInput no-ops (that was the bug: the IME only appeared after a tap).
@@ -1888,7 +2289,8 @@ class CaptureResultOverlay(
         ctx.getSystemService(InputMethodManager::class.java)
             ?.hideSoftInputFromWindow(editText.windowToken, 0)
         editContainer.visibility = View.GONE
-        setWindowFocusable(false)
+        root.requestFocus()            // pull view focus off editText
+        applyWindowFocusPolicy()
         val prev = lastResult ?: return
         if (newText.isBlank() || newText == prev.originalText) return
         val b = binder ?: return
@@ -1912,6 +2314,10 @@ class CaptureResultOverlay(
             // The source is no longer the OCR output — drop provenance so the
             // "Scanned by …" row + gear hide and a re-OCR can't clobber the edit.
             ocrProvenance = null,
+            // The edit re-translates the NEW source itself (below) — a surviving
+            // pending would let a later reveal clobber it with the OLD source's
+            // translation.
+            pendingTranslation = null,
         )
         lastResult = edited
         // The capture's per-group boxes translate the OLD source — the edit
@@ -1955,8 +2361,155 @@ class CaptureResultOverlay(
         }
     }
 
-    private fun setWindowFocusable(focusable: Boolean) {
-        sheetHost.setFocusable(root, focusable)
+    /** Back out of the in-place edit without re-translating — the controller's
+     *  B while the editor is open. No text restore is needed: [startInPlaceEdit]
+     *  re-seeds [editText] from [lastResult] on every open. */
+    private fun cancelEdit() {
+        if (editContainer.visibility != View.VISIBLE) return
+        ctx.getSystemService(InputMethodManager::class.java)
+            ?.hideSoftInputFromWindow(editText.windowToken, 0)
+        editContainer.visibility = View.GONE
+        root.requestFocus()            // pull view focus off editText
+        applyWindowFocusPolicy()
+    }
+
+    /** Single owner of the sheet window's focus/IME flags. Focus is wanted
+     *  while the in-place edit is open (for the IME) OR while controller nav
+     *  is live (for keys + stick motion); the IME only ever for the edit —
+     *  this is what keeps [commitEdit] from dropping controller focus. */
+    private fun applyWindowFocusPolicy() {
+        val editing = editContainer.visibility == View.VISIBLE
+        sheetHost.setFocusPolicy(root, focusable = editing || nav != null, wantsIme = editing)
+    }
+
+    /** The controller's B / system back, in sheet-modal precedence order —
+     *  the mirror of [CaptureResultRoot.dispatchTouchEvent]'s ladder. The
+     *  lens branch is normally unreachable (an interactive lens window sits
+     *  above us and holds focus, handling B itself); it covers the lens's
+     *  no-controller non-focusable mode. */
+    private fun onControllerBack() {
+        when {
+            fontPopover?.isShowing == true -> fontPopover?.dismiss()
+            editContainer.visibility == View.VISIBLE -> cancelEdit()
+            wordLens != null -> dismissWordLens()
+            sliverMode -> dismissFromSliver()
+            else -> animateOutAndDismiss()
+        }
+    }
+
+    /** The sheet's side of the controller-navigation seam ([nav] drives it). */
+    private val navHost = object : CaptureSheetNavHost {
+        override val isEditing: Boolean get() = editContainer.visibility == View.VISIBLE
+        override val isPopoverOpen: Boolean get() = fontPopover?.isShowing == true
+        override val inSliver: Boolean get() = sliverMode
+
+        override fun onControllerBack() = this@CaptureResultOverlay.onControllerBack()
+        // The controller's mirror of the sliver TAP — a user gesture, so it
+        // takes the same posture-stating path (not the bare expand, which is
+        // also the automatic boxes-refused rescue).
+        override fun expandFromSliver() = userExpandFromSliver()
+
+        override fun navActions(): List<NavAction> {
+            val out = ArrayList<NavAction>()
+            binder?.navigableActions()?.let(out::addAll)
+            // The side-by-side collapsed strips' restore eyes — the only
+            // controls a hidden column still shows. (Visibility is the nav's
+            // own rect check; a shown column's strip is GONE.)
+            sourceColumn?.let { out.add(NavAction(it.eye)) }
+            targetColumn?.let { out.add(NavAction(it.eye)) }
+            return out
+        }
+
+        private val handleLoc = IntArray(2)
+        override fun handleRect(out: Rect): Boolean {
+            // Expanded posture only: the pill fades out through the collapse
+            // band (applyCollapseCrossfade), and a faded pill is not a target.
+            if (sliverMode || !handle.isShown || handle.alpha < 1f) return false
+            if (handle.width <= 0 || handle.height <= 0) return false
+            handle.getLocationOnScreen(handleLoc)
+            // Ring the DRAWN pill — 40×5dp centered in the strip plus its 1dp
+            // ring (HandleView.onDraw) — not the full-width transparent strip.
+            val pw = dp(42)
+            val ph = dp(7)
+            val cx = handleLoc[0] + handle.width / 2
+            val cy = handleLoc[1] + handle.height / 2
+            out.set(cx - pw / 2, cy - ph / 2, cx + pw / 2, cy + ph / 2)
+            return true
+        }
+
+        override fun collapseToSliver() = this@CaptureResultOverlay.collapseToSliver()
+
+        override fun resizeBy(dyPx: Int) = stickResizeBy(dyPx)
+
+        override fun commitResize() = commitStickResize()
+
+        override fun wordCount(): Int =
+            if (binder?.tvOriginal?.isShown == true) wordSpans.size else 0
+
+        override fun wordRect(index: Int, out: Rect): Boolean {
+            val span = wordSpans.getOrNull(index) ?: return false
+            return wordRectOnScreen(span.first, out)
+        }
+
+        override fun wordRunIsRtl(): Boolean {
+            val layout = binder?.tvOriginal?.layout ?: return false
+            return layout.getParagraphDirection(0) == Layout.DIR_RIGHT_TO_LEFT
+        }
+
+        override fun activateWord(index: Int) {
+            val span = wordSpans.getOrNull(index) ?: return
+            onSourceTapped(span.first.first, fromController = true)
+        }
+
+        private val scrollLoc = IntArray(2)
+        override fun scrollViewportOnScreen(out: Rect): Boolean {
+            if (!scroll.isShown || scroll.width <= 0 || scroll.height <= 0) return false
+            scroll.getLocationOnScreen(scrollLoc)
+            out.set(
+                scrollLoc[0], scrollLoc[1],
+                scrollLoc[0] + scroll.width, scrollLoc[1] + scroll.height,
+            )
+            return true
+        }
+
+        override fun scrollBy(dy: Int) {
+            // NestedScrollView's scrollTo clamps to the content range.
+            scroll.scrollBy(0, dy)
+        }
+
+        override fun ensureVisible(itemOnScreen: Rect) {
+            val vp = Rect()
+            if (!scrollViewportOnScreen(vp)) return
+            val pad = dp(12)
+            val dy = when {
+                itemOnScreen.top < vp.top + pad -> itemOnScreen.top - (vp.top + pad)
+                itemOnScreen.bottom > vp.bottom - pad -> itemOnScreen.bottom - (vp.bottom - pad)
+                else -> 0
+            }
+            if (dy != 0) scroll.smoothScrollBy(0, dy)
+        }
+
+        private val ringItem = Rect()
+        private val ringClip = Rect()
+        private val rootLoc = IntArray(2)
+        override fun setRing(itemOnScreen: Rect?, clipOnScreen: Rect?) {
+            if (itemOnScreen == null) {
+                focusRing.setTarget(null, null)
+                return
+            }
+            // Screen → ring coords. The ring fills root, which normally sits at
+            // (0,0), but subtract the live location rather than assume it.
+            root.getLocationOnScreen(rootLoc)
+            ringItem.set(itemOnScreen)
+            ringItem.offset(-rootLoc[0], -rootLoc[1])
+            if (clipOnScreen == null) {
+                focusRing.setTarget(ringItem, null)
+                return
+            }
+            ringClip.set(clipOnScreen)
+            ringClip.offset(-rootLoc[0], -rootLoc[1])
+            focusRing.setTarget(ringItem, ringClip)
+        }
     }
 
     // ── Responsive content ───────────────────────────────────────────────
@@ -2008,15 +2561,16 @@ class CaptureResultOverlay(
         // [applyCardFill] (deterministic — a weight/fillViewport chain doesn't
         // reliably shrink the card during a drag).
         val label = VerticalLabel(ctx)
-        val collapsed = buildCollapsedStrip(isSource, label)
+        val (collapsed, eye) = buildCollapsedStrip(isSource, label)
         col.addView(expanded, LinearLayout.LayoutParams(MATCH, WRAP))
         col.addView(collapsed, LinearLayout.LayoutParams(WRAP, WRAP))
-        return SectionColumn(col, expanded, collapsed, label)
+        return SectionColumn(col, expanded, collapsed, label, eye)
     }
 
     /** The strip shown when a side-by-side section is hidden: an eye button to
-     *  restore it, with the section's language name rotated vertically beneath. */
-    private fun buildCollapsedStrip(isSource: Boolean, label: VerticalLabel): View {
+     *  restore it, with the section's language name rotated vertically beneath.
+     *  Returns the strip and its eye (the controller cursor's target there). */
+    private fun buildCollapsedStrip(isSource: Boolean, label: VerticalLabel): Pair<View, View> {
         val eye = ImageButton(ctx).apply {
             setImageResource(R.drawable.ic_visibility_off)
             val tv = TypedValue()
@@ -2031,13 +2585,14 @@ class CaptureResultOverlay(
                 if (isSource) binder?.toggleOriginalHidden() else binder?.toggleTranslationHidden()
             }
         }
-        return LinearLayout(ctx).apply {
+        val strip = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             visibility = View.GONE
             addView(eye, LinearLayout.LayoutParams(dp(36), dp(32)).apply { topMargin = dp(8) })
             addView(label, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(8) })
         }
+        return strip to eye
     }
 
     /** Collapse/expand the side-by-side columns to match the section hide prefs:
@@ -2077,6 +2632,8 @@ class CaptureResultOverlay(
         val expanded: View,
         val collapsed: View,
         val label: VerticalLabel,
+        /** The collapsed strip's restore button — a controller nav target. */
+        val eye: View,
     )
 
     /** Draws [label] rotated 90° (reads bottom-to-top) and measures with swapped
@@ -2194,7 +2751,10 @@ class CaptureResultOverlay(
             // parks in the sliver; a later tap-expand returns to the
             // pre-drag height.
             sliverMode = true
+            userStatedPosture = false   // parking hands the wheel to the pref
+            loadingPeekExpand = false
             dismissWordLens()
+            nav?.clearCursor()   // every sliver entry drops the cursor
             preSliverHeightPx = resizeStartHeight
             animateSliverHeight(sliverHeightPx())
         } else if (panelHeightPx != resizeStartHeight) {
@@ -2202,6 +2762,85 @@ class CaptureResultOverlay(
             // went nowhere — a tap on the grabber, or a pull against a sheet
             // already at its content ceiling — leaves the remembered one alone
             // instead of quietly overwriting it with wherever this result sat.
+            userStatedPosture = true
+            loadingPeekExpand = false
+            autoMaxPx = committedCeiling()
+        }
+    }
+
+    // ── Stick resize (the left stick's virtual grabber drag) ─────────────
+    // Delta-driven mirror of the touch resize: [stickResizeBy] is updateResize
+    // per frame, [commitStickResize] is the finger-up (endResize / the
+    // sliver drag's endSliverDrag, by origin). Driven by the nav controller's
+    // frame loop while the left stick is deflected.
+
+    private var stickResizing = false
+    private var stickResizeFromSliver = false
+    private var stickResizeStartHeight = 0
+
+    private fun stickResizeBy(dyPx: Int) {
+        if (dismissed || animatingOut) return
+        if (!stickResizing) {
+            heightAnimator?.cancel() // the user takes over from the auto-grow
+            stickResizing = true
+            stickResizeFromSliver = sliverMode
+            stickResizeStartHeight = panelHeightPx
+        }
+        // Same clamps as updateResize: [floor, 90%], capped at the content's
+        // max-needed height; the in-place edit keeps the classic floor (the
+        // nav loop is suspended while editing anyway — belt and braces).
+        val floor = if (editContainer.visibility == View.VISIBLE) {
+            CaptureResultGeometry.minPanelHeight(screenH)
+        } else {
+            sliverHeightPx()
+        }
+        setPanelHeight(
+            CaptureResultGeometry.clampPanelHeight(
+                panelHeightPx + dyPx, screenH, minFraction = 0f,
+            )
+                .coerceAtMost(maxNeededHeightPx)
+                .coerceAtLeast(floor),
+        )
+        if (panelHeightPx >= CaptureResultGeometry.minPanelHeight(screenH)) reFitText()
+    }
+
+    private fun commitStickResize() {
+        if (!stickResizing) return
+        stickResizing = false
+        if (dismissed || animatingOut) return
+        val min = CaptureResultGeometry.minPanelHeight(screenH)
+        if (stickResizeFromSliver) {
+            // Mirror endSliverDrag: past the classic floor the drag pulled the
+            // sheet out of its park; under it, settle back into the sliver.
+            if (panelHeightPx >= min) {
+                sliverMode = false
+                userStatedPosture = true
+                loadingPeekExpand = false
+                autoMaxPx = committedCeiling()
+                reFitText()
+                updateShowOnScreenAction()
+            } else {
+                userStatedPosture = false
+                loadingPeekExpand = false
+                animateSliverHeight(sliverHeightPx())
+            }
+        } else if (panelHeightPx < min && editContainer.visibility != View.VISIBLE) {
+            // Mirror endResize's park (never while editing — the IME would
+            // strand over a sliver, the same guard the touch floor encodes).
+            // Unlike the touch path, this commit can fire with the popover up
+            // (the frame loop's modal suspend lands here) — close it like
+            // collapseToSliver does rather than leave it floating over a park.
+            sliverMode = true
+            userStatedPosture = false   // parking hands the wheel to the pref
+            loadingPeekExpand = false
+            dismissWordLens()
+            fontPopover?.dismiss()
+            nav?.clearCursor()   // every sliver entry drops the cursor
+            preSliverHeightPx = stickResizeStartHeight
+            animateSliverHeight(sliverHeightPx())
+        } else if (panelHeightPx != stickResizeStartHeight) {
+            userStatedPosture = true
+            loadingPeekExpand = false
             autoMaxPx = committedCeiling()
         }
     }
@@ -2434,6 +3073,19 @@ class CaptureResultOverlay(
             return true
         }
 
+        /** Controller keys, live only while the window took focus at show()
+         *  ([nav] non-null). Before super so nav sees keys first — its own
+         *  edit/popover awareness decides what falls through to children. */
+        override fun dispatchKeyEvent(ev: KeyEvent): Boolean =
+            nav?.handleKey(ev) == true || super.dispatchKeyEvent(ev)
+
+        /** Left-stick scroll. Non-pointer generic motion reaches the focused
+         *  window's focused view — this root, which holds view focus while nav
+         *  is live (the in-place edit moves it to the EditText, and nav bails
+         *  there anyway). */
+        override fun onGenericMotionEvent(ev: MotionEvent): Boolean =
+            nav?.handleGenericMotion(ev) == true || super.onGenericMotionEvent(ev)
+
         override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
             // The text-size popover is a child of this root, and it can sit
             // ABOVE the sheet's top edge — right where the rules below claim
@@ -2475,7 +3127,7 @@ class CaptureResultOverlay(
                         sliverTouch = false
                         when {
                             sliverDragging -> endSliverDrag()
-                            ev.actionMasked == MotionEvent.ACTION_UP -> expandFromSliver()
+                            ev.actionMasked == MotionEvent.ACTION_UP -> userExpandFromSliver()
                         }
                         sliverDragging = false
                     }
@@ -2631,6 +3283,14 @@ class CaptureResultOverlay(
          *  OPAQUE: every dp covers a dp of game, and bottom-anchored dialogue
          *  is exactly what it covers. Not a knob for pill clearance. */
         const val SLIVER_SHEET_DP = 24
+        /** The sliver hint's leading glyph box — the touch_app icon and the
+         *  loading spinner alike. Sized to the 11sp line rather than the 24dp
+         *  intrinsic, and shared by both modes so neither can outgrow
+         *  [SLIVER_SHEET_DP]. */
+        const val HINT_GLYPH_DP = 16
+        /** Breathing room kept either side of the sliver hint row when its
+         *  text is bounded (see show()'s maxWidth). */
+        const val SLIVER_HINT_SIDE_PAD_DP = 20
         /** Duration of the collapse-to-sliver / expand-from-sliver slide. */
         const val SLIVER_DURATION_MS = 220L
         /** Duration of the section fade that rides the sliver transitions. */

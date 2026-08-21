@@ -62,6 +62,15 @@ class PlayTranslateApplication : Application() {
         com.playtranslate.ocr.registry.OcrModelManager.appContext = applicationContext
         if (BuildConfig.DEBUG) {
             OcrManager.instance.debugLogGroupingEnabled = Prefs(this).debugLogGrouping
+            // The AngleProbe rides the same toggle — one switch turns on all
+            // angle instrumentation (probe + ang= layout lines).
+            OcrManager.instance.debugAngleProbeEnabled = Prefs(this).debugLogGrouping
+            // Slant-gate rollback override survives restarts like the
+            // toggles above (ON = the pre-drop 10° gate).
+            if (Prefs(this).debugAngleGateAtTarget) {
+                OcrManager.instance.debugAngleGateDeg =
+                    com.playtranslate.ocr.core.OcrBox.ANGLE_LEGACY_GATE_DEG
+            }
         }
         // Push the "Use MangaOCR" toggle + installed-pack state into the OCR gate
         // (same Context-free reason as above — the refiner can't resolve the pack itself).
@@ -177,6 +186,9 @@ class PlayTranslateApplication : Application() {
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
             override fun onActivityDestroyed(activity: Activity) {}
         })
+        // Right-stick scrolling on every in-app page — one Window.Callback
+        // wrap per activity, so no page implements it.
+        com.playtranslate.ui.ActivityStickScroll.install(this)
     }
 
     companion object {

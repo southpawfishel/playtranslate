@@ -3,7 +3,9 @@ package com.playtranslate.language
 import android.content.Context
 import com.playtranslate.dictionary.Deinflector
 import com.playtranslate.dictionary.DictionaryManager
+import com.playtranslate.dictionary.SentenceAnnotator
 import com.playtranslate.dictionary.SudachiJapaneseTokenizer
+import com.playtranslate.model.selectHeadword
 import com.playtranslate.model.CharacterDetail
 import com.playtranslate.model.DictionaryResponse
 import com.playtranslate.model.KanjiDetail
@@ -68,19 +70,9 @@ class JapaneseEngine(private val appContext: Context) : SourceLanguageEngine {
         return PreloadResult.Success
     }
 
-    override suspend fun tokenize(text: String): List<TokenSpan> {
-        // Imported Yomitan term dicts list expressions JMdict lacks — offer
-        // them as a second phrase gate for the n-gram re-glob. Null (not a
-        // no-op lambda) when no term dict is installed, so the tokenizer
-        // skips the whole oracle pass.
-        val phraseOracle = yomitan.phraseOracle()
-        return dict.tokenizeWithSurfaces(text, phraseOracle).map {
-            TokenSpan(
-                surface = it.surface, lookupForm = it.lookupForm,
-                reading = it.reading, inflections = it.inflections,
-            )
-        }
-    }
+    // tokenize() is a projection of annotate(WORDS) — see the override below
+    // next to annotate(). The imported-dict phrase oracle rides inside
+    // annotate's re-glob call.
 
     override suspend fun searchPrefix(query: String, limit: Int): List<TokenSpan> =
         dict.searchPrefix(query, limit).map {
@@ -141,54 +133,121 @@ class JapaneseEngine(private val appContext: Context) : SourceLanguageEngine {
         )
     }
 
-    override suspend fun annotateForHintText(text: String): List<HintTextAnnotation> =
-        withContext(Dispatchers.Default) {
-            val tokens = dict.tokenizeForFurigana(text)
-            // Pitch only on whole-word, uninflected ruby: partial ruby can't
-            // carry a word contour, and lemma pitch on inflected forms is
-            // linguistically wrong (verb/adjective accent shifts).
-            val eligible = tokens
-                .filter { it.coversWholeSurface && it.surface == it.dictionaryForm }
-                .map { it.surface to it.reading }
-                .distinct()
-            val pitch =
-                if (eligible.isEmpty()) emptyMap()
-                else yomitan.pitchFor(eligible)
-            tokens.map {
-                HintTextAnnotation(
-                    baseStart = it.startOffset,
-                    baseEnd = it.endOffset,
-                    hintText = it.reading,
-                    pitchDownstep =
-                        if (it.coversWholeSurface && it.surface == it.dictionaryForm) {
-                            pitch[it.surface to it.reading]?.firstOrNull()
-                        } else {
-                            null
-                        },
+    /** FULL-depth annotations for the live overlay's per-cycle lines;
+     *  cleared on [close] (pack swap) and generation-checked against
+     *  Yomitan imports. */
+    private val annotationCache = AnnotationCache()
+
+    override suspend fun annotate(text: String, depth: AnnotationDepth): SentenceAnnotation {
+        if (depth == AnnotationDepth.FULL) {
+            annotationCache.get(text)?.let { return it }
+        }
+        val result = withContext(Dispatchers.Default) {
+            // Generation captured BEFORE any Yomitan-dependent work (the
+            // phrase oracle, resolution fallbacks): the stamp must describe
+            // when the CONTENT was read. A mutation committing mid-annotation
+            // bumps past this captured value, so the result self-invalidates
+            // at every isImportCurrent() gate — over-invalidation at worst
+            // (one wasted re-annotate), never a stale annotation blessed as
+            // current (adversarial-review race: stamping current() AFTER the
+            // work did exactly that).
+            val generation = AnnotationGenerations.current()
+            val tokens = SudachiJapaneseTokenizer.Provider.analyze(text)
+            if (tokens.isEmpty()) return@withContext SentenceAnnotation.plain(text, profile.id)
+            val reglob =
+                if (depth != AnnotationDepth.TOKENS) {
+                    dict.reglobSpansForTokens(tokens, yomitan.phraseOracle())
+                } else null
+            val resolutions =
+                if (reglob == null || depth != AnnotationDepth.FULL) emptyMap()
+                else SentenceAnnotator.resolutionKeys(reglob).associateWith { resolveWord(it) }
+            val annotation = SentenceAnnotator.annotate(
+                text, profile.id, tokens, reglob, resolutions,
+                importGeneration = generation,
+            )
+            // Pitch rides display depths; WORDS is the tokenize projection's
+            // depth and never renders ruby.
+            if (depth == AnnotationDepth.WORDS) annotation else applyPitch(annotation)
+        }
+        if (depth == AnnotationDepth.FULL) annotationCache.put(result)
+        return result
+    }
+
+    override suspend fun tokenize(text: String): List<TokenSpan> =
+        annotate(text, AnnotationDepth.WORDS).spans
+            .filter { it.lookupForm != null }
+            .map {
+                TokenSpan(
+                    surface = it.surface, lookupForm = it.lookupForm!!,
+                    reading = it.lookupHint, inflections = it.inflections,
                 )
             }
-        }
+
+    /** Two-store resolution for one (lookupForm, occurrence-hint) pair.
+     *  Pack-first via the READINGS-ONLY path — identical entry choice to the
+     *  full lookup by shared SQL and shared headword pairing, at 2–3 indexed
+     *  queries — falling back to the full two-store lookup only on a pack
+     *  miss, where imported-dictionary synthesis may still resolve. The one
+     *  senses-bearing lookup per word now lives in the words projection
+     *  alone. */
+    private suspend fun resolveWord(
+        key: SentenceAnnotator.ResolutionKey,
+    ): SentenceAnnotator.WordResolution {
+        val entry = dict.lookupReadingsOnly(key.lookupForm, key.hint)
+            ?: lookup(key.lookupForm, key.hint)?.entries?.firstOrNull()
+            ?: return SentenceAnnotator.WordResolution(null, null)
+        val ref = entry.packId?.let { EntryRef.Pack(it) }
+            ?: EntryRef.Imported(key.lookupForm, entry.headwords.firstOrNull()?.reading)
+        val hw = entry.selectHeadword(key.lookupForm, key.lookupForm, key.hint)
+        return SentenceAnnotator.WordResolution(
+            ref, hw?.reading, written = hw?.written ?: hw?.reading,
+        )
+    }
+
+    /** Pitch on whole-word uninflected spans — the legacy hint path's
+     *  eligibility rule (coversWholeSurface && surface == dictionaryForm) at
+     *  span granularity: a single ruby part covering the whole surface of an
+     *  uninflected span. */
+    private suspend fun applyPitch(annotation: SentenceAnnotation): SentenceAnnotation {
+        val eligible = annotation.spans
+            .filter {
+                it.lookupForm != null && it.surface == it.lookupForm &&
+                    it.reading != null &&
+                    it.furigana.size == 1 && it.furigana[0].text == it.surface &&
+                    it.furigana[0].reading != null
+            }
+            .map { it.surface to it.reading!! }
+            .distinct()
+        if (eligible.isEmpty()) return annotation
+        val pitch = yomitan.pitchFor(eligible)
+        if (pitch.isEmpty()) return annotation
+        return annotation.copy(spans = annotation.spans.map { s ->
+            val p = if (s.reading != null) pitch[s.surface to s.reading] else null
+            if (p.isNullOrEmpty()) s else s.copy(pitch = p)
+        })
+    }
+
+    /** Legacy hint API, now a projection of [annotate] at TOKENS depth —
+     *  byte-parity with the old per-token path. The live overlay consumes
+     *  this until its measurement gate flips it to FULL (refactor doc §6);
+     *  the in-app binder calls [annotate] FULL directly. */
+    override suspend fun annotateForHintText(text: String): List<HintTextAnnotation> =
+        annotate(text, AnnotationDepth.TOKENS).hintAnnotations()
 
     override suspend fun spokenForm(text: String): String =
         withContext(Dispatchers.Default) {
-            // Feed TTS the SAME per-token readings the furigana shows — Sudachi's
-            // readingForm — so the spoken kana matches what's displayed (初夏 →
-            // しょか, not the engine's own guess はつか). Mirrors tokenizeForFurigana's
-            // reading source, so audio == display by construction. Provider.analyze
-            // is fail-soft to empty, so a tokenizer failure speaks the surface
-            // text rather than emitting silence.
-            val tokens = SudachiJapaneseTokenizer.Provider.analyze(text)
-            if (tokens.isEmpty()) {
-                text
-            } else buildString {
-                for (t in tokens) {
-                    val kana = t.reading?.let { Deinflector.katakanaToHiragana(it) }
-                    append(kana ?: t.surface)
-                }
-            }
+            // TTS speaks the SAME readings the display shows — audio ==
+            // display by construction. Both project from ONE FULL-depth
+            // annotation now, so dictionary-corrected compound readings
+            // (一泊 → いっぱく) are spoken, not just displayed. annotate is
+            // fail-soft: no tokenizer → one plain span → surface text.
+            val spans = annotate(text, AnnotationDepth.FULL).spans
+            if (spans.isEmpty()) text
+            else buildString { for (s in spans) append(s.reading ?: s.surface) }
         }
 
     override fun close() {
+        annotationCache.clear()
         // Release JA's process-scoped native handles so pack uninstall doesn't
         // leak them. The engine cache only evicts (SourceLanguageEngines.
         // releaseForPack, via LanguagePackStore.uninstall) when the pack is

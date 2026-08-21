@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.Rect
 import android.util.Log
 import com.playtranslate.language.SourceLanguageProfiles
+import com.playtranslate.ocr.core.DeskewGeometry
 import java.io.File
 import java.io.FileOutputStream
 
@@ -62,7 +63,9 @@ object OcrSeedWriter {
      *  (`androidTest/assets/ocr_grouping/`, judged by
      *  `scripts/build_grouping_report.py`): `# lang:` + `# surface:` directives,
      *  then one blank-line-separated stanza per group, one `text<TAB>l,t,r,b`
-     *  row per line in original-bitmap coordinates. The stanzas record the
+     *  row per line in original-bitmap coordinates. Slanted rows extend to
+     *  `l,t,r,b,ang,ow,oh` (angle as a 2-decimal float, oriented dims as ints;
+     *  never appended when upright) — all suite parsers accept both widths. The stanzas record the
      *  CURRENT grouping — a starting draft the curator re-stanzas into the
      *  EXPECTED grouping — so accepting it uncritically pins today's behavior,
      *  bugs included. */
@@ -84,17 +87,27 @@ object OcrSeedWriter {
             // draft never silently drops content.
             val rows = group.lines.ifEmpty { null }
             if (rows == null) {
-                appendRow(sb, group.text, group.bounds)
+                appendRow(sb, group.text, group.bounds, group.angleDeg, group.orientedWidth, group.orientedHeight)
             } else {
-                for (line in rows) appendRow(sb, line.text, line.bounds)
+                for (line in rows) {
+                    appendRow(sb, line.text, line.bounds, line.angleDeg, line.orientedWidth, line.orientedHeight)
+                }
             }
         }
         return sb.toString()
     }
 
-    private fun appendRow(sb: StringBuilder, text: String, b: Rect) {
+    private fun appendRow(sb: StringBuilder, text: String, b: Rect, angleDeg: Float, ow: Float, oh: Float) {
         sb.append(text.replace('\t', ' ')).append('\t')
             .append(b.left).append(',').append(b.top).append(',')
-            .append(b.right).append(',').append(b.bottom).append('\n')
+            .append(b.right).append(',').append(b.bottom)
+        // Slanted rows extend to l,t,r,b,ang,ow,oh; upright rows never do
+        // (0-when-upright — the parsers key on field count).
+        if (angleDeg != 0f) {
+            sb.append(',').append(String.format(java.util.Locale.US, "%.2f", angleDeg))
+                .append(',').append(DeskewGeometry.roundHalfUp(ow))
+                .append(',').append(DeskewGeometry.roundHalfUp(oh))
+        }
+        sb.append('\n')
     }
 }

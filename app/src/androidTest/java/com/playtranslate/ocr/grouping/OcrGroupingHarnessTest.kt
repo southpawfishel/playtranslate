@@ -106,6 +106,12 @@ class OcrGroupingHarnessTest {
         if (OcrModelManager.appContext == null) {
             OcrModelManager.appContext = appCtx.applicationContext
         }
+        // Angle census instrument: every measured angle lands in the run's
+        // logcat (dumped by run_suite.sh), so the corpus's known-upright seeds
+        // give a ground-truth upright-noise distribution — the input that
+        // prices the threshold-drop gate. Costs a string per detected line,
+        // fine at harness scale.
+        com.playtranslate.ocr.core.OrientedBoxGeometry.probeSink = { Log.d("AngleProbe", it) }
         val registry = OcrEngineRegistry()
         val sink = ResultSink(appCtx, runId)
         try {
@@ -191,6 +197,7 @@ class OcrGroupingHarnessTest {
                                 screenshotWidthInRegionSpace = bitmap.width * rec.scaleFactor,
                                 logDecisions = true,
                                 strategy = variant.strategy,
+                                angleToleranceDeg = variant.angleToleranceDeg,
                             )
                             var n = 0
                             groups.forEachIndexed { gi, g ->
@@ -205,6 +212,12 @@ class OcrGroupingHarnessTest {
                                         // char cells are sliced from the line box — the report
                                         // must see the absence, not a restated line height.
                                         charQuantiles = GlyphScale.quantiles(line),
+                                        // Angle undivided (rotation survives scaling); the
+                                        // oriented dims are lengths and divide like the box.
+                                        angleDeg = line.box.angleDeg,
+                                        orientedW = scaledDim(line.box.orientedWidth, rec.scaleFactor),
+                                        orientedH = scaledDim(line.box.orientedHeight, rec.scaleFactor),
+                                        angleUnmeasured = line.box.angleUnmeasured,
                                     )
                                 }
                             }
@@ -247,6 +260,9 @@ class OcrGroupingHarnessTest {
     private fun scaled(r: Rect, sf: Float): Rect =
         if (sf == 1f) r
         else Rect((r.left / sf).toInt(), (r.top / sf).toInt(), (r.right / sf).toInt(), (r.bottom / sf).toInt())
+
+    /** [scaled]'s twin for oriented dims: same divide + truncation, scalar in. */
+    private fun scaledDim(d: Float, sf: Float): Int = (d / sf).toInt()
 
     // ── Seeds ────────────────────────────────────────────────────────────────
 
@@ -402,6 +418,8 @@ class OcrGroupingHarnessTest {
         fun region(
             caseId: String, cfg: String, rep: Int, idx: Int, group: Int, box: IntArray,
             vert: Boolean, text: String, conf: Float, charQuantiles: IntArray? = null,
+            angleDeg: Float = 0f, orientedW: Int = 0, orientedH: Int = 0,
+            angleUnmeasured: Boolean = false,
         ) {
             val o = JSONObject()
                 .put("type", "region").put("run", runId).put("case", caseId)
@@ -411,6 +429,14 @@ class OcrGroupingHarnessTest {
                 .put("text", text)
             if (conf.isFinite() && conf >= 0f) o.put("conf", conf.toDouble())
             charQuantiles?.let { q -> o.put("cq", JSONArray().apply { q.forEach { put(it) } }) }
+            // Slanted lines carry the angle trio; absent keys mean upright
+            // (0-when-upright, mirroring the seed-row grammar). "unm" marks a
+            // producer-withheld angle (OcrBox.angleUnmeasured) — the twin's
+            // shell mirror needs it to replay positional admission.
+            if (angleDeg != 0f) {
+                o.put("ang", angleDeg.toDouble()).put("ow", orientedW).put("oh", orientedH)
+            }
+            if (angleUnmeasured) o.put("unm", 1)
             emit(o)
         }
 

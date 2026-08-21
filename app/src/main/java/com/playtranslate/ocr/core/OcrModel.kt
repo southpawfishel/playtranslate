@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import android.graphics.PointF
 import android.graphics.Rect
 import com.playtranslate.language.TextOrientation
-import kotlin.math.abs
 
 /**
  * Vendor-neutral, pre-layout OCR model.
@@ -31,8 +30,12 @@ import kotlin.math.abs
  *
  * Tategaki is NOT rotation: a vertical column is an axis-aligned tall rectangle
  * with `angleDeg == 0` and [TextOrientation.VERTICAL]. Only [angleDeg] != 0 is a
- * genuine slant, and [isRotated] regions are treated as standalone by layout
- * (see [LayoutAnalyzer]).
+ * genuine slant, and [isRotated] regions group in deskewed angle-cluster frames
+ * ([LayoutAnalyzer.analyze]) — never through the screen-space kernel.
+ *
+ * Producers route through [OrientedBoxGeometry.boxFor], which snaps |angle| ≤
+ * the noise gate ([ANGLE_NOISE_GATE_DEG] by default) to [upright]; [isRotated]
+ * is definitionally `angleDeg != 0f`.
  */
 data class OcrBox(
     /** Axis-aligned bounding box in ORIGINAL bitmap coords. Read by the kernel. */
@@ -43,13 +46,47 @@ data class OcrBox(
     val orientedHeight: Float,
     /** Rotation in degrees; 0 = axis-aligned (the common case). */
     val angleDeg: Float = 0f,
+    /**
+     * True when the producer HAD angle evidence but could not resolve it into
+     * a trustworthy measurement (sub-excursion reads, near-square boxes,
+     * degenerate quads — see [OrientedBoxGeometry.boxFor]). [angleDeg] is then
+     * 0 as a *placeholder, not a measurement*: the region renders upright on
+     * its own, but grouping may let it join a slanted cluster on POSITIONAL
+     * evidence (it sits on the cluster's baseline path) where a measured 0
+     * would be held apart by angle distance. The gate guarantees any
+     * unmeasured region's true-vs-0 discrepancy stays under the noise
+     * excursion, so consumers that treat it as upright are correct within
+     * tolerance. Invariant: `angleUnmeasured ⟹ angleDeg == 0`.
+     */
+    val angleUnmeasured: Boolean = false,
 ) {
-    /** True when the box is slanted enough that upright grouping shouldn't apply. */
-    val isRotated: Boolean get() = abs(angleDeg) > ROTATION_STANDALONE_DEG
+    /** True iff this box carries a slant. Definitionally `angleDeg != 0f`: the
+     *  producer ([OrientedBoxGeometry.boxFor]) snaps sub-gate measurements to
+     *  exactly 0, so no third state exists at ANY gate value — engine code
+     *  testing this and UI code testing `angleDeg != 0f` are the same predicate
+     *  by construction, not by numeric coincidence. */
+    val isRotated: Boolean get() = angleDeg != 0f
 
     companion object {
-        /** Slant threshold (degrees) past which a region is grouped standalone. */
-        const val ROTATION_STANDALONE_DEG = 10f
+        /** PRODUCER-side noise gate (degrees): [OrientedBoxGeometry.boxFor]
+         *  snaps measured |angle| at or below this to [upright]. Not a consumer
+         *  threshold — consumers key on [isRotated]. Overridable per
+         *  recognition via [OcrImage.angleNoiseGateDeg] (the settings rollback
+         *  toggle forces the pre-drop [ANGLE_LEGACY_GATE_DEG]). Dropped from
+         *  10° on 2026-08-07 (the threshold-drop program's final stage) —
+         *  paired with [ANGLE_MIN_EXCURSION_PX], which is what actually
+         *  separates noise from slant; see the census note in boxFor. */
+        const val ANGLE_NOISE_GATE_DEG = 3f
+
+        /** The pre-drop gate (degrees) — the one-toggle rollback the debug
+         *  settings row forces when ON. */
+        const val ANGLE_LEGACY_GATE_DEG = 10f
+
+        /** The gate's second term (px): minimum drawn-corner displacement
+         *  `(ow/2)·sin|θ|` for a measured slant to be carried. From the corpus
+         *  census (5891 known-upright lines): short-line angle noise reaches
+         *  ~10° but its excursions stay under this; real slants clear it 2×. */
+        const val ANGLE_MIN_EXCURSION_PX = 6f
 
         /** Axis-aligned box (the common case): oriented dims == AABB dims, angle 0. */
         fun upright(bounds: Rect): OcrBox =
@@ -79,6 +116,14 @@ data class OcrImage(
      * Coordinates are in THIS image's bitmap space.
      */
     val regionPreFilter: RegionPreFilter? = null,
+    /**
+     * Producer noise gate for this recognition (degrees): measured slants at or
+     * below it snap to upright in [OrientedBoxGeometry.boxFor]. Defaults to the
+     * compiled [OcrBox.ANGLE_NOISE_GATE_DEG]; overridden for debug A/B and the
+     * staged threshold-drop validation (each stage exercises the target gate on
+     * device before the default changes).
+     */
+    val angleNoiseGateDeg: Float = OcrBox.ANGLE_NOISE_GATE_DEG,
 )
 
 /** See [OcrImage.regionPreFilter]. */

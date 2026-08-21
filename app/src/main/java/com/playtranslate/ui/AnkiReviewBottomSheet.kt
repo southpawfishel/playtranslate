@@ -50,9 +50,17 @@ class AnkiReviewBottomSheet : DialogFragment() {
         inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?
     ): View = inflater.inflate(R.layout.bottom_sheet_anki_review, container, false)
 
+    /** Open-time screenshot pin (see onViewCreated) — released on
+     *  provably-final teardown, same contract as the word sheet. */
+    private var pinnedScreenshotPath: String? = null
+
     override fun onDestroyView() {
         deckSubtitleView = null
         sendButton = null
+        if (activity?.isFinishing == true || !isStateSaved) {
+            context?.let { AnkiScreenshotPin.release(it, pinnedScreenshotPath) }
+        }
+        pinnedScreenshotPath = null
         super.onDestroyView()
     }
 
@@ -78,7 +86,25 @@ class AnkiReviewBottomSheet : DialogFragment() {
         val args = arguments ?: return
         val original       = args.getString(ARG_ORIGINAL) ?: ""
         val translation    = args.getString(ARG_TRANSLATION) ?: ""
-        val screenshotPath = args.getString(ARG_SCREENSHOT_PATH)
+        // Pin at open: the arg is a fixed cache filename
+        // (capture-d{id}.jpg) that any capture taken while this sheet
+        // is open overwrites — the card must keep the frame the user
+        // acted on, not whatever a later capture wrote there. The
+        // pinned path is written back into args so a restored instance
+        // can RE-OWN the pin (the child fragment keeps rendering it
+        // from its own args either way) and release it on final
+        // teardown instead of leaving it for the stale sweep.
+        val screenshotPath = if (savedInstanceState == null) {
+            AnkiScreenshotPin.pin(requireContext(), args.getString(ARG_SCREENSHOT_PATH))
+                .also {
+                    pinnedScreenshotPath = it
+                    args.putString(ARG_SCREENSHOT_PATH, it)
+                }
+        } else {
+            pinnedScreenshotPath = args.getString(ARG_SCREENSHOT_PATH)
+                ?.takeIf { AnkiScreenshotPin.isPin(requireContext(), it) }
+            null  // child already exists; no new child gets created
+        }
 
         val words = mutableListOf<SentenceAnkiHtmlBuilder.WordEntry>()
         val wordArr    = args.getStringArray(ARG_WORDS) ?: emptyArray()
@@ -96,11 +122,15 @@ class AnkiReviewBottomSheet : DialogFragment() {
         wordArr.forEachIndexed { i, w ->
             words.add(SentenceAnkiHtmlBuilder.WordEntry(
                 w, readingArr.getOrElse(i) { "" },
-                meaningArr.getOrElse(i) { "" },
+                // Blank slot = sense-bearing word; the flat text re-derives
+                // from the senses that crossed in ARG_ENRICHMENT.
+                meaningFromTransport(meaningArr.getOrElse(i) { "" }, enrich[w]),
                 freqArr.getOrElse(i) { 0 },
                 surfaceForm = surfaceArr.getOrElse(i) { "" },
                 pitch = enrich[w]?.pitch.orEmpty(),
                 frequencies = enrich[w]?.frequencies.orEmpty(),
+                isCommon = enrich[w]?.isCommon ?: false,
+                senses = enrich[w]?.senses.orEmpty(),
             ))
         }
 
@@ -123,7 +153,9 @@ class AnkiReviewBottomSheet : DialogFragment() {
 
         if (savedInstanceState == null) {
             val contentFragment = SentenceAnkiContentFragment.newInstance(
-                original, translation, words, screenshotPath, sourceLangId = sourceLangId
+                original, translation, words, screenshotPath, sourceLangId = sourceLangId,
+                audioAnchorMs = args.takeIf { it.containsKey(ARG_AUDIO_ANCHOR_MS) }
+                    ?.getLong(ARG_AUDIO_ANCHOR_MS),
             )
             childFragmentManager.beginTransaction()
                 .replace(R.id.sentenceAnkiFragmentHost, contentFragment, TAG_CONTENT)
@@ -141,6 +173,28 @@ class AnkiReviewBottomSheet : DialogFragment() {
             sendButton?.setLoading(true)
             viewLifecycleOwner.lifecycleScope.launch {
                 sendToAnki(deckId)
+            }
+        }
+
+        // Lazy translation fill (mirror of WordAnkiReviewSheet's): a blank
+        // incoming translation means the sheet was opened from a result whose
+        // translation never ran — the hidden-section deferral — or hasn't
+        // landed yet, and the content fragment's field would otherwise sit on
+        // its placeholder forever. A deferred capture's pending rides the
+        // args, and resolveAnkiTranslation routes it through the deferred
+        // completion (History rows fill, idempotently, and NEVER gated by
+        // the sentence-text cache — see its KDoc) instead of a bare
+        // translateOnce. Failures are contained (null → applyTranslation
+        // renders the error variant without clobbering user edits). Safe
+        // after restore too: applyTranslation guards on the visible original
+        // and on user-touched state.
+        if (translation.isBlank() && original.isNotBlank()) {
+            @Suppress("DEPRECATION")
+            val pending = args.getSerializable(ARG_PENDING_TRANSLATION)
+                as? com.playtranslate.model.PendingTranslation
+            viewLifecycleOwner.lifecycleScope.launch {
+                val outcome = resolveAnkiTranslation(pending, original)
+                getContentFragment()?.applyTranslation(original, outcome?.text)
             }
         }
     }
@@ -184,17 +238,15 @@ class AnkiReviewBottomSheet : DialogFragment() {
         // (Context.sendSentenceCard would skip it).
         val result = sendSentenceCard(input, deckId)
         // The pipeline folds local synth failures into Success.audioDropped
-        // / wordAudioDropped — a single flag here covers both synth-fail and
-        // upload-fail.
-        val success = result as? AnkiSendResult.Success
-        val audioMissing = success?.audioDropped == true
-        val wordAudioMissing = success?.wordAudioDropped == true
+        // / wordAudioDropped, so one resolver covers synth-fail, audio
+        // upload-fail, and a screenshot AnkiDroid wouldn't take. Null =
+        // the card landed whole, and the sheet stays silent.
+        val shortfallRes = (result as? AnkiSendResult.Success)?.mediaShortfallRes()
         applyAnkiSendResult(
             result,
             onSuccess = {
-                if (audioMissing || wordAudioMissing) {
-                    Toast.makeText(requireContext(), R.string.anki_added_no_audio,
-                        Toast.LENGTH_SHORT).show()
+                shortfallRes?.let {
+                    Toast.makeText(requireContext(), it, Toast.LENGTH_SHORT).show()
                 }
                 parentFragmentManager.setFragmentResult(RESULT_ANKI_ADDED, bundleOf())
                 dismiss()
@@ -218,6 +270,8 @@ class AnkiReviewBottomSheet : DialogFragment() {
         private const val ARG_ENRICHMENT      = "enrichment"
         private const val ARG_SCREENSHOT_PATH = "screenshot_path"
         private const val ARG_SOURCE_LANG     = "source_lang"
+        private const val ARG_PENDING_TRANSLATION = "pending_translation"
+        private const val ARG_AUDIO_ANCHOR_MS = "audio_anchor_ms"
 
         /**
          * [surfaceForms] (display-word → surface in the sentence) and
@@ -237,22 +291,37 @@ class AnkiReviewBottomSheet : DialogFragment() {
             wordEnrichment: Map<String, WordEnrichment>,
             screenshotPath: String?,
             sourceLangId: SourceLangId = SourceLangId.JA,
+            pendingTranslation: com.playtranslate.model.PendingTranslation? = null,
+            audioAnchorMs: Long? = null,
         ): AnkiReviewBottomSheet {
             return AnkiReviewBottomSheet().apply {
                 val wordKeys = wordResults.keys.toTypedArray()
+                val transport = transportPayloadFor(wordKeys, wordResults, wordEnrichment)
                 arguments = Bundle().apply {
                     putString(ARG_ORIGINAL, original)
                     putString(ARG_TRANSLATION, translation)
+                    // The launching result's deferred payload — the lazy fill
+                    // completes it (rows + card in one batch) instead of
+                    // translating alongside it.
+                    if (pendingTranslation != null) {
+                        putSerializable(ARG_PENDING_TRANSLATION, pendingTranslation)
+                    }
                     putStringArray(ARG_WORDS,    wordKeys)
                     putStringArray(ARG_READINGS, wordResults.values.map { it.first }.toTypedArray())
-                    putStringArray(ARG_MEANINGS, wordResults.values.map { it.second }.toTypedArray())
+                    // Size-gated pair: normally senses ride ARG_ENRICHMENT and
+                    // sense-bearing meaning slots are blanked (definition text
+                    // crosses once; meaningFromTransport re-derives). An
+                    // oversized senses payload ships stripped enrichment +
+                    // real flat meanings instead — see transportPayloadFor.
+                    putStringArray(ARG_MEANINGS, transport.meanings)
                     putIntArray(ARG_FREQ_SCORES, wordResults.values.map { it.third }.toIntArray())
                     // Surfaces ride parallel to ARG_WORDS; enrichment as one
                     // Serializable map keyed by display word.
                     putStringArray(ARG_SURFACES, wordKeys.map { surfaceForms[it] ?: "" }.toTypedArray())
-                    putSerializable(ARG_ENRICHMENT, HashMap(wordEnrichment))
+                    putSerializable(ARG_ENRICHMENT, transport.enrichment)
                     if (screenshotPath != null) putString(ARG_SCREENSHOT_PATH, screenshotPath)
                     putString(ARG_SOURCE_LANG, sourceLangId.code)
+                    if (audioAnchorMs != null) putLong(ARG_AUDIO_ANCHOR_MS, audioAnchorMs)
                 }
             }
         }

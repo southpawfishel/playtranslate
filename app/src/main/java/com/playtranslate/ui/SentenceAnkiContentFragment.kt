@@ -12,6 +12,7 @@ import android.os.Bundle
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -43,6 +44,8 @@ import com.playtranslate.audio.AudioSelection
 import com.playtranslate.audio.GameAudioClip
 import com.playtranslate.audio.PlayOutcome
 import com.playtranslate.audio.sources.RecordingAudioSource
+import com.playtranslate.audio.vad.SpeechSnap
+import com.playtranslate.audio.vad.VoiceLineSnap
 import com.playtranslate.capture.GameAudioSnapshot
 import com.playtranslate.dictionary.Deinflector
 import com.playtranslate.language.SourceLangId
@@ -57,6 +60,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 import kotlin.coroutines.resume
+
+private const val TAG = "SentenceAnkiContent"
 
 /**
  * Sentence-card content for Anki review (Original, Translation, Words,
@@ -75,6 +80,52 @@ class SentenceAnkiContentFragment : Fragment() {
 
     private val words = mutableListOf<SentenceAnkiHtmlBuilder.WordEntry>()
     val selectedWords = mutableSetOf<String>()
+
+    /** Styled payload for the word rows (structured glossaries + dict
+     *  CSS), fetched once after the words list is built; null = every row
+     *  keeps its one-line flat meaning. */
+    private var sheetStyled: YomitanStyledData? = null
+
+    /** One styled renderer per structured word, cached across
+     *  [rebuildWordRows] passes (target toggles rebuild the whole list —
+     *  WebViews must not churn per tap). Destroyed on removal (✕) and in
+     *  [onDestroyView]. */
+    private val wordStyledViews = mutableMapOf<String, YomitanDefinitionsView>()
+
+    /** Render process died once — every row stays native for the sheet's
+     *  life. */
+    private var wordStyledBroken = false
+
+    /** Bumps on every styled-payload refresh so a slow fetch for a
+     *  superseded words list can't install a stale payload. */
+    private var styledFetchGen = 0
+
+    /**
+     * (Re)fetches the styled payload for the CURRENT words list. Called on
+     * first build and again from [applyWords], because the deferred flows
+     * replace the whole list after the sheet opens. Assigns
+     * unconditionally — a new word set with nothing structured must CLEAR
+     * the previous sentence's payload, not inherit it — and reaps cached
+     * renderers for words no longer present.
+     */
+    private fun refreshStyledPayload() {
+        if (!isAdded) return
+        val gen = ++styledFetchGen
+        val appCtx = requireContext().applicationContext
+        val styledLang = (SourceLangId.fromCode(arguments?.getString(ARG_SOURCE_LANG))
+            ?: SourceLangId.JA).yomitanConsumingLang()
+        viewLifecycleOwner.lifecycleScope.launch {
+            val payload = fetchStyledForSenses(appCtx, styledLang, words.flatMap { it.senses })
+            if (!isAdded || gen != styledFetchGen) return@launch
+            val hadOrHas = sheetStyled != null || payload != null
+            sheetStyled = payload
+            val current = words.mapTo(mutableSetOf()) { it.word }
+            wordStyledViews.keys.filter { it !in current }.toList().forEach { w ->
+                wordStyledViews.remove(w)?.destroy()
+            }
+            if (hadOrHas) rebuildWordRows()
+        }
+    }
     var includePhoto = true
         private set
 
@@ -105,6 +156,26 @@ class SentenceAnkiContentFragment : Fragment() {
      *  their own files, so nothing external can invalidate this one (the
      *  churn-bug class fix). */
     private var gameAudioSnapshotFile: File? = null
+
+    /** Where the launch anchor ([ARG_AUDIO_ANCHOR_MS] — the sentence's
+     *  capture/display wall time) landed inside this card's snapshot, mapped
+     *  by the recorder's ring clock. Seeds the default trim range at the
+     *  sentence's own moment instead of the buffer tail. Null when no anchor
+     *  was supplied or it missed the ring. Deliberately not saved: restores
+     *  carry a committed range, which always takes precedence. */
+    private var gameAudioAnchorOffsetMs: Long? = null
+
+    /** The range [commitDefaultGameRange] seeded, so the VAD snap can tell
+     *  "still the untouched default" from "the user (or a restore) moved it"
+     *  — the snap only ever replaces the former. */
+    private var gameAudioSeededRange: Pair<Long, Long>? = null
+
+    /** Detected voice-line regions (snapshot ms), accumulated across the
+     *  fast window pass and the background remainder blocks via
+     *  [SpeechSnap.merge] — painted on the waveform in the warning color.
+     *  Kept here because VAD emissions and the waveform decode land in any
+     *  order. */
+    private var gameAudioSpeechRegions: List<SpeechSnap.Segment> = emptyList()
 
     /** The snapshot file the panel last loaded — reload guard. */
     private var gameAudioLoadedFile: File? = null
@@ -188,8 +259,13 @@ class SentenceAnkiContentFragment : Fragment() {
                                 )
                                 refreshSentenceAudioTitle()
                                 updateGameAudioPanel()
+                            } else {
+                                Log.w(TAG, "game-audio pick dropped: clip too short to commit")
                             }
                         }
+                    } else {
+                        Log.w(TAG, "game-audio pick ignored: snapshot " +
+                            (if (wav == null) "not ready" else "unusable"))
                     }
                     // No usable snapshot ⇒ ignore the pick (Game audio shouldn't
                     // be offered without one); never leave a rangeless selection.
@@ -224,7 +300,10 @@ class SentenceAnkiContentFragment : Fragment() {
      * by the time Save can see it (see [commitDefaultGameRange]); a stray
      * rangeless pick degrades to the TTS floor here rather than dropping, so
      * the send always carries audio and this gate only decides whether to
-     * *nudge*. Reviewed audio sends straight through. The first Save on
+     * *nudge*. The degrade logs loudly — no generator for an invalid key is
+     * known (every commit site produces end>start over this fragment's own
+     * immutable snapshot; WaveformTrimView enforces a 200 ms minimum gap), so
+     * if the log ever fires it is news. Reviewed audio sends straight through. The first Save on
      * never-touched audio doesn't open the old full-screen editor: it reveals
      * the trim cell (even mid-decode — the cell is fixed-height), scrolls it to
      * mid-screen, flashes it, and holds that one Save. A second Save proceeds
@@ -248,10 +327,16 @@ class SentenceAnkiContentFragment : Fragment() {
         if (validRange == null) {
             // Fail-safe: a game-audio pick should always carry a committed
             // range by save time (commitDefaultGameRange). If one ever doesn't
-            // — a sub-[MIN_GAME_AUDIO_MS] clip that never rendered a panel to
-            // trim, or a future refactor that revives a live provisional key —
-            // drop to the TTS floor instead of shipping the provisional key,
-            // which toFile rejects into a silent no-audio card.
+            // — no generator is currently known — drop to the TTS floor
+            // instead of shipping the provisional key, which toFile rejects
+            // into a silent no-audio card. The log is the point: the display
+            // paths don't run this validation, so a downgrade here contradicts
+            // a cell that still says "Game audio" — if this ever fires, the
+            // logged state names the divergence.
+            Log.w(TAG, "resolveGameAudioForSend: committed key invalid " +
+                "(key=${sel.key} wavMtime=${wav.lastModified()} " +
+                "waveLoaded=${gameAudioLoadedFile == wav} " +
+                "waveSel=${gameAudioWave?.selStartMs}..${gameAudioWave?.selEndMs}) — TTS floor")
             sentenceSelection = AudioSelection.Auto
             return true
         }
@@ -508,6 +593,9 @@ class SentenceAnkiContentFragment : Fragment() {
     }
 
     override fun onDestroyView() {
+        // Native WebView teardown for every styled word row.
+        wordStyledViews.values.forEach { it.destroy() }
+        wordStyledViews.clear()
         stopInlinePlayback()
         gameAudioFlashAnimator?.cancel()
         gameAudioFlashAnimator = null
@@ -574,6 +662,8 @@ class SentenceAnkiContentFragment : Fragment() {
                 surfaceForm = surfaces[w] ?: "",
                 pitch = enrich[w]?.pitch.orEmpty(),
                 frequencies = enrich[w]?.frequencies.orEmpty(),
+                isCommon = enrich[w]?.isCommon ?: false,
+                senses = enrich[w]?.senses.orEmpty(),
             ))
         }
 
@@ -593,6 +683,12 @@ class SentenceAnkiContentFragment : Fragment() {
         val screenshotPath = args.getString(ARG_SCREENSHOT_PATH)
         buildContent(original, translation, screenshotPath)
 
+        // Styled word definitions for whatever words exist right now. The
+        // deferred-fill flows (ARG_WORDS_LOADING open, sentence re-commit)
+        // re-run this from applyWords — a one-shot here would race the
+        // empty list and stay flat for the dialog's life (Codex catch).
+        refreshStyledPayload()
+
         // Freeze the rolling game-audio buffer for THIS card the moment the
         // flow opens ("snapshot at card-open"). One-shot: never on restore,
         // so a post-process-death recreation can't clobber a good snapshot
@@ -602,25 +698,37 @@ class SentenceAnkiContentFragment : Fragment() {
         if (savedInstanceState != null) {
             restoreGameAudioState(savedInstanceState)
         } else if (Prefs(requireContext()).recordGameAudio) {
+            val anchorMs = args.takeIf { it.containsKey(ARG_AUDIO_ANCHOR_MS) }
+                ?.getLong(ARG_AUDIO_ANCHOR_MS)
             viewLifecycleOwner.lifecycleScope.launch {
                 val snap = withContext(Dispatchers.IO) {
-                    CaptureService.instance?.gameAudioRecorder?.snapshotToFile()
+                    CaptureService.instance?.gameAudioRecorder?.snapshotToFile(anchorMs)
                 }
                 if (snap == null) return@launch
                 if (!isAdded) {
                     // Flow died while snapshotting — we own the file; reap it.
-                    snap.delete()
+                    snap.file.delete()
                     return@launch
                 }
-                gameAudioSnapshotFile = snap
-                GameAudioSnapshot.active = snap
+                gameAudioSnapshotFile = snap.file
+                GameAudioSnapshot.active = snap.file
+                gameAudioAnchorOffsetMs = snap.anchorOffsetMs
+                if (snap.anchorMissed) {
+                    // The launch anchor predates the ring's oldest audio: the
+                    // line's voice is provably not in this snapshot (e.g. a
+                    // card from an old History row). Leave the cell on Auto
+                    // (TTS) instead of defaulting to the last 5 s of unrelated
+                    // audio; the snapshot stays available to an explicit
+                    // Game-audio pick.
+                    return@launch
+                }
                 // Commit the default range from a cheap header read BEFORE the
                 // heavy waveform decode, so a Save landing in the decode window
                 // ships the default clip instead of an unsendable provisional
                 // key. Until this resolves the cell stays on Auto (the TTS
                 // floor) — a fast Save then gets TTS, never dropped audio. A
                 // too-short snapshot leaves the cell on Auto for good.
-                if (commitDefaultGameRange(snap)) {
+                if (commitDefaultGameRange(snap.file)) {
                     val lang = SourceLangId.fromCode(arguments?.getString(ARG_SOURCE_LANG))
                         ?: SourceLangId.JA
                     sentenceAudioHandle?.refreshPillLabel(
@@ -629,6 +737,7 @@ class SentenceAnkiContentFragment : Fragment() {
                     refreshSentenceAudioTitle()
                     // Renders the waveform for the already-committed range.
                     updateGameAudioPanel()
+                    launchVadScan(snap.file)
                 }
             }
         }
@@ -647,10 +756,113 @@ class SentenceAnkiContentFragment : Fragment() {
         val durationMs = withContext(Dispatchers.IO) { GameAudioClip.durationMs(wav) }
         if (durationMs < MIN_GAME_AUDIO_MS) return false
         gameAudioDurationMs = durationMs
-        val start = (durationMs - DEFAULT_GAME_RANGE_MS).coerceAtLeast(0)
-        sentenceSelection = RecordingAudioSource.committedSelection(wav, start, durationMs)
+        val (start, end) = defaultGameRange(durationMs)
+        sentenceSelection = RecordingAudioSource.committedSelection(wav, start, end)
+        gameAudioSeededRange = start to end
         gameAudioReviewed = false
         return true
+    }
+
+    /**
+     * The VAD pass over this card's snapshot, two phases in one coroutine:
+     *
+     * 1. ANCHORED FAST PASS ([VoiceLineSnap.snap], anchor's window only) —
+     *    finds the voice line the anchor names and moves the UNTOUCHED
+     *    seeded default onto it ([applyVadSelection]).
+     * 2. BACKGROUND REMAINDER ([VoiceLineSnap.scanRemainder]) — walks the
+     *    rest of the snapshot in blocks, nearest-to-window first (tail-first
+     *    when there's no anchor, which is also how unanchored cards get
+     *    highlights at all), extending the warning-color highlight as each
+     *    block lands. Highlight-only: phase 2 never touches the selection.
+     *
+     * Runs on the view lifecycle scope — closing the card cancels the scan
+     * within a block.
+     */
+    private fun launchVadScan(wav: File) {
+        val durationMs = gameAudioDurationMs
+        val appCtx = context?.applicationContext ?: return
+        val anchor = gameAudioAnchorOffsetMs
+        viewLifecycleOwner.lifecycleScope.launch {
+            // Unanchored: nothing is excluded and the backward walk starts
+            // at the end — the tail is where the default selection sits.
+            var scannedStart = durationMs
+            var scannedEnd = durationMs
+            if (anchor != null) {
+                scannedStart = (anchor - VoiceLineSnap.WINDOW_PRE_MS).coerceAtLeast(0)
+                scannedEnd = (anchor + VoiceLineSnap.WINDOW_POST_MS).coerceAtMost(durationMs)
+                val result = VoiceLineSnap.snap(appCtx, wav, anchor, durationMs)
+                if (result != null) {
+                    if (!isAdded || gameAudioSnapshotFile != wav) return@launch
+                    applySpeechRegions(result.segments)
+                    applyVadSelection(wav, result.line)
+                }
+            }
+            VoiceLineSnap.scanRemainder(
+                appCtx, wav, durationMs, scannedStart, scannedEnd,
+            ) { segments ->
+                withContext(Dispatchers.Main.immediate) {
+                    if (isAdded && gameAudioSnapshotFile == wav) {
+                        applySpeechRegions(segments)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Fold newly-scanned [segments] into the highlight set and repaint.
+     *  The highlight applies unconditionally — it informs a user who already
+     *  took the handles over; it overrides nothing. */
+    private fun applySpeechRegions(segments: List<SpeechSnap.Segment>) {
+        gameAudioSpeechRegions = SpeechSnap.merge(gameAudioSpeechRegions, segments)
+        if (gameAudioLoadedFile != null && gameAudioLoadedFile == gameAudioSnapshotFile) {
+            gameAudioWave?.setSpeechRegions(
+                gameAudioSpeechRegions.map { it.startMs to it.endMs },
+            )
+        }
+    }
+
+    /**
+     * The anchored snap's selection move — strictly loses to the user: a
+     * handle drag, a play (reviewed), a source switch, or any range
+     * differing from the seed leaves the snap on the floor. Does NOT mark
+     * the range reviewed — an auto-placed clip still deserves the save-time
+     * nudge.
+     */
+    private fun applyVadSelection(wav: File, snapped: SpeechSnap.Segment) {
+        if (gameAudioReviewed) return
+        val seeded = gameAudioSeededRange ?: return
+        val current = (sentenceSelection as? AudioSelection.Explicit)
+            ?.takeIf { it.sourceId == RecordingAudioSource.ID }
+            ?.let { RecordingAudioSource.parseRangeFor(it.key, wav) }
+        if (current != seeded) return
+        sentenceSelection =
+            RecordingAudioSource.committedSelection(wav, snapped.startMs, snapped.endMs)
+        gameAudioSeededRange = snapped.startMs to snapped.endMs
+        refreshSentenceAudioTitle()
+        // Wave already rendered → move its selection silently (the callback
+        // path would set the reviewed flag). Still decoding → the decode's
+        // parseRangeFor picks up the snapped commit.
+        if (gameAudioLoadedFile == wav) {
+            gameAudioWave?.setSelection(snapped.startMs, snapped.endMs)
+        }
+    }
+
+    /** The default trim range: brackets the launch anchor when one mapped
+     *  into the snapshot — the anchor is the sentence's capture/display
+     *  moment, which TRAILS its voice line by the OCR+MT latency, so most
+     *  of the bracket sits before it — else the last [DEFAULT_GAME_RANGE_MS]
+     *  (no anchor: the just-heard line sits at the buffer tail). */
+    private fun defaultGameRange(durationMs: Long): Pair<Long, Long> {
+        val anchor = gameAudioAnchorOffsetMs
+            ?: return (durationMs - DEFAULT_GAME_RANGE_MS).coerceAtLeast(0) to durationMs
+        var start = (anchor - ANCHOR_PRE_MS).coerceAtLeast(0)
+        var end = (anchor + ANCHOR_POST_MS).coerceAtMost(durationMs)
+        if (end - start < MIN_GAME_AUDIO_MS) {
+            // Anchor pinned to a file edge: keep a usable minimum selection.
+            end = (start + MIN_GAME_AUDIO_MS).coerceAtMost(durationMs)
+            start = (end - MIN_GAME_AUDIO_MS).coerceAtLeast(0)
+        }
+        return start to end
     }
 
     /** Make Game audio the live [sentenceSelection] with a COMMITTED range —
@@ -732,24 +944,32 @@ class SentenceAnkiContentFragment : Fragment() {
             // the duration is known; a committed range is preserved.
             val existing = (selNow as AudioSelection.Explicit)
                 .let { RecordingAudioSource.parseRangeFor(it.key, wav) }
-            val start = existing?.first ?: (durationMs - DEFAULT_GAME_RANGE_MS).coerceAtLeast(0)
-            val end = existing?.second ?: durationMs
+            val (start, end) = existing ?: defaultGameRange(durationMs)
             if (existing == null) {
                 sentenceSelection = RecordingAudioSource.committedSelection(wav, start, end)
                 // A freshly-defaulted range hasn't been seen by the user.
                 gameAudioReviewed = false
             }
             gameAudioWave?.setData(buckets, 50L, durationMs, start, end)
+            // VAD emissions that landed before this decode are re-painted
+            // here; ones landing after paint via applySpeechRegions.
+            if (gameAudioSpeechRegions.isNotEmpty()) {
+                gameAudioWave?.setSpeechRegions(
+                    gameAudioSpeechRegions.map { it.startMs to it.endMs },
+                )
+            }
             refreshSentenceAudioTitle()
             gameAudioPanel?.visibility = View.VISIBLE
         }
     }
 
-    /** Per-bucket RMS normalized to the loudest bucket (50 ms buckets). */
+    /** Per-bucket ABSOLUTE RMS in 0..1 (50 ms buckets). Deliberately NOT
+     *  normalized to the file's loudest bucket: [WaveformTrimView] scales bars
+     *  to what is on screen, and it can only refuse to inflate a near-silent
+     *  window (its SILENT_FLOOR_RMS) if the levels it receives are absolute. */
     private fun rmsBucketsForStrip(pcm: ShortArray, rate: Int): FloatArray {
         val bucketFrames = (rate / 20).coerceAtLeast(1)
         val out = FloatArray((pcm.size + bucketFrames - 1) / bucketFrames)
-        var maxRms = 0f
         for (b in out.indices) {
             val from = b * bucketFrames
             val to = minOf(from + bucketFrames, pcm.size)
@@ -758,11 +978,8 @@ class SentenceAnkiContentFragment : Fragment() {
                 val s = pcm[i].toDouble()
                 sumSq += s * s
             }
-            val rms = (kotlin.math.sqrt(sumSq / (to - from)) / Short.MAX_VALUE).toFloat()
-            out[b] = rms
-            if (rms > maxRms) maxRms = rms
+            out[b] = (kotlin.math.sqrt(sumSq / (to - from)) / Short.MAX_VALUE).toFloat()
         }
-        if (maxRms > 0f) for (b in out.indices) out[b] = (out[b] / maxRms).coerceAtMost(1f)
         return out
     }
 
@@ -785,6 +1002,9 @@ class SentenceAnkiContentFragment : Fragment() {
     private fun onInlineSelectionChanged(startMs: Long, endMs: Long) {
         val wav = gameAudioSnapshotFile ?: return
         stopInlinePlayback()
+        // end > start is WaveformTrimView's contract (it enforces a 200 ms
+        // minimum gap at every mutation point), so the committed key is
+        // always parseRange-valid.
         sentenceSelection = RecordingAudioSource.committedSelection(wav, startMs, endMs)
         gameAudioReviewed = true
         refreshSentenceAudioTitle()
@@ -947,6 +1167,11 @@ class SentenceAnkiContentFragment : Fragment() {
             embedded = true
             // The panel sits on the group card, not the page background.
             fadeColor = ctx.themeColor(R.attr.ptCard)
+            // A tap on empty waveform lays down the same clip length the card
+            // seeds itself with (the anchored default brackets exactly this
+            // much around the anchor), so "somewhere else" means the same
+            // amount of audio, not a second idea of how long a line is.
+            tapSelectionMs = DEFAULT_GAME_RANGE_MS
             onSelectionChanged = { s, e -> onInlineSelectionChanged(s, e) }
         }
         // Pinch anywhere in the panel (its padding included) zooms the
@@ -1238,6 +1463,78 @@ class SentenceAnkiContentFragment : Fragment() {
         }
     }
 
+    /**
+     * The full styled definitions for one word row (the word creation
+     * page's treatment), replacing the one-line flat meaning when the word
+     * has retained structured senses. One cached WebView per structured
+     * word, reparented across rebuilds; null = keep the flat line.
+     */
+    private fun wordStyledBlock(entry: SentenceAnkiHtmlBuilder.WordEntry): View? {
+        val st = sheetStyled ?: return null
+        if (wordStyledBroken) return null
+        val imported = entry.senses.filter { it.imported }
+        if (imported.none { it.scRowid != null && st.structured.containsKey(it.scRowid) }) return null
+        val ctx = requireContext()
+        val density = resources.displayMetrics.density
+        val v = wordStyledViews[entry.word] ?: run {
+            val created = YomitanDefinitionsView(
+                ctx,
+                DefinitionsDocument.Tokens(
+                    text = ctx.themeColor(R.attr.ptText),
+                    textMuted = ctx.themeColor(R.attr.ptTextMuted),
+                    textHint = ctx.themeColor(R.attr.ptTextHint),
+                    accent = ctx.themeColor(R.attr.ptAccent),
+                    panel = ctx.themeColor(R.attr.ptCard),
+                    baseFontSizePx = 13f,
+                ),
+            )
+            if (!created.isUsable()) {
+                wordStyledBroken = true
+                return null
+            }
+            // The row's tap toggles target state; without this the WebView
+            // eats every tap landing on the definitions block and the row
+            // click never fires. Link taps lose to the row here, by design.
+            created.passThroughTouches = true
+            created.onContentHeight = { h ->
+                created.layoutParams?.let { lp ->
+                    lp.height = h
+                    created.layoutParams = lp
+                }
+            }
+            created.onRendererGone = {
+                // That instance destroyed itself; drop the rest and stay
+                // native for the sheet's life.
+                wordStyledViews.remove(entry.word)
+                wordStyledViews.values.forEach { it.destroy() }
+                wordStyledViews.clear()
+                wordStyledBroken = true
+                rebuildWordRows()
+            }
+            wordStyledViews[entry.word] = created
+            created
+        }
+        (v.parent as? android.view.ViewGroup)?.removeView(v)
+        v.layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            (v.layoutParams?.height ?: 1).coerceAtLeast(1),
+        ).also { it.topMargin = (3 * density).toInt() }
+        v.setContent(
+            DefinitionsDocument.contentHtml(
+                WordDefinitionData(
+                    word = entry.word, reading = null, senses = emptyList(),
+                    freqScore = 0, isCommon = false,
+                    importedGroups = importedGroupsFromSenses(imported),
+                ),
+                st.structured,
+                localizePos = { it.joinToString(" · ") },
+            ),
+            st.dictStyles,
+            st.sourceLanguage,
+        )
+        return v
+    }
+
     private fun buildWordRow(entry: SentenceAnkiHtmlBuilder.WordEntry): View {
         val ctx = requireContext()
         val density = resources.displayMetrics.density
@@ -1323,7 +1620,10 @@ class SentenceAnkiContentFragment : Fragment() {
         }
         col.addView(topLine)
 
-        if (entry.meaning.isNotBlank()) {
+        val styledBlock = wordStyledBlock(entry)
+        if (styledBlock != null) {
+            col.addView(styledBlock)
+        } else if (entry.meaning.isNotBlank()) {
             col.addView(TextView(ctx).apply {
                 text = entry.meaning.lines().firstOrNull { it.isNotBlank() } ?: entry.meaning
                 textSize = 13f
@@ -1349,6 +1649,8 @@ class SentenceAnkiContentFragment : Fragment() {
             setOnClickListener {
                 words.removeAll { it.word == entry.word }
                 selectedWords.remove(entry.word)
+                // The removed word's styled renderer dies with it.
+                wordStyledViews.remove(entry.word)?.destroy()
                 // Drop per-word audio state so the maps don't grow
                 // across remove/re-add cycles. rebuildWordRows would
                 // release the handle anyway, but the state slots need
@@ -1500,6 +1802,9 @@ class SentenceAnkiContentFragment : Fragment() {
             args.putIntArray(ARG_FREQ_SCORES, words.map { it.freqScore }.toIntArray())
         }
         rebuildWordRows()
+        // The list just changed wholesale — the styled payload must follow
+        // it (and the previous sentence's payload must not linger).
+        refreshStyledPayload()
     }
 
     companion object {
@@ -1510,6 +1815,15 @@ class SentenceAnkiContentFragment : Fragment() {
         /** Default trim window for a fresh game-audio selection — the last few
          *  seconds of the snapshot, where the just-heard line sits. */
         private const val DEFAULT_GAME_RANGE_MS = 5_000L
+
+        /** Anchor-seeded default range: how far the selection reaches back
+         *  from the mapped anchor and past it. Back-weighted on purpose: the
+         *  anchor is when the sentence was captured/displayed, and the voice
+         *  line PRECEDES that by the pipeline latency (plus however long the
+         *  user took to shutter). The 30 s opening viewport centered on this
+         *  selection covers lines that start earlier still. */
+        private const val ANCHOR_PRE_MS = 4_000L
+        private const val ANCHOR_POST_MS = 1_000L
 
         /** Restore of the game-audio state after process death (onDestroyView
          *  never ran) or a saved-state destroy (onDestroyView ran but kept
@@ -1528,6 +1842,7 @@ class SentenceAnkiContentFragment : Fragment() {
         private const val ARG_TARGET_WORD     = "target_word"
         private const val ARG_SOURCE_LANG     = "source_lang"
         private const val ARG_WORDS_LOADING   = "words_loading"
+        private const val ARG_AUDIO_ANCHOR_MS = "audio_anchor_ms"
 
         fun newInstance(
             japanese: String,
@@ -1537,6 +1852,7 @@ class SentenceAnkiContentFragment : Fragment() {
             targetWord: String? = null,
             sourceLangId: SourceLangId = SourceLangId.JA,
             wordsLoading: Boolean = false,
+            audioAnchorMs: Long? = null,
         ) = SentenceAnkiContentFragment().apply {
             arguments = Bundle().apply {
                 putString(ARG_ORIGINAL, japanese)
@@ -1549,6 +1865,7 @@ class SentenceAnkiContentFragment : Fragment() {
                 if (targetWord != null) putString(ARG_TARGET_WORD, targetWord)
                 putString(ARG_SOURCE_LANG, sourceLangId.code)
                 putBoolean(ARG_WORDS_LOADING, wordsLoading)
+                if (audioAnchorMs != null) putLong(ARG_AUDIO_ANCHOR_MS, audioAnchorMs)
             }
         }
     }

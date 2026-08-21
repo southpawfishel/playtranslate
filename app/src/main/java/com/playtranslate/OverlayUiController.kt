@@ -269,6 +269,14 @@ class OverlayUiController(
     val isAnyDragLookupPopupShowing: Boolean
         get() = iconHandles.values.any { it.dragController.isPopupShowing }
 
+    /** True while any drag-lookup lens HOLDS WINDOW FOCUS for controller
+     *  navigation (interactive + a controller was attached when it went
+     *  sticky). The a11y key filter reads this per key event: its "game input
+     *  clears the lookup" rule predates the lens being drivable, and must
+     *  stand down for the nav keys that now drive it. */
+    val isAnyDragLookupConsumingController: Boolean
+        get() = iconHandles.values.any { it.dragController.isPopupConsumingController }
+
     // ── Translation overlay registry ─────────────────────────────────────
 
     /**
@@ -296,6 +304,12 @@ class OverlayUiController(
      *  — pinhole detection samples these for change detection. */
     fun boxScreenRects(displayId: Int): List<Rect> =
         translationOverlayHandles[displayId]?.getChildScreenRects() ?: emptyList()
+
+    /** Drawn footprints of the overlay's text-box children on [displayId]
+     *  (rect + rotation + laid-out dims) — the outside gate's exclusion
+     *  channel. Same child order as [boxScreenRects]. */
+    fun boxFootprints(displayId: Int): List<com.playtranslate.ui.TranslationOverlayView.ChildFootprint> =
+        translationOverlayHandles[displayId]?.getChildFootprints() ?: emptyList()
 
     /** Display size cached on the overlay window (the view's dimensions
      *  match the display because the window is MATCH_PARENT). Returns null
@@ -546,8 +560,13 @@ class OverlayUiController(
         verticalGrowEnabled: Boolean = false,
         authoritativeBounds: Boolean = false,
     ) {
-        // Overlay is appearing — dismiss loading spinner across all icons.
-        setIconsLoading(false)
+        // Overlay is appearing — dismiss the loading spinner across all icons.
+        // Through the service rather than straight at the icons: the service
+        // holds the state of record, and [syncIconState] re-pushes it whenever
+        // an icon is installed. Clearing only the views here would leave that
+        // record armed, so the next sync would resurrect a spinner for a hold
+        // that already delivered.
+        CaptureService.instance?.setHoldLoading(false)
 
         val displayId = display.displayId
         // Reuse the existing view only if its pinhole mode, oneShot flag, AND
@@ -890,6 +909,16 @@ class OverlayUiController(
             !CaptureBackendResolver.active().requiresAccessibilityService
         if (!isMediaProjection && !prefs.showOverlayIcon) {
             hideFloatingIcon("pref_disabled")
+            return
+        }
+        if (!isMediaProjection && CaptureLifecycle.floatingIconSuppressed) {
+            // Accessibility backend, but the user hasn't opened the app (or
+            // pressed Turn On) this process lifetime — either the process
+            // just came up from boot, or they chose "Hide for Now". Every
+            // resurrect path (service reconnect, display hot-plug, backend
+            // reresolve) lands here, so the icon genuinely stays away until
+            // MainActivity's onResume lifts the suppression.
+            hideFloatingIcon("suppressed_until_app_open")
             return
         }
         if (!canShowControls()) {
@@ -1265,6 +1294,16 @@ class OverlayUiController(
         for (id in ids) hideFloatingIconForDisplay(id, reason)
     }
 
+    /** "Hide for Now": tear the icons down AND suppress them for the rest of
+     *  the process lifetime, so reconcile triggers (display hot-plug, service
+     *  reconnect) can't resurrect them before the next app open — the
+     *  behavior the confirm dialog promises. Plain [hideFloatingIcon] is the
+     *  transient teardown for every other reason. */
+    private fun hideFloatingIconUntilAppOpen(reason: String) {
+        CaptureLifecycle.setFloatingIconSuppressed(context, true)
+        hideFloatingIcon(reason)
+    }
+
     /** Called by DragLookupController.openSentenceInApp before dismissing the
      *  magnifier so the dismiss-chain's resumeLiveMode is a no-op when the
      *  detail view will cover the live-mode surface. */
@@ -1383,7 +1422,7 @@ class OverlayUiController(
         }
         menu.onHideTemporary = {
             dismissFloatingMenu()
-            hideFloatingIcon("menu_hide_temporary")
+            hideFloatingIconUntilAppOpen("menu_hide_temporary")
         }
         menu.onCloseRequested = {
             dismissFloatingMenu()
@@ -1626,7 +1665,7 @@ class OverlayUiController(
             builder.setTitle(context.getString(R.string.overlay_hide_controls_title, appName))
                 .setMessage(context.getString(R.string.overlay_hide_controls_message, appName))
                 .addButton(context.getString(R.string.overlay_hide_for_now), accentColor) {
-                    hideFloatingIcon("confirm_hide_for_now")
+                    hideFloatingIconUntilAppOpen("confirm_hide_for_now")
                 }
                 .addButton(context.getString(R.string.capture_lifecycle_stop), dividerColor, dangerColor) {
                     PlayTranslateAccessibilityService.disable(context, "confirm_turn_off_multi")
@@ -1895,6 +1934,8 @@ class OverlayUiController(
             val overlay = com.playtranslate.ui.CaptureResultOverlay(displayCtx, wm, displayId, overlayHost)
             overlay.onDismiss = { if (captureResultOverlay === overlay) captureResultOverlay = null }
             overlay.onNavigateToDetail = { result -> stashCaptureOverlayForReshow(displayId, result) }
+            // Over-game sheet: B/dpad/stick drive it while a controller is attached.
+            overlay.controllerNavEnabled = true
             captureResultOverlay = overlay
             // Pass the clean shot for the frosted backdrop — show() downscales it
             // synchronously here, before processScreenshot (below) recycles it.
@@ -1908,9 +1949,17 @@ class OverlayUiController(
             svc.configureOverride(displayId, region)
             // Do NOT recycle the frame — processScreenshot consumes it async on
             // the service scope and recycles it itself.
+            // Defer the translation only while the on-frame boxes are OFF for
+            // this flow: with boxes intended, translated chips must go up with
+            // the result. (The panel's funnel completes a deferred result if
+            // the user flips boxes on later.) Posture needs no term here —
+            // effectiveStartPosture drops a collapsed posture when boxes are
+            // off, so "collapsed sliver waiting on a deferred translation"
+            // can't happen.
+            val allowDefer = !Prefs(context).captureBoxesEnabled
             val session = if (frame != null)
-                svc.processScreenshot(frame, displayId)
-                else svc.captureOnce(displayId)
+                svc.processScreenshot(frame, displayId, allowDeferTranslation = allowDefer)
+                else svc.captureOnce(displayId, allowDeferTranslation = allowDefer)
             overlay.observe(session)
         }
     }
@@ -2027,6 +2076,9 @@ class OverlayUiController(
         val overlay = com.playtranslate.ui.CaptureResultOverlay(displayCtx, wm, displayId, overlayHost)
         overlay.onDismiss = { if (captureResultOverlay === overlay) captureResultOverlay = null }
         overlay.onNavigateToDetail = { r -> stashCaptureOverlayForReshow(displayId, r) }
+        // Same controller-nav opt-in as the fresh-capture path, or the sheet
+        // would come back keyless after a detail round-trip.
+        overlay.controllerNavEnabled = true
         captureResultOverlay = overlay
         overlay.showWithResult(size.x, size.y, result)
     }

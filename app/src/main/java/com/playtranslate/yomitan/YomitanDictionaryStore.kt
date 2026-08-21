@@ -80,6 +80,12 @@ data class YomitanDictionary(
     /** Per-dictionary auto-update opt-out (default ON). Flipped on the detail
      *  page; read only by the auto-updater, never by a capability cache. */
     val autoUpdate: Boolean = true,
+    /** User-set source-language tag for a dictionary whose index.json declares
+     *  no [sourceLanguage] (which would otherwise be a wildcard consulted for
+     *  every source language). Set on the detail page; a DECLARED
+     *  [sourceLanguage] always wins, so this only narrows wildcards — it never
+     *  contradicts the dictionary's own metadata. Null = keep the wildcard. */
+    val sourceLanguageOverride: String? = null,
 )
 
 /**
@@ -92,9 +98,13 @@ data class YomitanDictionary(
  * finds nothing — its headwords won't match the input's script/lemmas — so this
  * surfaces results when the language lines up and is harmlessly silent otherwise,
  * rather than hiding the dictionary outright or mis-bucketing it as Japanese.
+ * The user can narrow a wildcard via [YomitanDictionary.sourceLanguageOverride]
+ * (the detail page's Source Language row), which then matches like a declared
+ * language; a declared index.json language always takes precedence over it.
  */
 fun YomitanDictionary.matchesSourceLanguage(lang: String): Boolean {
-    val declared = sourceLanguage?.split('-', '_')?.first() ?: return true
+    val effective = sourceLanguage ?: sourceLanguageOverride
+    val declared = effective?.split('-', '_')?.first() ?: return true
     return declared.equals(lang.split('-', '_').first(), ignoreCase = true)
 }
 
@@ -113,6 +123,13 @@ data class YomitanRegistry(
      *  dictionary that has results, instead of every dictionary. Absent in
      *  older registries → Gson leaves the primitive false, the default. */
     val termsSingleDictionary: Boolean = false,
+    /** Styled-rendering toggle: imported definitions with retained
+     *  structured content render through the WebView surfaces with each
+     *  dictionary's own styling; OFF falls back to flat text everywhere.
+     *  Default ON. NOTE the absent-field default: kotlinx/Gson leave a
+     *  missing Boolean at its declared default, so pre-v8 registries read
+     *  as true — the intended out-of-box behavior. */
+    val dictionaryStyling: Boolean = true,
 ) {
     /** Dictionaries belonging to [category], in that section's stored order. */
     fun orderedFor(category: YomitanCategory): List<YomitanDictionary> {
@@ -292,13 +309,39 @@ object YomitanDictionaryStore {
         null
     }
 
-    /** Write-temp-then-rename so a crash mid-write can't corrupt the registry. */
-    private fun writeRegistry(ctx: Context, registry: YomitanRegistry) {
+    /**
+     * Write-temp-then-rename so a crash mid-write can't corrupt the
+     * registry — and the ONE epoch step every registry mutation commits
+     * through, in load-bearing order:
+     *
+     *  1. the new registry hits disk;
+     *  2. the registry-derived [YomitanDataStore] caches are cleared;
+     *  3. the annotation generation bumps.
+     *
+     * The bump comes LAST because it is the announcement that a reader
+     * capturing the new generation sees post-mutation content: bumping
+     * before the cache clear let a concurrent annotate() stamp the NEW
+     * generation onto readings resolved through the OLD caches
+     * (adversarial-review race), blessing stale content as current at every
+     * isImportCurrent() gate. With invalidate-before-bump, capturing the
+     * new generation implies the caches were already cleared (reads rebuild
+     * from the new registry); an annotate that raced the mutation carries
+     * the OLD stamp and self-invalidates. Callers' own invalidate() calls
+     * after post-registry steps (row ingest going live, superseded-dir
+     * deletion) remain and are idempotent.
+     *
+     * Lock note: callers hold this store's mutex; [YomitanDataStore]'s
+     * rebuild path calls back only through the lock-free [load], so the
+     * mutex order here (store → data-store) is one-directional.
+     */
+    private suspend fun writeRegistry(ctx: Context, registry: YomitanRegistry) {
         val file = registryFile(ctx)
         file.parentFile?.mkdirs()
         val tmp = File(file.parentFile, "registry.json.tmp")
         tmp.writeText(PtJson.pretty.encodeToString(registry))
         PackIntegrity.atomicReplace(tmp, file)
+        YomitanDataStore.invalidate()
+        com.playtranslate.language.AnnotationGenerations.bump()
     }
 
     /** The zip's root index.json bytes, capped; null when absent/oversized. */
@@ -465,13 +508,22 @@ object YomitanDictionaryStore {
      * revision and the zip's bundled revision can differ). The caller owns
      * [newZip]'s lifecycle. [YomitanImportResult.Duplicate] is impossible here —
      * the title-collision check is skipped for replacements.
+     *
+     * [userInitiated] marks the detail page's manual "Check for updates" flow:
+     * the commit then ignores the deck's auto-update OPT-OUT (that flag means
+     * "don't update me silently", and an explicit tap outranks it) while still
+     * refusing to resurrect a deck deleted mid-update. The silent scan passes
+     * false, keeping its never-override-a-mid-flight-opt-out contract.
      */
     suspend fun applyUpdate(
         ctx: Context,
         old: YomitanDictionary,
         newZip: File,
         remoteRevision: String?,
-    ): YomitanImportResult = installZip(ctx, newZip, replacing = old, revisionOverride = remoteRevision)
+        userInitiated: Boolean = false,
+    ): YomitanImportResult = installZip(
+        ctx, newZip, replacing = old, revisionOverride = remoteRevision, userInitiated = userInitiated,
+    )
 
     /**
      * Validates [temp] as a Yomitan dictionary and registers it. When
@@ -489,6 +541,7 @@ object YomitanDictionaryStore {
         temp: File,
         replacing: YomitanDictionary?,
         revisionOverride: String? = null,
+        userInitiated: Boolean = false,
     ): YomitanImportResult = withContext(Dispatchers.IO) {
         // Disk guard: the zip itself is NOT retained (only index.json is), but
         // the derived term rows from a flattened glossary can exceed the
@@ -521,7 +574,7 @@ object YomitanDictionaryStore {
         if (replacing == null) {
             commitFreshInstall(ctx, temp, id, parsed)
         } else {
-            commitReplacement(ctx, temp, id, parsed, replacing, revisionOverride)
+            commitReplacement(ctx, temp, id, parsed, replacing, revisionOverride, userInitiated)
         }
     }
 
@@ -543,7 +596,7 @@ object YomitanDictionaryStore {
      *  reconcile's orphan purge). Same-title handling: a HEALTHY existing
      *  entry refuses as [YomitanImportResult.Duplicate]; an OUTDATED one is
      *  superseded (the tap-to-reimport heal), carrying the user's
-     *  alias/accent/autoUpdate and priority slot. Matching is by EXACT title,
+     *  alias/accent/autoUpdate/source-language and priority slot. Matching is by EXACT title,
      *  so date-stamped titles (Jitendex) only heal when re-importing the SAME
      *  release — a newer release lands as a new entry and the stale warned
      *  row is deleted by hand (see [importCollectionDump]'s limitation note). */
@@ -575,6 +628,7 @@ object YomitanDictionaryStore {
                 alias = replacing?.alias,
                 accentColor = replacing?.accentColor,
                 autoUpdate = replacing?.autoUpdate ?: true,
+                sourceLanguageOverride = replacing?.sourceLanguageOverride,
             )
             try {
                 dictionaryDir(ctx, id).mkdirs()
@@ -617,7 +671,8 @@ object YomitanDictionaryStore {
      * + synthesized index.json files commit under the lock. Same-title policy:
      * an entry at the identical revision that is still ingested is skipped
      * (idempotent re-import); anything else (older revision, or outdated) is
-     * superseded, carrying the user's alias/accent/autoUpdate + priority slot.
+     * superseded, carrying the user's alias/accent/autoUpdate/source-language
+     * + priority slot.
      *
      * KNOWN LIMITATION: supersede matches EXACT titles, and some dictionaries
      * bake the release date into the title itself ("Jitendex.org
@@ -694,6 +749,7 @@ object YomitanDictionaryStore {
                         alias = replacing?.alias,
                         accentColor = replacing?.accentColor,
                         autoUpdate = replacing?.autoUpdate ?: true,
+                        sourceLanguageOverride = replacing?.sourceLanguageOverride,
                     )
                     dictionaryDir(ctx, dict.id).mkdirs()
                     writeIndexJson(dictionaryDir(ctx, dict.id), synthesizeIndexJson(entry))
@@ -780,6 +836,7 @@ object YomitanDictionaryStore {
         parsed: ParsedDictionary,
         replacing: YomitanDictionary,
         revisionOverride: String?,
+        userInitiated: Boolean,
     ): YomitanImportResult {
         val candidate = newDictionary(id, parsed, temp.length(), carryFrom = null, revisionOverride = revisionOverride)
         // Identical bytes ⇒ same id as the deck being replaced: no swap —
@@ -848,10 +905,12 @@ object YomitanDictionaryStore {
             // Re-resolve against the CURRENT registry — never trust the stale
             // scan object for the swap decision or the carried-over user state.
             val current = registry.dictionaries.firstOrNull { it.id == replacing.id }
-            if (current == null || !current.autoUpdate) {
-                // Deleted or opted out during the update: don't resurrect or
-                // override. The old deck is untouched; the staged new id is
-                // dropped after the lock.
+            if (current == null || (!userInitiated && !current.autoUpdate)) {
+                // Deleted (any flow) or opted out during a SILENT update: don't
+                // resurrect or override. The old deck is untouched; the staged
+                // new id is dropped after the lock. A user-initiated update
+                // ignores the opt-out — that flag means "don't update me
+                // silently", and an explicit tap outranks it.
                 return@withLock ReplaceCommit.Aborted(
                     YomitanImportResult.Skipped(
                         if (current == null) "replaced dictionary removed during update"
@@ -864,6 +923,7 @@ object YomitanDictionaryStore {
                 alias = current.alias,
                 accentColor = current.accentColor,
                 autoUpdate = current.autoUpdate,
+                sourceLanguageOverride = current.sourceLanguageOverride,
             )
             if (sameContent) {
                 // Metadata refresh in place (revision/urls). Rows unchanged for
@@ -919,9 +979,10 @@ object YomitanDictionaryStore {
     }
 
     /** Builds a [YomitanDictionary] from a validated [parsed], carrying the
-     *  user-set alias/accent/autoUpdate from [carryFrom] (the CURRENT registry
-     *  entry on an update; null on a fresh import → defaults). [revisionOverride]
-     *  wins over the zip's bundled revision (update convergence). */
+     *  user-set alias/accent/autoUpdate/source-language from [carryFrom] (the
+     *  CURRENT registry entry on an update; null on a fresh import → defaults).
+     *  [revisionOverride] wins over the zip's bundled revision (update
+     *  convergence). */
     private fun newDictionary(
         id: String,
         parsed: ParsedDictionary,
@@ -947,14 +1008,24 @@ object YomitanDictionaryStore {
         alias = carryFrom?.alias,
         accentColor = carryFrom?.accentColor,
         autoUpdate = carryFrom?.autoUpdate ?: true,
+        sourceLanguageOverride = carryFrom?.sourceLanguageOverride,
     )
 
     /**
      * Identity invariant for an auto-update REPLACEMENT: a new revision must
-     * still be the SAME dictionary. The title (trimmed, case-insensitive) must
-     * match, and any DECLARED source/target language must agree on its primary
+     * still be the SAME dictionary. The title must match after [titleIdentity]
+     * normalization (trimmed, case-insensitive, trailing date-stamp stripped),
+     * and any DECLARED source/target language must agree on its primary
      * subtag. A null/blank language on either side is tolerated — adding or
      * dropping language metadata across a revision is not a different dictionary.
+     *
+     * The date-stamp stripping exists because the most popular JA decks (the
+     * yomidevs jmdict-yomitan family: JMdict, JMnedict, KANJIDIC) bake the
+     * release date into the TITLE itself ("JMnedict [2026-08-13]" →
+     * "JMnedict [2026-08-14]"), so exact title equality refused every one of
+     * their legitimate updates as "a different dictionary" (Thor field
+     * evidence, 2026-08-13). Only a strictly date-shaped trailing bracket
+     * group is stripped — a non-date bracket suffix still distinguishes decks.
      *
      * This catches an `indexUrl`/`downloadUrl` that resolves to a DIFFERENT deck
      * (author misconfiguration) and keeps the installed deck rather than swap in
@@ -971,9 +1042,25 @@ object YomitanDictionaryStore {
         installedSource: String?,
         installedTarget: String?,
     ): Boolean {
-        if (!newTitle.trim().equals(installedTitle.trim(), ignoreCase = true)) return false
+        if (!titleIdentity(newTitle).equals(titleIdentity(installedTitle), ignoreCase = true)) {
+            return false
+        }
         return languageCompatible(newSource, installedSource) &&
             languageCompatible(newTarget, installedTarget)
+    }
+
+    /** Trailing release-date stamp in a deck title, e.g. " [2026-08-14]".
+     *  Strictly date-shaped so non-date bracket suffixes keep distinguishing
+     *  decks. */
+    private val TITLE_DATE_STAMP = Regex("""\s*\[\d{4}-\d{2}-\d{2}]\s*$""")
+
+    /** A title's release-independent identity: trimmed, with a trailing
+     *  date-stamp bracket group removed. A title that is ONLY a date stamp
+     *  keeps its full form — stripping to nothing would make every such
+     *  (pathological) deck identical to every other. */
+    private fun titleIdentity(title: String): String {
+        val trimmed = title.trim()
+        return trimmed.replace(TITLE_DATE_STAMP, "").takeUnless { it.isEmpty() } ?: trimmed
     }
 
     /** True unless BOTH sides declare a language and their primary subtags differ. */
@@ -1099,6 +1186,20 @@ object YomitanDictionaryStore {
             YomitanDataStore.invalidate()
         }
 
+    /** Sets the styled-rendering toggle (see
+     *  [YomitanRegistry.dictionaryStyling]). No-op when the registry is
+     *  unreadable. */
+    suspend fun setDictionaryStyling(ctx: Context, enabled: Boolean) =
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                val registry = readRegistry(ctx) ?: return@withLock
+                if (registry.dictionaryStyling == enabled) return@withLock
+                writeRegistry(ctx, registry.copy(dictionaryStyling = enabled))
+            }
+            // The flag is part of the data store's registry-derived cache.
+            YomitanDataStore.invalidate()
+        }
+
     /** Sets the user-facing alias override for dictionary [id]; blank clears it
      *  (consumers render `alias ?: title`). No-op when the registry is
      *  unreadable, the dictionary is gone, or the value is unchanged. */
@@ -1171,6 +1272,35 @@ object YomitanDictionaryStore {
                     ),
                 )
             }
+        }
+
+    /** Sets the user's source-language tag for dictionary [id] (meaningful only
+     *  while the dictionary declares no index.json sourceLanguage — a declared
+     *  language wins in [matchesSourceLanguage]); null restores the wildcard.
+     *  No-op when the registry is unreadable, the dictionary is gone, or the
+     *  value is unchanged. */
+    suspend fun setSourceLanguageOverride(ctx: Context, id: String, lang: String?) =
+        withContext(Dispatchers.IO) {
+            val normalized = lang?.trim()?.takeUnless { it.isEmpty() }
+            val changed = mutex.withLock {
+                val registry = readRegistry(ctx) ?: return@withLock false
+                val current = registry.dictionaries.firstOrNull { it.id == id }
+                    ?: return@withLock false
+                if (current.sourceLanguageOverride == normalized) return@withLock false
+                writeRegistry(
+                    ctx,
+                    registry.copy(
+                        dictionaries = registry.dictionaries.map {
+                            if (it.id == id) it.copy(sourceLanguageOverride = normalized) else it
+                        },
+                    ),
+                )
+                true
+            }
+            // The override feeds the per-language capability caches (it changes
+            // which dictionaries matchesSourceLanguage admits), so stale caches
+            // must drop for the new filter to take effect.
+            if (changed) YomitanDataStore.invalidate()
         }
 
     /**

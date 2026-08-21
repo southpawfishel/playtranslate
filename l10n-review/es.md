@@ -242,3 +242,166 @@ word order and a tight prefix are both safe.
 ### Verdict
 
 **PASS.** One ⚠️ found and fixed, no ❌.
+
+---
+
+## Delta review 2026-08-04 (8 keys: one-tap card toasts, first-field guard, hide-translations toggle, waveform zoom hint)
+
+Independent pass — I wrote none of these strings. Scope: `card_words_in_sentence`,
+`anki_added_sentence_success`, `anki_added_word_success`, `game_audio_zoom_hint`,
+`anki_first_field_unmapped`, `anki_first_field_empty`,
+`history_hide_translations_toggle_title`, `history_hide_translations_toggle_subtitle`.
+
+**Mechanical layer verified programmatically over the 8 keys:** all 8 present, no extras;
+file parses as XML; every `<xliff:g>` span matches EN byte-for-byte on `id`, `example`
+*and* inner content (`field_name`/`brand_anki` spans in both first-field strings);
+placeholder multisets identical to EN (`%1$s` ×1 in each first-field string, none
+elsewhere); `<b>`, `\n`, `\{ \}`, `&lt;/&gt;/&amp;` counts match (all zero here); **0**
+unescaped `'` or `"` in the delta — the four field-name quotes are escaped straight
+`\"`; `name=` untouched; `Anki` untranslated in all four strings that carry it. Each key
+also sits in its EN neighbourhood (`anki_added_no_audio` → sentence → word;
+`audio_source_game_enable_hint` → zoom hint; `anki_field_mapping_unconfigured` →
+unmapped → empty; `history_capture_image_toggle_subtitle` → title → subtitle). The one
+file-order divergence from EN is the pre-existing relocation of the `pos_*` /
+`inflection_*` blocks, untouched by this delta. **No 🛑 build-breaking issues.**
+
+### Findings (delta)
+
+| name | severity | current | suggested | note |
+|---|---|---|---|---|
+| `anki_first_field_empty` | ⚠️ | "…<xliff:g>Anki</xliff:g> usa el primer campo para identificar la nota, así que **necesita** un valor en todas las tarjetas." | "…, así que **ese campo** necesita un valor en todas las tarjetas." | Pro-drop hands the null subject of `necesita` to the last overt 3sg subject — **Anki** — so the clause lands as "Anki needs a value on every card" and the alert stops pointing at the field the user has to fill. EN's "it" is loose in the same spot, but English adjacency pulls it back to "the first field"; Spanish subject continuity does not. Both sibling locales had to name the referent for exactly this reason (`pt-rBR` "então **esse campo** precisa ter um valor", `fr` "**ce champ** doit donc contenir une valeur"). It is a full alert, so the three extra characters are free. |
+| `history_hide_translations_toggle_title` | 💬 | "Ocultar las traducciones" | "Ocultar traducciones" | The article is grammatical, but this file uses it only where the referent is deictic — the translations currently on the game screen (`translate_button_subtitle_hold_to_hide_translations`, `cd_toggle_translation_visibility`, `overlay_hide_controls_title`). Bare label positions drop it: the sibling toggle title immediately above is `history_capture_image_toggle_title` = "Guardar imágenes de captura", and the closest verb-matched labels are `settings_hide_overlays_during_auto_mode` = "Ocultar superposiciones" and `hotkey_show_translations_dialog_title` = "Mostrar traducciones". Also 24 → 20 chars in a settings-row title. |
+| `anki_first_field_unmapped` | 💬 | "Asigna un valor a \"…\" para que <xliff:g>Anki</xliff:g> **pueda** identificar la nota." | "Asigna un valor a \"…\" para que <xliff:g>Anki</xliff:g> identifique la nota." | The EN comment pins this string to the Android 12+ two-line toast clamp. At `example="Key"` ES is 64 chars to EN's 51; with a long real field name — `IsTargetedSentenceCard`, which this app's own `anki_content_flag_targeted_sentence_desc` names — it is 83 to EN's 70, and the field name is user-defined and unbounded. `para que` + subjunctive already carries the "can", so dropping `pueda` buys back 6 chars with no loss of meaning; `fr` shipped that same compression ("pour qu\'Anki identifie la note"). Not wrong as written — take this only if the toast is observed clipping. |
+
+### Clean areas (delta) — checked, no findings
+
+**The two one-tap toasts are the strongest pair in the delta.** `anki_added_sentence_success`
+"Tarjeta de frase añadida a Anki" / `anki_added_word_success` "Tarjeta de palabra añadida a
+Anki": feminine `añadida` agrees with `tarjeta`; the compounds byte-match the mode chips the
+toast exists to make visible — `anki_mode_sentence` = "Frase", `anki_mode_word` = "Palabra" —
+and "tarjeta de frase" is already the file's established compound (`anki_game_audio_row_subtitle`,
+`anki_content_words_table`, `anki_content_flag_sentence`). `añadir` (not `agregar`) matches
+`anki_added_no_audio` and `history_action_anki`, keeping the neutral-international line. I
+checked the participle-attachment trap — `tarjeta` and `frase`/`palabra` are both feminine, so
+`añadida` is formally free to attach to the nearer noun — and cleared it: "tarjeta de frase" is a
+determinerless classifying compound, which blocks internal modification, so the head-noun reading
+is the only live one. One out-of-scope observation, no action asked: `anki_added_no_audio`
+"Añadido a Anki" is masculine and now sits one string above two feminine "…añadida" toasts;
+that asymmetry is inherited from EN ("Added to Anki" vs "Sentence card added to Anki") and the
+string is not in this delta.
+
+**`nota` for Anki's "note" is the right call, and the mixed vocabulary is EN's, not the
+translator's.** AnkiDroid's own Spanish UI uses *nota* / *tipo de nota*, so a user who has ever
+opened AnkiDroid reads it immediately. The file otherwise says *tarjeta* / *tipo de tarjeta*
+because the app's English says "card type" where Anki says "note type" — a source-side divergence,
+not a locale drift. `anki_first_field_empty` puts both nouns in one alert ("está vacío en esta
+**tarjeta** … identificar la **nota** … en todas las **tarjetas**"), which is faithful to EN and
+actually makes the one-note-many-cards relation visible rather than hiding it.
+
+**`Asigna` is the file's mapping verb.** It matches `anki_content_source_pick_title` = "Asignar
+\"%1$s\"" — the very dialog that opens right after this toast — and `anki_card_type_edit_mapping_row_label`
+= "Editar asignación de campos". No stray *mapear*. The fronted "El campo \"X\"" in
+`anki_first_field_empty` is a deliberate improvement on EN's bare quoted placeholder: it gives
+`está vacío` a masculine anchor instead of leaving agreement to a free-form user string, the same
+move `pt-rBR` made ("O campo …"). Kept out of `anki_first_field_unmapped`, where the placeholder is
+a `a`-marked object and needs no anchor — correct asymmetry, not an inconsistency.
+
+**Field-name quotes: escaped straight `\"` is correct and already adjudicated.** EN's comment
+calls its curly quotes intentional typography, and `de`/`fr`/`pt-rBR` all used their typographic
+pairs for these two keys — but this file's rule (settled in the 2026-06-23 delta review above) is
+*escaped straight quotes for literal field names*, curly `“ ”` reserved for names the user sees in
+Android or in another app's chrome (`onboarding_a11y_enable_title`, `a11y_stuck_message_xiaomi`,
+`settings_ocr_footer_guidance`), and `« »` for this app's own button labels
+(`status_idle`, `status_hold_hint`, `hymt_legal_message`). The two new strings quote an AnkiDroid
+field name and match `anki_content_source_pick_title` and the `anki_content_*_desc` block exactly —
+the sub-family the user meets in the same flow. Note for the record that the premise "the file has
+zero curly quotes" is not accurate: it has 3 `“ ”` pairs and 4 `« »` pairs. The `\"` choice is
+family-consistent, not file-uniform, and family consistency is the right axis here.
+
+**`card_words_in_sentence`** "Palabras en la frase" — *frase* matches the app's one word for
+"sentence" everywhere (`anki_mode_sentence`, `history_toggle_subtitle`), so the baked-in card header
+and the mode chip that produced the card agree. Uppercased by the card CSS it is 20 chars to EN's
+17; the alternative "Palabras de la frase" is the same length and no clearer, so there is no
+shortening available and none needed for a full-width card-back header.
+
+**`game_audio_zoom_hint`** "Pellizca para ver más o menos audio" — *pellizcar* is Google's own
+Spanish verb for the pinch gesture, and the tú imperative is right. The bare, object-less imperative
+is this file's established hint shape (`notif_text` "Toca para volver a…", `cd_drag_to_reorder`
+"Arrastra para reordenar", `capture_sliver_expand_hint` "Toca para ver más opciones"), so no object
+is owed. I considered the "más o menos" fixed-adverbial garden path ("roughly") and cleared it:
+`ver más o menos` in the adverbial reading would mean "to see approximately", which is semantically
+empty, so the comparative-quantifier reading resolves at once. I also checked the alternatives that
+would remove the adjacency — *ampliar/reducir el audio*, *acercar/alejar el audio* — and rejected
+them: every one of them invites a volume reading, which "ver" cleanly forecloses. At 35 chars to
+EN's 32 it is safe in a centered caption. No waveform noun exists in this file, so none was owed.
+
+**`history_hide_translations_toggle_subtitle`** "Muestra solo el texto capturado. Toca una línea
+para ver su traducción." — the 3sg-descriptive opener is the file's toggle-subtitle voice, not a
+register slip: `history_toggle_subtitle` "Guarda las frases capturadas…" and
+`history_capture_image_toggle_subtitle` "Conserva una foto de cada captura…" are the two subtitles
+it sits between, both built the same way. *texto capturado* reuses the app's established capture
+verb (`history_toggle_subtitle`, `history_empty_off`) rather than opening a second one. **línea**
+for EN's "row" is better than a literal *fila*: this screen already calls its entries *líneas*
+(`history_empty_none` "Las líneas aparecen a medida que se traducen", `history_clear_confirm_message`
+"Todas las líneas guardadas"), and EN itself uses three nouns (line/row/entry) for one object, so
+the translator collapsed to the one the screen already teaches — `entrada` stays reserved for
+`history_delete_confirm_title`, matching EN's "entry". Second sentence imperative matches EN.
+
+**Register, punctuation, brands.** tú throughout the delta (Asigna, Pellizca, Toca; Muestra/Conserva
+in the descriptive voice; `Ocultar` infinitive for the label). No `usted`, no vosotros forms, no
+regionalisms (*audio*, *tarjeta*, *pantalla*, *campo*). None of the 8 is a question or exclamation,
+so there is no ¿ / ¡ contact point to miss. `Anki` untranslated in all four occurrences.
+
+**Verdict: ship with one edit.** One ⚠️ (`anki_first_field_empty`'s null subject — it changes what
+the alert tells the user to do) and two 💬. No ❌, no 🛑.
+
+## Delta review 2026-08-19 (25 keys: language wildcard, Bergamot device gate, dictionary-styling toggle, Source Language row, manual dictionary-update flow, debug angle rollback)
+
+Mechanical layer verified programmatically across all 12 locales: all 25 delta names
+present, no extras, no duplicate `name=`; every `%n$s` present and matching EN; all
+`<xliff:g>` spans byte-identical to EN (`id`, `example`, inner placeholder); `<b>`, `\n`,
+`\{ \}`, `&lt;/&gt;/&amp;` counts match; no unescaped `'`/`"`. Analyzer reports
+`missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD SUCCESSFUL. No
+`<plurals>` in this delta. **No 🛑 build-breaking issues.**
+
+### Findings (delta) — all applied
+
+| name | severity | current | suggested | note |
+|---|---|---|---|---|
+| yomitan_update_done_message | ⚠️ | «%1$s **ya** está actualizado.» | «%1$s **ahora** está actualizado.» | Meaning shift plus a collision. EN is "X is **now** up to date" — the alert that fires *after* a successful install, where "now" reports the result. «ya» says *already*, which is the no-update case, and it made this string echo `yomitan_update_none_title` («Ya está actualizado») verbatim, so success and no-op read alike. |
+| settings_debug_angle_gate | 💬 | «Umbral de ángulo clásico (10°)» | «Umbral clásico de ángulo (10°)» | Attachment: a postposed adjective binds to the nearest noun, so this reads "classic **angle**". The EN comment is explicit that the *threshold* is the legacy one (10° instead of the current 3°). Moving «clásico» onto «Umbral» fixes it without adding words. Same fix applied in ar / fr / pt-BR this round. |
+
+### Clean areas (delta) — checked, no findings
+
+**Update vocabulary reused from the app updater.** «Actualización disponible» and «No se
+pudo buscar actualizaciones» are byte-identical to `update_dialog_title` /
+`update_check_failed_title`; `yomitan_update_check_failed_message` follows
+`yomitan_download_error_message`'s «Comprueba tu conexión e inténtalo de nuevo»;
+`yomitan_update_scan_active_message` closes with `anki_models_unavailable`'s «Inténtalo de
+nuevo en un momento». «Buscando actualizaciones» is the gerund progress form of
+`update_progress_verifying` «Verificando…».
+
+**Gender around the placeholder is anchored, not guessed.** «%1$s se puede actualizar»,
+«los datos de %1$s», «%1$s tiene la última versión» — the only agreeing forms
+(«actualizado» in the success message) default to masculine, matching the file's own
+`yomitan_duplicate_message` («%1$s ya está importado»), i.e. agreement with the implied
+*diccionario*, not with an arbitrary title.
+
+**«Hay que volver a descargarlo» matches the file's own repair idiom.** `yomitan_outdated_label`
+already says «Hay que volver a importarlo tras actualizar la aplicación», so the re-download
+prompt is the same construction one verb over, rather than a new one.
+
+**«Idioma de origen» is the file's term**, from `llm_prompt_kw_source_desc` («del idioma de
+origen»), and deliberately not «Idioma del juego» (`pack_upgrade_label_source`) — the row
+names the dictionary's declared language, not the capture language.
+
+**Register and punctuation.** Informal tú throughout («Comprueba», «Inténtalo», «importes»,
+«desactívalo»); neutral international vocabulary, no vosotros and no regionalisms; no
+question or exclamation in the delta, so no ¿ / ¡ obligations. «aplicación» matches
+`yomitan_outdated_label` rather than switching to «app».
+
+### Verdict
+
+**PASS after fixes.** One ⚠️, one 💬, no ❌, no 🛑. The ⚠️ is the same class as the Korean
+one this round: the success and no-update alerts were written independently and collapsed
+onto the same wording, which the "now"/"already" distinction exists to prevent.

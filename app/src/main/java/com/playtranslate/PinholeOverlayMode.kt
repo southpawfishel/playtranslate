@@ -257,6 +257,7 @@ class PinholeOverlayMode(
         overlayBitmap?.recycle()
         overlayBitmap = null
         outsideGrid.reset()
+        tombstones.clear()
         grayZoneStats.clear()
         grayZoneLastEmitMs = 0L
         // Holds only — region memory and ARMING survive. The input path
@@ -309,6 +310,20 @@ class PinholeOverlayMode(
      *  exclusion + the settle gate. Reset whenever the overlay layout
      *  changes or the mode's state resets. */
     private val outsideGrid = OutsideBlockGrid()
+
+    /** A live [Tombstone] plus its remaining lifespan in full looks. */
+    private class AgedTombstone(val stone: Tombstone, var looksLeft: Int)
+
+    /** Vacancy memory for content-match relocations (see [Tombstone]):
+     *  minted by classification when a content match moves a box to a new
+     *  position, aged by full looks (cycles that actually classified — a
+     *  gate-skipped or no-pipeline cycle read nothing, so it proves
+     *  nothing about the vacated rect), pruned after
+     *  [PinholeCalibration.TOMBSTONE_LIFESPAN_LOOKS]. OCR-crop space, so
+     *  every reset that voids that space must clear it alongside
+     *  cachedBoxes. Naturally bounded: mints per look ≤ content matches
+     *  per look, lifespan 2 looks. */
+    private val tombstones = ArrayList<AgedTombstone>()
 
     // Removal hysteresis and the pinhole-side photometric fit were removed
     // 2026-07-08 (speed-first product rule): a false REMOVE costs one brief
@@ -419,6 +434,7 @@ class PinholeOverlayMode(
                 overlayBitmap = null
                 typewriterGate.clear()
                 typewriterDeadlineMs = null
+                tombstones.clear()
                 CaptureBackendResolver.activeOverlayUi?.hideTranslationOverlayForDisplay(displayId)
                 // State cleared + overlay hidden: the rebuild cycle must run
                 // even if the post-rotation screen goes immediately static.
@@ -433,7 +449,11 @@ class PinholeOverlayMode(
             // rects. See FrameCoordinates KDoc for details on the coordinate
             // spaces and why non-identity is fail-closed below.
             val ui = CaptureBackendResolver.activeOverlayUi
-            val rects = ui?.boxScreenRects(displayId) ?: emptyList()
+            // One capture for both channels: screen rects for pinhole sampling
+            // AND drawn footprints for the gate exclusion — a single walk, so
+            // the two can't race a rebuild between separate calls.
+            val footprints = ui?.boxFootprints(displayId) ?: emptyList()
+            val rects = footprints.map { it.rect }
             val overlayDisplaySize = ui?.translationOverlayDisplaySize(displayId)
             val coords = FrameCoordinates(
                 bitmapWidth = raw.width,
@@ -551,14 +571,26 @@ class PinholeOverlayMode(
                     // streams (routing), so its frames always have the bar.
                     service.getStatusBarHeightForDisplay(displayId),
                 )
-                val exclude = bitmapRects.map { r ->
-                    Rect(r).apply {
-                        inset(
-                            -PinholeCalibration.GATE_EXCLUDE_INFLATE_PX,
-                            -PinholeCalibration.GATE_EXCLUDE_INFLATE_PX,
-                        )
-                    }
-                } + listOfNotNull(iconRect)
+                val inflate = PinholeCalibration.GATE_EXCLUDE_INFLATE_PX
+                val exclude = bitmapRects.mapIndexed { i, r ->
+                    // Footprint-shaped exclusion from the DRAWN channel: a
+                    // rotated chip excludes only its rendered footprint (rect
+                    // + rotation + laid-out dims from the view itself), so
+                    // the exclusion can never diverge from what was composited
+                    // the way stored box geometry could (padding, carving).
+                    // AABB corners stay sampled — checkPinholes skips them (no
+                    // overlay drawn there), so the gate is their only watcher.
+                    // Dims ride the same view→bitmap scale as the rect.
+                    val f = footprints[i]
+                    val sx = if (f.rect.width() > 0) r.width().toFloat() / f.rect.width() else 1f
+                    val sy = if (f.rect.height() > 0) r.height().toFloat() / f.rect.height() else 1f
+                    OutsideChangeGate.Exclusion(
+                        Rect(r).apply { inset(-inflate, -inflate) },
+                        angleDeg = f.angleDeg,
+                        orientedW = f.drawnW * sx + 2 * inflate,
+                        orientedH = f.drawnH * sy + 2 * inflate,
+                    )
+                } + listOfNotNull(iconRect?.let { OutsideChangeGate.Exclusion(it) })
                 val outside =
                     OutsideChangeGate.check(raw, gateRef, crop, exclude, gateBuffers, outsideGrid)
                 reconcileCycle =
@@ -645,7 +677,7 @@ class PinholeOverlayMode(
             val ocrImage: Bitmap
             if (hasOverlays()) {
                 ocrImage = raw.copy(raw.config ?: Bitmap.Config.ARGB_8888, true)
-                fillOverlayRegions(ocrImage, bitmapRects)
+                fillOverlayRegions(ocrImage, bitmapRects, footprints)
             } else {
                 ocrImage = raw
             }
@@ -712,6 +744,7 @@ class PinholeOverlayMode(
                     overlayBitmap = null
                     typewriterGate.clear()
                     typewriterDeadlineMs = null
+                    tombstones.clear()
                     CaptureBackendResolver.activeOverlayUi?.hideTranslationOverlayForDisplay(displayId)
                     engine.forceNext()
                     return prefs.captureIntervalMs
@@ -752,7 +785,18 @@ class PinholeOverlayMode(
                     cropTop = pipeCropTop,
                 )
                 ocrBitmapRects = boxes.map { classifyCoords.ocrToBitmap(it.bounds) }
-                classification = classifyOcrResults(ocrResult, boxes, ocrBitmapRects, classifyCoords, sourceIsRtl)
+                classification = classifyOcrResults(
+                    ocrResult, boxes, ocrBitmapRects, classifyCoords, sourceIsRtl,
+                    tombstones = tombstones.map { it.stone },
+                )
+                // Age BEFORE minting so a stone minted by THIS look doesn't
+                // lose a look to its own minting cycle — it must still be
+                // live when the vacated rect's re-read arrives next look.
+                tombstones.forEach { it.looksLeft-- }
+                tombstones.removeAll { it.looksLeft <= 0 }
+                classification.vacated.mapTo(tombstones) {
+                    AgedTombstone(it, PinholeCalibration.TOMBSTONE_LIFESPAN_LOOKS)
+                }
             } else {
                 classifyCoords = null
                 ocrBitmapRects = emptyList()
@@ -909,6 +953,8 @@ class PinholeOverlayMode(
                         "cascade=${cascadedRemovals.toSortedSet()}, " +
                         "stale=${staleOverlayIndices.toSortedSet()}) " +
                         "far=${placeGroups.size}(+${farOutcome.held} held) " +
+                        "tomb=${classification.tombstoneBlocks}blk/" +
+                        "${classification.vacated.size}mint/${tombstones.size}live " +
                         "boxesIn=${boxes.size} boxesOut=${nextBoxes.size}"
                 )
                 // Why classification picked stale/contentMatch/far: dump
@@ -994,7 +1040,11 @@ class PinholeOverlayMode(
                 val farLineCounts = placeGroups.map { it.lineCount }
                 val farOrientations = placeGroups.map { it.orientation }
                 val farAlignments = placeGroups.map { it.alignment }
-                val placeholders = buildPlaceholderBoxes(farTexts, farBounds, farLineCounts, raw, cropLeft, cropTop, farOrientations, farAlignments)
+                val farSlants = placeGroups.map { Triple(it.angleDeg, it.orientedWidth, it.orientedHeight) }
+                val placeholders = buildPlaceholderBoxes(
+                    farTexts, farBounds, farLineCounts, raw, cropLeft, cropTop,
+                    farOrientations, farAlignments, farSlants,
+                )
 
                 if (placeholders.isNotEmpty()) {
                     val partial = placeholders.mapIndexed { i, ph ->
@@ -1232,27 +1282,13 @@ class PinholeOverlayMode(
         grayZoneLastEmitMs = now
     }
 
-    private fun fillOverlayRegions(bitmap: Bitmap, bitmapRects: List<Rect>) {
+    private fun fillOverlayRegions(
+        bitmap: Bitmap,
+        bitmapRects: List<Rect>,
+        footprints: List<com.playtranslate.ui.TranslationOverlayView.ChildFootprint>,
+    ) {
         val boxes = cachedBoxes ?: return
-        // Small anti-aliasing buffer beyond the rendered overlay's edge, so
-        // ML Kit doesn't read AA fringe pixels as glyph fragments. Kept tiny
-        // (3 px) so adjacent text lines outside the rendered overlay aren't
-        // accidentally obscured — see PinholeOverlayMode fillOverlayRegions kdoc.
-        val aaBuffer = 3
-        val paint = android.graphics.Paint()
-        val canvas = Canvas(bitmap)
-        var rectIdx = 0
-        for (box in boxes) {
-            if (box.dirty) continue
-            val rect = bitmapRects.getOrNull(rectIdx) ?: break
-            rectIdx++
-            val l = (rect.left - aaBuffer).coerceAtLeast(0)
-            val t = (rect.top - aaBuffer).coerceAtLeast(0)
-            val r = (rect.right + aaBuffer).coerceAtMost(bitmap.width)
-            val b = (rect.bottom + aaBuffer).coerceAtMost(bitmap.height)
-            paint.color = box.bgColor or 0xFF000000.toInt()
-            canvas.drawRect(l.toFloat(), t.toFloat(), r.toFloat(), b.toFloat(), paint)
-        }
+        PinholeFill.fillOverlayRegions(bitmap, boxes, bitmapRects, footprints)
     }
 
     /**
@@ -1396,10 +1432,19 @@ class PinholeOverlayMode(
         for (py in 0 until regionH) {
             for (px in 0 until regionW) {
                 if (!isPinholePosition(left + px, top + py, spacing)) continue
-                totalPinholes++
                 val i = py * regionW + px
-                val refPx = refPixels[i]
                 val ovPx = ovPixels[i]
+                // A pixel the overlay never drew — a rotated chip's AABB
+                // corner, or its AA edge — has no 50/50 blend to predict:
+                // raw there is pure game content, and predicted would be
+                // cleanRef/2, flagging static screens as changed every cycle.
+                // Skip it; those samples belong to the outside gate, whose
+                // exclusion is footprint-shaped for rotated boxes. Upright
+                // chips fill their whole rect opaque, so this never skips
+                // for them.
+                if (Color.alpha(ovPx) != 255) continue
+                totalPinholes++
+                val refPx = refPixels[i]
                 val rawPx = rawPixels[i]
                 // predicted = clean_ref * 0.5 + overlay_rendered * 0.5
                 val predR = (Color.red(refPx) + Color.red(ovPx)) / 2
@@ -1439,9 +1484,10 @@ class PinholeOverlayMode(
 
     /**
      * Update clean ref in-place: copy non-overlay pixels from raw into the
-     * existing cleanRef. Cached box positions stay frozen at their initial
-     * pre-overlay game content (pinhole detection relies on that
-     * invariant), while everything else is refreshed from raw.
+     * existing cleanRef. Overlay-COVERED pixels stay frozen at their initial
+     * pre-overlay game content (pinhole detection relies on that invariant),
+     * while everything else — including a rotated chip's undrawn AABB
+     * corners — is refreshed from raw.
      *
      * Takes pre-converted bitmap-space [bitmapRects] from the caller (built
      * via [FrameCoordinates.viewListToBitmap]). The caller is responsible for
@@ -1476,7 +1522,16 @@ class PinholeOverlayMode(
         raw.getPixels(allPixels, 0, w, 0, 0, w, h)
         ref.setPixels(allPixels, 0, w, 0, 0, w, h)
 
-        // Restore overlay regions from saved pixels
+        // Restore overlay regions from saved pixels. A rotated chip freezes
+        // only the pixels it actually draws (overlay alpha 255 — the same
+        // criterion checkPinholes samples by): its AABB corners are live game
+        // content the outside gate now watches, and a frozen-stale corner
+        // would make that gate false-fire forever. Upright boxes keep the
+        // whole-rect restore, byte-identical to before.
+        val boxes = cachedBoxes
+        val overlay = overlayBitmap
+        val boxesAligned = boxes != null && boxes.size == bitmapRects.size &&
+            overlay != null && overlay.width == w && overlay.height == h
         for ((i, rect) in bitmapRects.withIndex()) {
             val pixels = savedRegions[i] ?: continue
             val left = rect.left.coerceIn(0, w)
@@ -1486,7 +1541,18 @@ class PinholeOverlayMode(
             val regionW = right - left
             val regionH = bottom - top
             if (regionW <= 0 || regionH <= 0) continue
-            ref.setPixels(pixels, 0, regionW, left, top, regionW, regionH)
+            if (boxesAligned && boxes!![i].angleDeg != 0f) {
+                val ov = IntArray(regionW * regionH)
+                overlay!!.getPixels(ov, 0, regionW, left, top, regionW, regionH)
+                val merged = IntArray(regionW * regionH)
+                ref.getPixels(merged, 0, regionW, left, top, regionW, regionH)  // == fresh raw here
+                for (p in merged.indices) {
+                    if (Color.alpha(ov[p]) == 255) merged[p] = pixels[p]
+                }
+                ref.setPixels(merged, 0, regionW, left, top, regionW, regionH)
+            } else {
+                ref.setPixels(pixels, 0, regionW, left, top, regionW, regionH)
+            }
         }
     }
 
@@ -1525,7 +1591,9 @@ class PinholeOverlayMode(
         texts: List<String>, bounds: List<Rect>, lineCounts: List<Int>,
         raw: Bitmap, left: Int, top: Int,
         orientations: List<com.playtranslate.language.TextOrientation> = emptyList(),
-        alignments: List<com.playtranslate.language.TextAlignment> = emptyList()
+        alignments: List<com.playtranslate.language.TextAlignment> = emptyList(),
+        /** Per-box (angleDeg, orientedWidth, orientedHeight); zeros when upright. */
+        slants: List<Triple<Float, Float, Float>> = emptyList(),
     ): List<TextBox> {
         val colorScale = 4
         val colorRef = raw.scale(raw.width / colorScale, raw.height / colorScale, false)
@@ -1539,8 +1607,10 @@ class PinholeOverlayMode(
             val (bg, tc) = colors.getOrElse(idx) { Pair(Color.argb(224, 0, 0, 0), Color.WHITE) }
             val orient = orientations.getOrElse(idx) { com.playtranslate.language.TextOrientation.HORIZONTAL }
             val align = alignments.getOrElse(idx) { com.playtranslate.language.TextAlignment.LEFT }
+            val (ang, ow, oh) = slants.getOrElse(idx) { Triple(0f, 0f, 0f) }
             TextBox("", rect, bg, tc, lineCounts.getOrElse(idx) { 1 },
-                sourceText = texts.getOrElse(idx) { "" }, orientation = orient, alignment = align)
+                sourceText = texts.getOrElse(idx) { "" }, orientation = orient, alignment = align,
+                angleDeg = ang, orientedWidth = ow, orientedHeight = oh)
         }
     }
 

@@ -857,6 +857,76 @@ class TypewriterGateTest {
         assertEquals(1, out.dispatch.size)
     }
 
+    // ── Dead-lineage drop: a hold on a NEW message erases the old box ─────
+
+    @Test
+    fun armedAdvance_dropsDeadBoxImmediately_insteadOfHoldingIt() {
+        val gate = TypewriterGate()
+        // Arm via a revealed-and-settled chain on the reconciler path.
+        gate.reconcile(verdicts(region("こんにち")), 0, 200)
+        val frag = box("こんにち")
+        var out = gate.reconcile(verdicts(region("こんにちは、旅の", frag)), 1000, 1200)
+        assertEquals("growth holds keep their fragment box", listOf(frag), out.heldBoxes)
+        assertTrue(out.dropNow.isEmpty())
+        out = gate.reconcile(verdicts(region("こんにちは、旅の人よ。", frag)), 2000, 2200)
+        assertEquals(1, out.toTranslate.size) // boundary release + arm
+        // Message 2 starts typing over the displayed message-1 box: the
+        // armed hold opens AND the dead box is erased now — not rendered
+        // through the hold as "nothing happened".
+        val shown = box("こんにちは、旅の人よ。")
+        out = gate.reconcile(verdicts(region("それでは、始め", shown)), 3000, 3200)
+        assertTrue(out.toTranslate.isEmpty())
+        assertTrue("dead lineage must not render through the hold", out.heldBoxes.isEmpty())
+        assertEquals(listOf(shown), out.dropNow)
+        assertEquals(3000L + TypewriterGate.ARMED_NEW_MAX_MS, out.nextDeadlineMs)
+        // Completion read releases. The dropped box left the display, so
+        // the release arrives with no replacesBox — nothing to double-drop.
+        out = gate.reconcile(verdicts(region("それでは、始めよう。")), 4000, 4200)
+        assertEquals(listOf("それでは、始めよう。"), out.toTranslate.map { it.text })
+        assertTrue(out.dropNow.isEmpty())
+    }
+
+    @Test
+    fun revealAdjacentAdvance_dropsDeadBox() {
+        val gate = TypewriterGate()
+        val top = Rect(500, 800, 1240, 860)
+        val below = Rect(500, 865, 1240, 925)
+        gate.reconcile(verdicts(region("こんにち", bounds = top)), 0, 200)
+        val topFrag = box("こんにち")
+        gate.reconcile(verdicts(region("こんにちは、旅の", topFrag, bounds = top)), 1000, 1200)
+        // The reveal reaches a split-off line 2 whose region still displays
+        // the PREVIOUS message's line 2: deferred with the top — and the
+        // dead line-2 box is erased rather than held.
+        val staleLine2 = box("古い二行目のメッセージ")
+        val out = gate.reconcile(
+            verdicts(
+                region("こんにちは、旅の人よ、聞け", topFrag, bounds = top),
+                region("つづきの新しい二行目", staleLine2, bounds = below),
+            ),
+            1500, 1700,
+        )
+        assertTrue(out.toTranslate.isEmpty())
+        assertEquals(
+            "same-chain fragment stays, dead line-2 does not",
+            listOf(topFrag), out.heldBoxes,
+        )
+        assertEquals(listOf(staleLine2), out.dropNow)
+    }
+
+    @Test
+    fun viewHold_keepsDisplayedBox_noDrop() {
+        val gate = TypewriterGate()
+        gate.reconcile(verdicts(region("Inventory Item List Warp")), 0, 300, lang = "en")
+        // A split/occluded SHORT read of the known text with its box still
+        // displayed: view-hold — the box shows the right translation and
+        // must stay up.
+        val shown = box("Inventory Item List Warp")
+        val out = gate.reconcile(verdicts(region("Inventory Item", shown)), 1000, 1300, lang = "en")
+        assertTrue(out.toTranslate.isEmpty())
+        assertEquals(listOf(shown), out.heldBoxes)
+        assertTrue(out.dropNow.isEmpty())
+    }
+
     // ── Origin-corner anchoring ───────────────────────────────────────────
 
     @Test
@@ -1052,5 +1122,35 @@ class TypewriterGateTest {
             assertTrue(out.toTranslate.isEmpty())
             assertNotNull(out.nextDeadlineMs)
         }
+    }
+
+    // ── Slanted reads: the origin corner is the ORIENTED corner ─────────
+
+    @Test
+    fun startCorner_slantedRead_resolvesTheOrientedCorner() {
+        // 300×48 strip at −20°, AABB centered (200, 150). Char #1 renders at
+        // the oriented top-left rotated about the center — cos(−20)=0.9397,
+        // sin(−20)=−0.342: (200 − 150·0.9397 − 24·0.342, 150 + 150·0.342 −
+        // 24·0.9397) ≈ (51, 179) — nowhere near the AABB's (51, 76).
+        val bounds = Rect(51, 76, 349, 224)
+        val (x, y) = TypewriterGate.startCorner(
+            bounds, TextOrientation.HORIZONTAL, rtl = false,
+            angleDeg = -20f, orientedW = 300f, orientedH = 48f,
+        )
+        assertEquals(51.0, x.toDouble(), 2.0)
+        assertEquals(179.0, y.toDouble(), 2.0)
+        // RTL starts at the oriented top-RIGHT — inside the AABB (333, 76),
+        // not the AABB corner (349, 76).
+        val (rx, ry) = TypewriterGate.startCorner(
+            bounds, TextOrientation.HORIZONTAL, rtl = true,
+            angleDeg = -20f, orientedW = 300f, orientedH = 48f,
+        )
+        assertEquals(333.0, rx.toDouble(), 2.0)
+        assertEquals(76.0, ry.toDouble(), 3.0)
+        // Upright reads keep the plain AABB corner bit-for-bit.
+        assertEquals(
+            bounds.left to bounds.top,
+            TypewriterGate.startCorner(bounds, TextOrientation.HORIZONTAL, rtl = false),
+        )
     }
 }

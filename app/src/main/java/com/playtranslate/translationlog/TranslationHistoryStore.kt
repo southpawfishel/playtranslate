@@ -177,19 +177,22 @@ object TranslationHistoryStore {
     }
 
     /** Supersession (typewriter growth / punctuation completion): the
-     *  fuller read overwrites the prior row in place. */
+     *  fuller read overwrites the prior row in place. Deliberately does NOT
+     *  touch at_ms — every Replace shape is a fuller read of the SAME
+     *  sentence, so the row keeps its first-appearance stamp instead of
+     *  sliding forward with each growth read. The Anki flow anchors the
+     *  game-audio trim seed on at_ms, and first-appearance is the closest
+     *  stamp to the voice line. */
     suspend fun update(
         ctx: Context,
         rowId: Long,
         sourceText: String,
         translation: String?,
-        atMs: Long,
         normKey: String,
     ): Unit = withContext(dispatcher) {
         openDb(ctx).update("entries", ContentValues().apply {
             put("source_text", sourceText)
             put("translation", translation)
-            put("at_ms", atMs)
             put("norm_key", normKey)
         }, "id = ?", arrayOf(rowId.toString()))
         _revision.value++
@@ -222,6 +225,62 @@ object TranslationHistoryStore {
         }
         if (affected > 0) _revision.value++
         affected
+    }
+
+    /** Outcome of [attachCaptureTranslation] — see its contract. */
+    enum class CaptureAttachOutcome { ATTACHED, ALREADY, NONE }
+
+    /**
+     * Idempotent, ATTACH-ONLY late fill for a DEFERRED capture's completion,
+     * scoped to the capture's own [sessionId]. One store hop decides
+     * everything (and the single-thread dispatcher orders it against any
+     * concurrent completion of the same capture):
+     *  1. a translation-less (session, key, pair) row exists → fill the
+     *     newest one → [CaptureAttachOutcome.ATTACHED];
+     *  2. a (session, key, pair) row exists but is already translated →
+     *     [CaptureAttachOutcome.ALREADY] — a repeat completion (second
+     *     surface, stash-reshow rebind, retry) is a no-op;
+     *  3. no row at all → [CaptureAttachOutcome.NONE], and NOTHING is
+     *     written. Deliberately no insert fallback: the rows a completion
+     *     may fill are exactly the ones recorded at capture time — if the
+     *     user cleared History (or the FIFO pruned them) since, the reveal
+     *     must not resurrect pre-clear text, and a capture made while
+     *     History was disabled has no rows and stays unrecorded even if the
+     *     pref was enabled before the reveal.
+     * Session-scoped on purpose, unlike [attachTranslationByKey]: the null
+     * rows were written under this session, and another session's twin rows
+     * must never receive this capture's translation.
+     */
+    suspend fun attachCaptureTranslation(
+        ctx: Context,
+        sessionId: String,
+        normKey: String,
+        translation: String,
+        sourceLang: String,
+        targetLang: String,
+        backendDisplayName: String?,
+    ): CaptureAttachOutcome = withContext(dispatcher) {
+        val database = openDb(ctx)
+        database.execSQL(
+            "UPDATE entries SET translation = ?, backend = COALESCE(?, backend) WHERE id = (" +
+                "SELECT id FROM entries WHERE session_id = ? AND norm_key = ? AND " +
+                "source_lang = ? AND target_lang = ? AND " +
+                "(translation IS NULL OR translation = '') ORDER BY id DESC LIMIT 1)",
+            arrayOf(translation, backendDisplayName, sessionId, normKey, sourceLang, targetLang),
+        )
+        val affected = database.rawQuery("SELECT changes()", null).use { c ->
+            c.moveToFirst(); c.getInt(0)
+        }
+        if (affected > 0) {
+            _revision.value++
+            return@withContext CaptureAttachOutcome.ATTACHED
+        }
+        val exists = database.rawQuery(
+            "SELECT 1 FROM entries WHERE session_id = ? AND norm_key = ? AND " +
+                "source_lang = ? AND target_lang = ? LIMIT 1",
+            arrayOf(sessionId, normKey, sourceLang, targetLang),
+        ).use { it.moveToFirst() }
+        if (exists) CaptureAttachOutcome.ALREADY else CaptureAttachOutcome.NONE
     }
 
     /** Fill EXACTLY [id] with a translation produced after the fact (History

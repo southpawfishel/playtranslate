@@ -113,7 +113,6 @@
 
     <string name="onboarding_notif_row_status_sub">Một chỉ báo lặng lẽ cho biết <xliff:g id="app_name" example="PlayTranslate">PlayTranslate</xliff:g> đang chạy</string>
 
-
     <string name="onboarding_a11y_hint">Tìm <b><xliff:g id="app_name" example="PlayTranslate">PlayTranslate</xliff:g></b></string>
 
     <string name="onboarding_a11y_title">Hiển thị trên các ứng dụng khác</string>
@@ -133,7 +132,6 @@
     <string name="onboarding_a11y_row_lookup_title">Tra cứu từ</string>
 
     <string name="onboarding_a11y_row_lookup_sub">Nhận định nghĩa tức thì cho các từ trên màn hình</string>
-
 
     <string name="btn_grant_permission">Cấp quyền</string>
 
@@ -163,9 +161,10 @@
 
     <string name="word_detail_common">Thông dụng</string>
 
+    <string name="card_words_in_sentence">Từ trong câu</string>
+
     <string name="word_anki_in_decks"><xliff:g id="count" example="3">%1$d</xliff:g> bộ thẻ Anki</string>
     <string name="word_anki_deck_badge_cd">Đã có trong Anki: <xliff:g id="label" example="Core 2k">%1$s</xliff:g></string>
-
 
     <string name="word_detail_numbered_definition"><xliff:g id="number" example="1">%1$d</xliff:g>. <xliff:g id="definition" example="to eat">%2$s</xliff:g></string>
 
@@ -225,6 +224,8 @@
     <string name="lang_search_no_results">Không có kết quả</string>
 
     <string name="lang_section_suggested">Đề xuất</string>
+
+    <string name="lang_pick_any">Mọi ngôn ngữ</string>
 
     <string name="lang_section_all">Tất cả</string>
 
@@ -371,8 +372,6 @@
 
     <string name="capture_lifecycle_state_off">Tắt</string>
 
-
-
     <string name="capture_lifecycle_on_subtitle">Đã cho phép chụp màn hình</string>
 
     <string name="capture_lifecycle_off_subtitle">Cho phép chụp màn hình</string>
@@ -458,7 +457,6 @@
 
     <string name="anki_not_installed_get">Tải <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g></string>
 
-
     <string name="anki_permission_rationale_title">Cần quyền <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g></string>
 
     <string name="anki_permission_rationale_message">Để thêm thẻ ghi nhớ vào <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>, <xliff:g id="app_name" example="PlayTranslate">PlayTranslate</xliff:g> cần quyền truy cập <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>.\n\nNhấn Tiếp tục để cấp quyền này.</string>
@@ -471,7 +469,13 @@
 
     <string name="anki_added_no_audio">Đã thêm vào <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> (không có âm thanh)</string>
 
-    <string name="anki_added_success">Đã thêm vào <xliff:g id="brand_anki" example="Anki">Anki</xliff:g></string>
+    <string name="anki_added_no_screenshot">Đã thêm vào <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> (không có ảnh chụp màn hình)</string>
+
+    <string name="anki_added_no_screenshot_or_audio">Đã thêm vào <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> (không có ảnh chụp màn hình và âm thanh)</string>
+
+    <string name="anki_added_sentence_success">Đã thêm thẻ câu vào <xliff:g id="brand_anki" example="Anki">Anki</xliff:g></string>
+
+    <string name="anki_added_word_success">Đã thêm thẻ từ vựng vào <xliff:g id="brand_anki" example="Anki">Anki</xliff:g></string>
 
     <string name="anki_adding_in_progress">Đang thêm vào <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>…</string>
 
@@ -535,6 +539,8 @@
 
     <string name="audio_source_game_enable_hint">Chưa ghi âm — hãy bật để ghi lại âm thanh trò chơi cho các thẻ sau này</string>
 
+    <string name="game_audio_zoom_hint">Chụm hai ngón để xem nhiều hoặc ít âm thanh hơn</string>
+
     <string name="game_audio_trim_duration">Đã chọn <xliff:g id="seconds" example="2.4">%1$s</xliff:g> giây · Đã ghi <xliff:g id="total_seconds" example="147">%2$s</xliff:g> giây</string>
 
     <string name="anki_game_audio_cell_untrimmed">Cắt khi lưu</string>
@@ -565,7 +571,9 @@
 
     <string name="anki_field_mapping_unconfigured">Hãy cấu hình các trường cho loại thẻ này trước khi gửi</string>
 
-    <string name="anki_sort_field_empty">Hãy ánh xạ một giá trị cho “<xliff:g id="sort_field_name" example="Expression">%1$s</xliff:g>” — <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> dùng trường này để nhận diện ghi chú, và giá trị rỗng sẽ khiến thẻ bị từ chối do trùng lặp khi gửi.</string>
+    <string name="anki_first_field_unmapped">Hãy ánh xạ giá trị cho “<xliff:g id="field_name" example="Key">%1$s</xliff:g>” để <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> nhận diện ghi chú.</string>
+
+    <string name="anki_first_field_empty">“<xliff:g id="field_name" example="Key">%1$s</xliff:g>” đang trống trên thẻ này. <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> dùng trường đầu tiên để nhận diện ghi chú, nên trường này cần có giá trị trên mọi thẻ.</string>
 
     <string name="anki_models_unavailable">Không thể kết nối <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> để tra loại thẻ. Hãy thử lại sau giây lát.</string>
 
@@ -854,6 +862,8 @@
     <string name="bergamot_warmup_downloading_multi">Đang tải mô hình ngoại tuyến <xliff:g id="file_index" example="1">%1$d</xliff:g>/<xliff:g id="file_count" example="2">%2$d</xliff:g>… <xliff:g id="bytes_so_far" example="12 MB">%3$s</xliff:g> / <xliff:g id="bytes_total" example="50 MB">%4$s</xliff:g></string>
     <string name="bergamot_pair_unsupported">Không hỗ trợ cho cặp ngôn ngữ hiện tại</string>
 
+    <string name="bergamot_device_unsupported">Không hỗ trợ trên thiết bị này</string>
+
     <string name="offline_backend_downloaded_cd">Đã tải xuống</string>
     <string name="offline_backend_not_downloaded_cd">Chưa tải xuống</string>
     <string name="offline_backend_enabled_cd">Đã bật</string>
@@ -1017,7 +1027,6 @@
     <string name="llm_low_memory_title">Không đủ bộ nhớ trống</string>
 
     <string name="llm_low_memory_message"><xliff:g id="model_name" example="Qwen 2.5 1.5B">%1$s</xliff:g> cần khoảng <xliff:g id="needed_memory" example="4 GB">%2$s</xliff:g> bộ nhớ trống để chạy. Hiện chỉ còn <xliff:g id="free_memory" example="1.2 GB">%3$s</xliff:g> trống.\n\nHãy đóng các ứng dụng khác để giải phóng bộ nhớ, hoặc hủy nếu mô hình này không phù hợp với thiết bị của bạn.</string>
-
 
     <string name="llm_low_memory_start_anyway">Vẫn bắt đầu</string>
 
@@ -1475,6 +1484,10 @@
 
     <string name="yomitan_single_dict_subtitle">Định nghĩa lấy từ từ điển có độ ưu tiên cao nhất mà có kết quả; từ điển tích hợp sẵn là phương án dự phòng cuối cùng</string>
 
+    <string name="yomitan_styling_title">Kiểu hiển thị từ điển</string>
+
+    <string name="yomitan_styling_subtitle">Hiện định nghĩa theo bố cục và kiểu hiển thị riêng của từng từ điển. Chỉ áp dụng cho các từ điển được nhập từ giờ trở đi; tắt để luôn dùng văn bản thuần túy</string>
+
     <string name="yomitan_auto_update_label">Tự động cập nhật</string>
     <string name="yomitan_auto_update_subtitle">Tự động tải xuống và cài đặt các phiên bản mới của từ điển này</string>
 
@@ -1520,6 +1533,46 @@
 
     <string name="yomitan_accent_default_cd">Mặc định (màu chữ phụ đề)</string>
 
+    <string name="yomitan_source_language_label">Ngôn ngữ nguồn</string>
+
+    <string name="yomitan_check_updates_label">Kiểm tra bản cập nhật</string>
+
+    <string name="yomitan_update_checking_title">Đang kiểm tra bản cập nhật</string>
+
+    <string name="yomitan_update_available_title">Có bản cập nhật</string>
+
+    <string name="yomitan_update_available_message">Có thể cập nhật <xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> lên phiên bản <xliff:g id="revision" example="2026.02.05">%2$s</xliff:g>.</string>
+
+    <string name="yomitan_update_confirm">Cập nhật</string>
+
+    <string name="yomitan_update_repair_title">Cần tải lại</string>
+
+    <string name="yomitan_update_repair_message">Cần tải lại dữ liệu của <xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> để dùng được với phiên bản ứng dụng này.</string>
+
+    <string name="yomitan_update_redownload_confirm">Tải lại</string>
+
+    <string name="yomitan_update_none_title">Đã là mới nhất</string>
+
+    <string name="yomitan_update_none_message"><xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> đang ở phiên bản mới nhất.</string>
+
+    <string name="yomitan_update_check_failed_title">Không thể kiểm tra bản cập nhật</string>
+
+    <string name="yomitan_update_check_failed_message">Không kết nối được tới máy chủ cập nhật của từ điển. Hãy kiểm tra kết nối và thử lại.</string>
+
+    <string name="yomitan_update_busy_title">Chưa thể cập nhật lúc này</string>
+
+    <string name="yomitan_update_busy_message">Một phiên dịch thuật đang diễn ra. Hãy thử lại khi phiên đó kết thúc.</string>
+
+    <string name="yomitan_update_scan_active_message">Các bản cập nhật từ điển đang được kiểm tra trong nền. Hãy thử lại sau giây lát.</string>
+
+    <string name="yomitan_update_skipped_title">Chưa áp dụng bản cập nhật</string>
+
+    <string name="yomitan_update_skipped_message">Bản cập nhật đã tải xong nhưng không khớp với từ điển này nên không được cài đặt.</string>
+
+    <string name="yomitan_update_done_title">Đã cập nhật từ điển</string>
+
+    <string name="yomitan_update_done_message"><xliff:g id="title" example="Jitendex.org">%1$s</xliff:g> hiện đã ở phiên bản mới nhất.</string>
+
     <string name="settings_header_tools">Công cụ</string>
 
     <string name="settings_cell_dictionary">Từ điển</string>
@@ -1559,6 +1612,10 @@
     <string name="history_capture_image_toggle_title">Lưu ảnh chụp</string>
 
     <string name="history_capture_image_toggle_subtitle">Giữ một ảnh cho mỗi lần chụp bằng máy ảnh hoặc màn hình</string>
+
+    <string name="history_hide_translations_toggle_title">Ẩn bản dịch</string>
+
+    <string name="history_hide_translations_toggle_subtitle">Chỉ hiển thị văn bản đã chụp. Nhấn vào một dòng để xem bản dịch.</string>
 
     <string name="history_live_session_title">Phiên trực tiếp</string>
 
@@ -1668,7 +1725,6 @@
          SETTINGS — Text-to-Speech section
          ═══════════════════════════════════════════════════════════════ -->
 
-
     <string name="tts_voice_numbered">Giọng <xliff:g id="voice_index" example="3">%1$d</xliff:g></string>
 
     <string name="tts_voice_region_numbered"><xliff:g id="region" example="China">%1$s</xliff:g> <xliff:g id="region_index" example="2">%2$d</xliff:g></string>
@@ -1678,7 +1734,6 @@
     <string name="tts_voice_default_subtitle">Giọng nói mặc định của công cụ</string>
 
     <string name="tts_voice_needs_download">Cần tải xuống</string>
-
 
     <string name="tts_no_engine_row_subtitle">Không có công cụ chuyển văn bản thành giọng nói nào khả dụng. Nhấn để thêm một công cụ.</string>
 
@@ -1763,8 +1818,6 @@
     <string name="anki_deck_not_selected_subtitle">Chưa chọn</string>
 
 
-
-
     <!-- ═══════════════════════════════════════════════════════════════
          SETTINGS — Support section rows
          ═══════════════════════════════════════════════════════════════ -->
@@ -1795,6 +1848,7 @@
     <string name="settings_debug_log_pinhole">Ghi nhật ký số liệu pinhole của chế độ trực tiếp</string>
     <string name="settings_debug_save_ocr_seed">Lưu các bản chụp OCR làm seed</string>
     <string name="settings_debug_log_grouping">Ghi nhật ký quyết định nhóm OCR</string>
+    <string name="settings_debug_angle_gate">Ngưỡng góc kiểu cũ (10°)</string>
     <string name="settings_debug_log_trace">Ghi lại dấu vết nhật ký dịch</string>
     <string name="settings_debug_force_crash_title">Buộc gặp sự cố</string>
 

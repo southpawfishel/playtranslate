@@ -35,6 +35,24 @@ class OcrManager private constructor() {
      *  [PlayTranslateApplication] on start and from the SettingsRenderer toggle. */
     @Volatile var debugLogGroupingEnabled: Boolean = false
 
+    /** Debug override for the producer angle noise gate (degrees); null = the
+     *  compiled [com.playtranslate.ocr.core.OcrBox.ANGLE_NOISE_GATE_DEG].
+     *  The threshold-drop program's per-stage device validation forces the
+     *  target gate here, so the final drop only changes a default over
+     *  already-exercised code. */
+    @Volatile var debugAngleGateDeg: Float? = null
+
+    /** Mirrors [debugLogGroupingEnabled]'s wiring (boot + settings toggle).
+     *  The setter injects/clears the AngleProbe sink — `ocr.core` cannot read
+     *  Prefs itself, so the app layer owns the gate (same injection pattern as
+     *  `OcrModelManager.appContext`). */
+    var debugAngleProbeEnabled: Boolean = false
+        set(value) {
+            field = value
+            com.playtranslate.ocr.core.OrientedBoxGeometry.probeSink =
+                if (value) { msg -> android.util.Log.d("AngleProbe", msg) } else null
+        }
+
     /** Pushed from [com.playtranslate.PlayTranslateApplication] on start and from the
      *  "Use MangaOCR" settings toggle. Gates the optional manga-ocr refinement
      *  ([shouldRefineMangaOcr] adds the Japanese / arm64 / model-installed checks). */
@@ -98,7 +116,16 @@ class OcrManager private constructor() {
         val bounds: Rect,
         val confidence: Float = -1f,
         val text: String = "",
-        val lang: String = ""
+        val lang: String = "",
+        /** Slant in degrees (clockwise-positive); 0 = axis-aligned. */
+        val angleDeg: Float = 0f,
+        /** True (unrotated) dims of a slanted box, same coordinate space as
+         *  [bounds]; 0 when upright. The debug overlay draws the oriented
+         *  footprint from these — rotating the AABB instead would outline a
+         *  shape that exists nowhere in the pipeline (adversarial-review
+         *  finding). */
+        val orientedWidth: Float = 0f,
+        val orientedHeight: Float = 0f,
     )
 
     /** Bounding boxes at each OCR hierarchy level, for debug overlay. */
@@ -146,6 +173,13 @@ class OcrManager private constructor() {
         /** Recognition confidence 0..1 from the engine, or -1 when unknown.
          *  -1 means "no signal", never "low". */
         val confidence: Float = -1f,
+        /** Slant in degrees (clockwise-positive, `View.rotation` semantics);
+         *  0 = axis-aligned. Non-zero only for a genuinely slanted line. */
+        val angleDeg: Float = 0f,
+        /** True (unrotated) dims of the slanted rect; 0 when [angleDeg] == 0.
+         *  Carried alongside — not re-derivable from bounds+angle (45° singular). */
+        val orientedWidth: Float = 0f,
+        val orientedHeight: Float = 0f,
     )
 
     /**
@@ -160,6 +194,13 @@ class OcrManager private constructor() {
         val orientation: TextOrientation = TextOrientation.HORIZONTAL,
         val alignment: TextAlignment = TextAlignment.LEFT,
         val lines: List<LineBox> = emptyList(),
+        /** Slant in degrees (clockwise-positive); non-zero only for a standalone
+         *  rotated group, whose [bounds] is then exactly the slanted rect's AABB. */
+        val angleDeg: Float = 0f,
+        /** True (unrotated) dims of the slanted rect, original-bitmap px; 0 when
+         *  [angleDeg] == 0. Ride with the angle — not re-derivable downstream. */
+        val orientedWidth: Float = 0f,
+        val orientedHeight: Float = 0f,
     )
 
     data class OcrResult(
@@ -217,6 +258,8 @@ class OcrManager private constructor() {
             refineWithMangaOcr = shouldRefineMangaOcr(sourceLang),
             regionPreFilter = regionPreFilter,
             documentLayoutBias = documentLayoutBias,
+            angleNoiseGateDeg = debugAngleGateDeg
+                ?: com.playtranslate.ocr.core.OcrBox.ANGLE_NOISE_GATE_DEG,
         ) ?: return null
 
         val result = buildOcrResult(
@@ -257,6 +300,8 @@ class OcrManager private constructor() {
             darkBackgroundProvider = { sampleIsDarkBackground(bitmap) },
             logGrouping = debugLogGroupingEnabled,
             refineWithMangaOcr = shouldRefineMangaOcr(sourceLang),
+            angleNoiseGateDeg = debugAngleGateDeg
+                ?: com.playtranslate.ocr.core.OcrBox.ANGLE_NOISE_GATE_DEG,
         ) ?: return null
 
         return buildOcrLines(output.groups, output.scaleFactor).ifEmpty { null }
@@ -264,10 +309,17 @@ class OcrManager private constructor() {
 
     // ── Projection: LayoutGroup (engine-input coords) → app result types ─────
 
-    /** Divide a box by [sf] to map engine-input coords back to original-bitmap coords. */
+    /** Divide a box by [sf] to map engine-input coords back to original-bitmap
+     *  coords. angleDeg passes through UNdivided — scale-invariance holds only
+     *  because [sf] is uniform (OcrPipeline derives one factor from the width
+     *  ratio and applies it to both axes); an anisotropic preprocess would turn
+     *  the slant into a shear this projection cannot express. */
     private fun scaleRect(r: Rect, sf: Float): Rect =
         if (sf == 1f) r
         else Rect((r.left / sf).toInt(), (r.top / sf).toInt(), (r.right / sf).toInt(), (r.bottom / sf).toInt())
+
+    /** [scaleRect]'s scalar twin for the oriented dims. */
+    private fun scaleDim(v: Float, sf: Float): Float = if (sf == 1f || v == 0f) v else v / sf
 
     private fun buildOcrResult(
         groups: List<LayoutGroup>,
@@ -283,6 +335,12 @@ class OcrManager private constructor() {
                 orientation = group.orientation,
                 alignment = group.alignment,
                 lines = group.lines.map { line ->
+                    // Oriented dims are carried only WITH a slant: an upright
+                    // OcrBox holds its AABB dims there (upright() convention),
+                    // but the app-side carriers keep 0 so "angleDeg != 0" and
+                    // "oriented dims set" stay one condition, matching the
+                    // group tier.
+                    val slanted = line.box.angleDeg != 0f
                     LineBox(
                         text = line.text,
                         bounds = scaleRect(line.box.bounds, scaleFactor),
@@ -291,8 +349,14 @@ class OcrManager private constructor() {
                         symbols = line.chars.map { SymbolBox(it.text, scaleRect(it.box.bounds, scaleFactor), it.charOffset) },
                         orientation = line.orientation,
                         confidence = line.confidence,
+                        angleDeg = line.box.angleDeg,
+                        orientedWidth = if (slanted) scaleDim(line.box.orientedWidth, scaleFactor) else 0f,
+                        orientedHeight = if (slanted) scaleDim(line.box.orientedHeight, scaleFactor) else 0f,
                     )
                 },
+                angleDeg = group.angleDeg,
+                orientedWidth = scaleDim(group.orientedWidth, scaleFactor),
+                orientedHeight = scaleDim(group.orientedHeight, scaleFactor),
             )
         }
 
@@ -330,6 +394,11 @@ class OcrManager private constructor() {
                     groupText = group.text,
                     symbols = line.chars.map { SymbolBox(it.text, scaleRect(it.box.bounds, scaleFactor), it.charOffset) },
                     orientation = line.orientation,
+                    // Angle survives scaling; the dims are lengths and divide
+                    // like the box.
+                    angleDeg = line.box.angleDeg,
+                    orientedWidth = if (line.box.angleDeg != 0f) line.box.orientedWidth / scaleFactor else 0f,
+                    orientedHeight = if (line.box.angleDeg != 0f) line.box.orientedHeight / scaleFactor else 0f,
                 )
             }
         }
@@ -347,9 +416,17 @@ class OcrManager private constructor() {
         val elementBoxes = mutableListOf<DebugBox>()
         val groupBoxes = mutableListOf<DebugBox>()
         for (group in groups) {
-            groupBoxes += DebugBox(group.bounds)
+            groupBoxes += DebugBox(
+                group.bounds, angleDeg = group.angleDeg,
+                orientedWidth = group.orientedWidth, orientedHeight = group.orientedHeight,
+            )
             for (line in group.lines) {
-                lineBoxes += DebugBox(line.box.bounds, text = line.text)
+                val slanted = line.box.angleDeg != 0f
+                lineBoxes += DebugBox(
+                    line.box.bounds, text = line.text, angleDeg = line.box.angleDeg,
+                    orientedWidth = if (slanted) line.box.orientedWidth else 0f,
+                    orientedHeight = if (slanted) line.box.orientedHeight else 0f,
+                )
                 for (el in line.elements) elementBoxes += DebugBox(el.box.bounds, text = el.text)
             }
         }
@@ -405,7 +482,14 @@ class OcrManager private constructor() {
          */
         val symbols: List<SymbolBox> = emptyList(),
         /** Text orientation detected from ML Kit angle / bounding box geometry. */
-        val orientation: TextOrientation = TextOrientation.HORIZONTAL
+        val orientation: TextOrientation = TextOrientation.HORIZONTAL,
+        /** Slant in degrees (clockwise-positive, `View.rotation` semantics);
+         *  0 = upright. Oriented dims ride with it (0-when-upright) — drag
+         *  hit-testing un-rotates the finger into this frame. Any projection
+         *  of [bounds] to another space must project these dims too. */
+        val angleDeg: Float = 0f,
+        val orientedWidth: Float = 0f,
+        val orientedHeight: Float = 0f,
     )
 
     companion object {

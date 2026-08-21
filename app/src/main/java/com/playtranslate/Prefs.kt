@@ -12,6 +12,7 @@ import com.playtranslate.security.SecretCipher
 import com.playtranslate.security.SecretCodec
 import com.playtranslate.ui.AccentColor
 import com.playtranslate.ui.CaptureResultGeometry
+import com.playtranslate.ui.CardMode
 import com.playtranslate.ui.ThemeMode
 import org.json.JSONArray
 import org.json.JSONObject
@@ -585,6 +586,16 @@ class Prefs internal constructor(
         get() = sp.getBoolean(KEY_CAPTURE_IMAGE_HISTORY_ENABLED, false)
         set(v) = sp.edit { putBoolean(KEY_CAPTURE_IMAGE_HISTORY_ENABLED, v) }
 
+    /** Drop the translation line from the History LIST rows so only the
+     *  captured text shows, and copy the source alone when a row is
+     *  long-pressed — tapping through to the entry stays the way to see the
+     *  translation, and nothing about recording changes. Display-only, so
+     *  independent of [translationHistoryEnabled]: rows captured earlier
+     *  still render while recording is off. */
+    var historyHideTranslations: Boolean
+        get() = sp.getBoolean(KEY_HISTORY_HIDE_TRANSLATIONS, false)
+        set(v) = sp.edit { putBoolean(KEY_HISTORY_HIDE_TRANSLATIONS, v) }
+
     /** True when [openaiBaseUrl] points somewhere other than the canonical
      *  OpenAI endpoint (trailing-slash / whitespace insensitive). The single
      *  definition of "is this still real OpenAI?" — drives the model-list
@@ -663,9 +674,10 @@ class Prefs internal constructor(
 
     /**
      * The user-selected AnkiDroid note type id. `-1L` (the default) is a
-     * sentinel meaning "use the legacy PlayTranslate v004 model" — that
-     * path bypasses the per-field mapping system entirely. Any other
-     * value means the structured path looks up
+     * sentinel meaning "use the field-based PlayTranslate models"
+     * ([com.playtranslate.ui.PtModels] — Word or Sentence, chosen by
+     * send mode) — that path bypasses the per-field mapping system
+     * entirely. Any other value means the structured path looks up
      * [getAnkiFieldMapping] and writes per-field content sources.
      */
     var ankiModelId: Long
@@ -768,6 +780,19 @@ class Prefs internal constructor(
     var ankiSentenceAudioEnabled: Boolean
         get() = sp.getBoolean(KEY_ANKI_SENTENCE_AUDIO, true)
         set(v) = sp.edit { putBoolean(KEY_ANKI_SENTENCE_AUDIO, v) }
+
+    /** Which card shape (sentence vs word) new cards default to when both
+     *  are possible — the word review sheet's Sentence/Word toggle seeds
+     *  from this, and one-tap sends route by it when a real sentence
+     *  surrounds the word. Flipping the sheet's toggle writes it back.
+     *  See [ankiWordAudioEnabled] — same last-used-state-is-the-default
+     *  behavior; deliberately no Settings UI. Word-only contexts (no
+     *  meaningful sentence) ignore it and stay word. */
+    var ankiPreferredCardMode: CardMode
+        get() = sp.getString(KEY_ANKI_CARD_MODE, null)
+            ?.let { stored -> CardMode.entries.firstOrNull { it.name == stored } }
+            ?: CardMode.SENTENCE
+        set(v) = sp.edit { putString(KEY_ANKI_CARD_MODE, v.name) }
 
     /** Opt-in: keep a rolling recording of the game's audio (AudioPlaybackCapture
      *  on the MediaProjection session) so sentence cards can attach the real
@@ -1350,6 +1375,14 @@ class Prefs internal constructor(
         get() = sp.getBoolean(KEY_DEBUG_LOG_GROUPING, false)
         set(v) = sp.edit { putBoolean(KEY_DEBUG_LOG_GROUPING, v) }
 
+    /** Debug-only rollback: run OCR with the slant noise gate forced back to
+     *  [com.playtranslate.ocr.core.OcrBox.ANGLE_LEGACY_GATE_DEG] (the pre-drop
+     *  10°) instead of the current default — one toggle undoes the
+     *  threshold drop on-device. */
+    var debugAngleGateAtTarget: Boolean
+        get() = sp.getBoolean(KEY_DEBUG_ANGLE_GATE_TARGET, false)
+        set(v) = sp.edit { putBoolean(KEY_DEBUG_ANGLE_GATE_TARGET, v) }
+
     /** Debug-only: append every live-mode committed region set
      *  (post-TypewriterGate `toTranslate`) to a JSONL trace under
      *  external-files/log-traces/ — the offline feed for validating the
@@ -1520,6 +1553,7 @@ class Prefs internal constructor(
         const val KEY_ANKI_MODEL_NAME      = "anki_model_name"
         private const val KEY_ANKI_FIELD_MAPPINGS  = "anki_field_mappings"   // JSON
         private const val KEY_ANKI_WORD_AUDIO      = "anki_word_audio_enabled"
+        private const val KEY_ANKI_CARD_MODE       = "anki_default_card_mode"
         private const val KEY_ANKI_SENTENCE_AUDIO  = "anki_sentence_audio_enabled"
         private const val KEY_ANKI_GAME_AUDIO      = "anki_game_audio_enabled"
         private const val KEY_ANKI_AUDIO_MAPPING_MIGRATED = "anki_audio_mapping_migrated"
@@ -1560,6 +1594,7 @@ class Prefs internal constructor(
         private const val KEY_LLM_CONTEXT_ENABLED           = "llm_context_enabled"
         private const val KEY_TRANSLATION_HISTORY_ENABLED   = "translation_history_enabled"
         private const val KEY_CAPTURE_IMAGE_HISTORY_ENABLED = "capture_image_history_enabled"
+        private const val KEY_HISTORY_HIDE_TRANSLATIONS     = "history_hide_translations"
 
         /** Default selected model — chosen to match the first entry in
          *  the picker after filtering + sorting (newest alias by
@@ -1626,6 +1661,7 @@ class Prefs internal constructor(
         private const val KEY_DEBUG_LIVE_MODE                = "debug_live_mode"
         private const val KEY_DEBUG_SAVE_OCR_SEED            = "debug_save_ocr_seed"
         private const val KEY_DEBUG_LOG_GROUPING             = "debug_log_grouping"
+        private const val KEY_DEBUG_ANGLE_GATE_TARGET        = "debug_angle_gate_target"
         private const val KEY_DEBUG_LOG_TRACE                = "debug_log_trace"
         const val KEY_HOTKEY_TRANSLATION                   = "hotkey_translation"
         const val KEY_HOTKEY_FURIGANA                      = "hotkey_furigana"

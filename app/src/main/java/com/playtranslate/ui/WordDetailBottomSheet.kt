@@ -88,6 +88,7 @@ class WordDetailBottomSheet : DialogFragment() {
         private const val ARG_SCREENSHOT_PATH = "screenshot_path"
         private const val ARG_SENTENCE_ORIGINAL     = "sentence_original"
         private const val ARG_SENTENCE_TRANSLATION  = "sentence_translation"
+        private const val ARG_SENTENCE_PENDING      = "sentence_pending"
         private const val ARG_SENTENCE_WORDS        = "sentence_words"
         private const val ARG_SENTENCE_READINGS     = "sentence_readings"
         private const val ARG_SENTENCE_MEANINGS     = "sentence_meanings"
@@ -105,6 +106,7 @@ class WordDetailBottomSheet : DialogFragment() {
             sentenceTranslation: String? = null,
             sentenceWordResults: Map<String, Triple<String, String, Int>>? = null,
             embedded: Boolean = false,
+            sentencePending: com.playtranslate.model.PendingTranslation? = null,
         ) = WordDetailBottomSheet().apply {
                 arguments = Bundle().apply {
                     putString(ARG_WORD, word)
@@ -113,6 +115,11 @@ class WordDetailBottomSheet : DialogFragment() {
                     if (sentenceOriginal != null) {
                         putString(ARG_SENTENCE_ORIGINAL, sentenceOriginal)
                         putString(ARG_SENTENCE_TRANSLATION, sentenceTranslation ?: "")
+                        // Only meaningful alongside its own sentenceOriginal
+                        // (resolveAnkiTranslation's caller contract).
+                        if (sentencePending != null) {
+                            putSerializable(ARG_SENTENCE_PENDING, sentencePending)
+                        }
                         if (sentenceWordResults != null) {
                             putStringArray(ARG_SENTENCE_WORDS, sentenceWordResults.keys.toTypedArray())
                             putStringArray(ARG_SENTENCE_READINGS, sentenceWordResults.values.map { it.first }.toTypedArray())
@@ -143,6 +150,10 @@ class WordDetailBottomSheet : DialogFragment() {
         moreExamplesGroup = null
         moreExamplesBody = null
         bigHeadwordView = null
+        // Native WebView teardown — a dropped-but-undestroyed WebView keeps
+        // renderer resources and the context graph alive until GC.
+        styledImportedView?.destroy()
+        styledImportedView = null
         super.onDestroyView()
     }
 
@@ -512,6 +523,13 @@ class WordDetailBottomSheet : DialogFragment() {
             ?: args?.getString(ARG_SENTENCE_ORIGINAL)
         val sentenceTranslation = hostContext?.translation
             ?: args?.getString(ARG_SENTENCE_TRANSLATION)
+        // The pending rides whichever source supplied the sentence text —
+        // never crossed between them (it's only meaningful alongside its
+        // own result's original).
+        @Suppress("DEPRECATION")
+        val sentencePending = if (hostContext != null) hostContext.pending
+            else args?.getSerializable(ARG_SENTENCE_PENDING)
+                as? com.playtranslate.model.PendingTranslation
         // Build a WordsPayload only when both halves come from the
         // same atomic source (the host's SentenceContext, populated
         // from a single Settled emission). Args-only fallback has no
@@ -554,9 +572,11 @@ class WordDetailBottomSheet : DialogFragment() {
                     wordsPayload = sentenceWordsPayload,
                     screenshotPath = screenshotPath,
                     sourceLangId = sourceLangId,
+                    pendingTranslation = sentencePending,
                 )
             },
             resultOf = { it.first },
+            modeOf = { it.second },
             presentResult = { (result, mode) ->
                 handleOneTapWordResult(result, pill, mode)
             },
@@ -570,10 +590,7 @@ class WordDetailBottomSheet : DialogFragment() {
     ) {
         when (result) {
             is AnkiSendResult.Success -> {
-                val msgRes = if (result.audioDropped || result.wordAudioDropped)
-                    R.string.anki_added_no_audio
-                else
-                    R.string.anki_added_success
+                val msgRes = result.mediaShortfallRes() ?: ankiAddedSuccessRes(mode)
                 Toast.makeText(requireContext(), msgRes, Toast.LENGTH_SHORT).show()
                 pill.setLoading(false)
             }
@@ -581,7 +598,7 @@ class WordDetailBottomSheet : DialogFragment() {
                 val ctx = requireContext()
                 OverlayAlert.Builder(requireActivity())
                     .setTitle(getString(R.string.anki_send_failed_title))
-                    .setMessage(getString(result.messageRes))
+                    .setMessage(result.message ?: getString(result.messageRes))
                     .addButton(
                         getString(android.R.string.ok),
                         ctx.themeColor(R.attr.ptAccent),
@@ -622,6 +639,11 @@ class WordDetailBottomSheet : DialogFragment() {
             ?: args?.getString(ARG_SENTENCE_ORIGINAL)
         val sentenceTranslation = hostContext?.translation
             ?: args?.getString(ARG_SENTENCE_TRANSLATION)
+        // Pending rides its own text source — see the one-tap path above.
+        @Suppress("DEPRECATION")
+        val sentencePending = if (hostContext != null) hostContext.pending
+            else args?.getSerializable(ARG_SENTENCE_PENDING)
+                as? com.playtranslate.model.PendingTranslation
         val sentenceWordResults: Map<String, Triple<String, String, Int>>? =
             hostContext?.wordResults
                 ?: args?.getStringArray(ARG_SENTENCE_WORDS)?.let { words ->
@@ -645,7 +667,8 @@ class WordDetailBottomSheet : DialogFragment() {
             sentenceOriginal = sentenceOriginal,
             sentenceTranslation = sentenceTranslation,
             sentenceWordResults = sentenceWordResults,
-            sourceLangId = sourceLangId
+            sourceLangId = sourceLangId,
+            sentencePending = sentencePending,
         ).show(childFragmentManager, WordAnkiReviewSheet.TAG)
     }
 
@@ -783,30 +806,54 @@ class WordDetailBottomSheet : DialogFragment() {
 
         // Imported term-dictionary definitions lead, unnumbered and
         // unclamped, one labelled block per dictionary in the user's
-        // section order. Final text — never machine-translated.
+        // section order. Final text — never machine-translated. When the
+        // styled path is live (retained structured glossaries + toggle on),
+        // the whole block renders through the WebView component with each
+        // dictionary's own CSS; the native rows are the fallback the
+        // renderer degrades back to if its process dies.
         val importedGroups = primary.importedSenses
-        importedGroups.forEachIndexed { groupIdx, group ->
-            group.senses.forEachIndexed { defIdx, sense ->
-                if (groupIdx > 0 || defIdx > 0) {
-                    addInsetDivider(definitionsCard, indentPx = dpRes(R.dimen.pt_row_h_padding))
+        val styledData = fetchYomitanStyledData(
+            requireContext().applicationContext,
+            Prefs(requireContext()).sourceLangId.yomitanConsumingLang(),
+            importedGroups,
+        )
+        val importedContainer = android.widget.LinearLayout(requireContext()).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        definitionsCard.addView(
+            importedContainer,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        fun buildNativeImportedRows() {
+            importedGroups.forEachIndexed { groupIdx, group ->
+                group.senses.forEachIndexed { defIdx, sense ->
+                    if (groupIdx > 0 || defIdx > 0) {
+                        addInsetDivider(importedContainer, indentPx = dpRes(R.dimen.pt_row_h_padding))
+                    }
+                    addSenseRow(
+                        parent = importedContainer,
+                        posLabels = buildList {
+                            if (defIdx == 0) add(group.source)
+                            if (sense.pos.isNotBlank()) add(sense.pos)
+                        },
+                        imported = true,
+                        accentColor = group.accentColor,
+                        glossList = listOf(sense.definition),
+                        senseNumber = null,
+                        miscText = null,
+                        examples = emptyList(),
+                        exampleTranslations = null,
+                        senseIndex = -1,
+                        translationRegistry = null,
+                    )
                 }
-                addSenseRow(
-                    parent = definitionsCard,
-                    posLabels = buildList {
-                        if (defIdx == 0) add(group.source)
-                        if (sense.pos.isNotBlank()) add(sense.pos)
-                    },
-                    imported = true,
-                    accentColor = group.accentColor,
-                    glossList = listOf(sense.definition),
-                    senseNumber = null,
-                    miscText = null,
-                    examples = emptyList(),
-                    exampleTranslations = null,
-                    senseIndex = -1,
-                    translationRegistry = null,
-                )
             }
+        }
+        if (!addStyledImportedBlock(importedContainer, importedGroups, styledData, ::buildNativeImportedRows)) {
+            buildNativeImportedRows()
         }
         val hasImportedRows = importedGroups.any { it.senses.isNotEmpty() }
 
@@ -1822,6 +1869,83 @@ class WordDetailBottomSheet : DialogFragment() {
      * cleanly under its own column instead of inheriting the number's
      * hanging indent.
      */
+    /**
+     * Styled imported-definitions block: one [YomitanDefinitionsView]
+     * rendering every group with its dictionary's scoped CSS, sized by the
+     * page's height report. Returns false when the styled path shouldn't /
+     * can't run (no payload, no WebView) — the caller builds the native
+     * rows instead. [rebuildNative] is the render-process-death fallback:
+     * the container empties and the same native rows take the block's
+     * place.
+     */
+    /** The sheet's styled renderer instance, held so [onDestroyView] can
+     *  destroy() the native WebView (a rebuild via [addStyledImportedBlock]
+     *  destroys any predecessor the same way). */
+    private var styledImportedView: YomitanDefinitionsView? = null
+
+    private fun addStyledImportedBlock(
+        container: LinearLayout,
+        importedGroups: List<com.playtranslate.model.ImportedSenseGroup>,
+        styledData: YomitanStyledData?,
+        rebuildNative: () -> Unit,
+    ): Boolean {
+        if (styledData == null || styledData.structured.isEmpty()) return false
+        styledImportedView?.destroy()
+        styledImportedView = null
+        val ctx = requireContext()
+        val v = YomitanDefinitionsView(
+            ctx,
+            DefinitionsDocument.Tokens(
+                text = ctx.themeColor(R.attr.ptText),
+                textMuted = ctx.themeColor(R.attr.ptTextMuted),
+                textHint = ctx.themeColor(R.attr.ptTextHint),
+                accent = ctx.themeColor(R.attr.ptAccent),
+                panel = ctx.themeColor(R.attr.ptCard),
+                baseFontSizePx = 16.5f,
+            ),
+        )
+        if (!v.isUsable()) return false
+        val hPad = dpRes(R.dimen.pt_row_h_padding)
+        v.setPadding(hPad, dp(10), hPad, dp(10))
+        v.onContentHeight = { h ->
+            val lp = v.layoutParams ?: LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 1,
+            )
+            lp.height = h + v.paddingTop + v.paddingBottom
+            v.layoutParams = lp
+        }
+        v.onRendererGone = {
+            styledImportedView = null // destroy() already ran internally
+            container.removeAllViews()
+            rebuildNative()
+        }
+        styledImportedView = v
+        // 1px until the page reports: the sheet's content tree is built
+        // before its first layout pass, so the swap can run against a
+        // zero-width viewport — the page skips that report and the resize
+        // listener re-reports when the real width lands.
+        container.addView(
+            v,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1),
+        )
+        // Groups only — the sheet's pack senses, breakdown, and examples
+        // stay native. senses = empty keeps contentHtml's pack section out.
+        val doc = DefinitionsDocument.contentHtml(
+            WordDefinitionData(
+                word = "",
+                reading = null,
+                senses = emptyList(),
+                freqScore = 0,
+                isCommon = false,
+                importedGroups = importedGroups,
+            ),
+            styledData.structured,
+            localizePos = { it.joinToString(" · ") },
+        )
+        v.setContent(doc, styledData.dictStyles, styledData.sourceLanguage)
+        return true
+    }
+
     private fun addSenseRow(
         parent: LinearLayout,
         posLabels: List<String>,

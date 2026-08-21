@@ -3,14 +3,8 @@ package com.playtranslate.ui
 import android.content.Context
 import android.util.Log
 import com.playtranslate.Prefs
-import com.playtranslate.translation.ChineseScriptConverter
-import com.playtranslate.dictionary.DictionaryManager
+import com.playtranslate.language.isImportCurrent
 import com.playtranslate.model.FrequencyTag
-import com.playtranslate.model.headwordFor
-import com.playtranslate.language.DefinitionResolver
-import com.playtranslate.language.DefinitionResult
-import com.playtranslate.language.OfflineFallbackTranslators
-import com.playtranslate.language.TargetGlossDatabaseProvider
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -30,6 +24,14 @@ import kotlin.coroutines.coroutineContext
 data class WordEnrichment(
     val pitch: List<Int> = emptyList(),
     val frequencies: List<FrequencyTag> = emptyList(),
+    /** JMdict-style common-entry flag for the word's resolved entry; drives the
+     *  Common pill in the sentence card's word cells. */
+    val isCommon: Boolean = false,
+    /** Structured senses for the word, captured where the dictionary entries
+     *  are still in hand (the same [buildSenseDisplays] rows the lens shows).
+     *  Empty when the lookup produced no entry — consumers fall back to the
+     *  flattened meaning string. */
+    val senses: List<SenseDisplay> = emptyList(),
     // Serializable so the sentence Anki review can carry per-word enrichment as
     // an atomic intent/args snapshot instead of re-reading the global cache
     // fields (which can belong to a different sentence by render time).
@@ -98,6 +100,10 @@ object LastSentenceCache {
      *  sentence-mode Anki sends. Rides atomically with [wordResults] /
      *  [surfaceForms]. */
     var wordEnrichment: Map<String, WordEnrichment>? = null
+
+    /** The FULL-depth annotation the current sentence's words were projected
+     *  from. Rotates with the sentence like the word maps. */
+    var sentenceAnnotation: com.playtranslate.language.SentenceAnnotation? = null
         private set
 
     // ── In-flight tracking ───────────────────────────────────────────
@@ -112,12 +118,59 @@ object LastSentenceCache {
     data class TranslationOutcome(val text: String, val backendDisplayName: String?)
 
     /** Bundles the two halves of a word-lookup pass so they can be
-     *  written into the cache atomically. */
+     *  written into the cache atomically — and read back atomically via
+     *  [snapshotFor]. */
     data class WordsPayload(
         val results: Map<String, Triple<String, String, Int>>,
         val surfaces: Map<String, String>,
         val enrichment: Map<String, WordEnrichment>,
-    )
+        /** The annotation the words were projected FROM — the single
+         *  analysis the Anki renderers consume so card furigana, highlights,
+         *  and word rows can never disagree. Null on legacy/empty payloads. */
+        val annotation: com.playtranslate.language.SentenceAnnotation? = null,
+    ) {
+        /** True when this payload may be used WITHOUT re-derivation: its
+         *  annotation proves it describes [sentence] under the CURRENT
+         *  import generation. A supplier that can't prove freshness (no
+         *  annotation, wrong text, stale generation) sends the consumer
+         *  back through [awaitOrStartWordLookups], whose own gate refreshes
+         *  post-import — otherwise a pre-import snapshot pairs old-dict
+         *  rows with the send pipeline's freshly-annotated furigana on one
+         *  card. */
+        fun isTrustedFor(sentence: String): Boolean =
+            results.isNotEmpty() &&
+                annotation?.takeIf { it.text == sentence }?.isImportCurrent() == true
+    }
+
+    /**
+     * Locked, all-or-nothing snapshot of the word maps for [sentence]:
+     * results + surfaces + enrichment read in one critical section, or
+     * null when the cache belongs to another sentence or has no words
+     * yet. The returned maps are the published references — the cache
+     * swaps whole maps under [lock] and never mutates one after
+     * publication — so the payload stays internally consistent no
+     * matter how the global fields rotate afterwards.
+     *
+     * Use this instead of gated direct field reads whenever several
+     * word maps must AGREE with each other, e.g. building intent extras
+     * whose meaning slots are blanked against the enrichment shipped
+     * beside them ([meaningForTransport]) — a mid-build rotation across
+     * separate field reads could otherwise blank a meaning against
+     * senses that never cross.
+     */
+    fun snapshotFor(sentence: String): WordsPayload? = synchronized(lock) {
+        val results = wordResults ?: return null
+        if (original != sentence || results.isEmpty()) return null
+        // A stale-generation annotation is withheld (null), never served:
+        // consumers fall back to fresh annotation, so a Yomitan import
+        // mid-session can't leak pre-import readings onto a card. The maps
+        // still serve — their import staleness is bounded by the words
+        // cache-miss refresh in awaitOrStartWordLookups.
+        WordsPayload(
+            results, surfaceForms.orEmpty(), wordEnrichment.orEmpty(),
+            sentenceAnnotation?.takeIf { it.isImportCurrent() },
+        )
+    }
 
     fun clear() {
         synchronized(lock) {
@@ -127,6 +180,7 @@ object LastSentenceCache {
             wordResults = null
             surfaceForms = null
             wordEnrichment = null
+            sentenceAnnotation = null
             translationPending?.job?.cancel()
             wordsPending?.job?.cancel()
             translationPending = null
@@ -147,6 +201,7 @@ object LastSentenceCache {
         wordResults: Map<String, Triple<String, String, Int>>?,
         surfaceForms: Map<String, String>?,
         wordEnrichment: Map<String, WordEnrichment>?,
+        annotation: com.playtranslate.language.SentenceAnnotation? = null,
     ) {
         synchronized(lock) {
             if (this.original != original) {
@@ -158,6 +213,7 @@ object LastSentenceCache {
             this.wordResults = wordResults
             this.surfaceForms = surfaceForms
             this.wordEnrichment = wordEnrichment
+            this.sentenceAnnotation = annotation?.takeIf { it.text == original }
         }
     }
 
@@ -253,11 +309,21 @@ object LastSentenceCache {
                 Log.d(TAG, "joining in-flight words for '${sentence.preview()}'")
                 return@synchronized it.job
             }
-            wordResults?.let { cached ->
-                Log.d(TAG, "cache hit words for '${sentence.preview()}'")
-                return@synchronized CompletableDeferred(
-                    WordsPayload(cached, surfaceForms.orEmpty(), wordEnrichment.orEmpty())
-                )
+            // A stale-generation annotation makes the whole cached words
+            // pass a MISS, not a hit with old data: Yomitan imports change
+            // row content (imported senses, synthesized entries) as well as
+            // readings, and the pre-refactor behavior — every render
+            // re-looked-up, so imports applied instantly — must survive the
+            // cache. Null annotation (legacy write) stays a hit; only a
+            // present-but-outdated one forces the refresh.
+            val cachedAnnotation = sentenceAnnotation
+            if (cachedAnnotation == null || cachedAnnotation.isImportCurrent()) {
+                wordResults?.let { cached ->
+                    Log.d(TAG, "cache hit words for '${sentence.preview()}'")
+                    return@synchronized CompletableDeferred(
+                        WordsPayload(cached, surfaceForms.orEmpty(), wordEnrichment.orEmpty(), cachedAnnotation)
+                    )
+                }
             }
             Log.d(TAG, "starting words for '${sentence.preview()}'")
             val job = cacheScope.async {
@@ -274,6 +340,7 @@ object LastSentenceCache {
                         wordResults = payload.results
                         surfaceForms = payload.surfaces
                         wordEnrichment = payload.enrichment
+                        sentenceAnnotation = payload.annotation
                         Log.d(TAG, "cache write words for '${sentence.preview()}'")
                     } else {
                         Log.d(TAG, "stale-discard words for '${sentence.preview()}'")
@@ -317,6 +384,7 @@ object LastSentenceCache {
         wordResults = null
         surfaceForms = null
         wordEnrichment = null
+        sentenceAnnotation = null
         original = sentence
         Log.d(TAG, "cache cleared: '${prev?.preview()}' → '${sentence.preview()}'")
     }
@@ -360,94 +428,29 @@ object LastSentenceCache {
         val appCtx = context.applicationContext
         val prefs = Prefs(appCtx)
         val engine = com.playtranslate.language.SourceLanguageEngines.get(appCtx, prefs.sourceLangId)
-        val targetGlossDb = TargetGlossDatabaseProvider.get(appCtx, prefs.targetLang)
-        val resolver = DefinitionResolver(engine, targetGlossDb,
-            OfflineFallbackTranslators.forPair(engine.profile.translationCode, prefs.targetLang), prefs.targetLang,
-            OfflineFallbackTranslators.forTarget(prefs.targetLang),
-            ChineseScriptConverter.forTarget(prefs.targetLang, prefs.targetChineseVariant))
-        val tokenResults = engine.tokenize(sentence)
-        val results = linkedMapOf<String, Triple<String, String, Int>>()
-        val surfaces = linkedMapOf<String, String>()
-        val enrichment = linkedMapOf<String, WordEnrichment>()
-        for (tok in tokenResults) {
-            try {
-                val defResult = resolver.lookup(tok.lookupForm, tok.reading)
-                val response = defResult?.response
-                if (response != null && response.entries.isNotEmpty()) {
-                    val entry      = response.entries.first()
-                    // Wiktionary multi-POS lookups split into separate
-                    // entries; flatten so cached meanings include verb /
-                    // intj / etc. instead of dropping every non-primary
-                    // sense.
-                    val flatSenses = response.entries.flatMap { it.senses }
-                    // Pick the headword that matches what the user actually
-                    // saw — JMdict often groups variant kanji under one
-                    // entry (無下/無気, 出会う/出逢う) and the primary form
-                    // can differ from the surface in the source text. Try
-                    // surface first (catches the variant case directly),
-                    // then lookupForm (covers inflected surfaces that
-                    // canonicalize to a non-primary headword), then the
-                    // primary as the last-resort label.
-                    val primary    = entry.headwordFor(tok.surface)
-                        ?: entry.headwordFor(tok.lookupForm)
-                        ?: entry.headwords.firstOrNull()
-                    val displayWord = primary?.written ?: primary?.reading ?: tok.lookupForm
-                    val reading = primary?.reading?.takeIf { it != primary.written } ?: ""
-                    // Mirror the word panel's render cascade: target-driven
-                    // for non-EN Native hits, entry-driven (target→MT→source)
-                    // for everything else. Without this, sentence-mode word
-                    // rows showed raw English to non-EN users whenever the
-                    // drag-lookup cache missed and this path repopulated it.
-                    val nativeTargetSenses = (defResult as? DefinitionResult.Native)
-                        ?.targetSenses?.sortedBy { it.senseOrd }
-                        ?.takeIf { it.isNotEmpty() }
-                    val isTargetDriven = prefs.targetLang != "en" && nativeTargetSenses != null
-                    // Imported term-dictionary lines lead, in the shared
-                    // flat-card format (one per line, source in parens,
-                    // continuous numbering with the pack lines below).
-                    val importedLines = importedFlatLines(entry.importedSenses)
-                    val packLines = if (isTargetDriven) {
-                        nativeTargetSenses.map { it.glosses.joinToString("; ") }
-                    } else {
-                        val targetByOrd = (defResult as? DefinitionResult.Native)
-                            ?.targetSenses?.associateBy { it.senseOrd }
-                        // Native no longer carries per-sense MT fallback —
-                        // it always renders target-driven, so reaching this
-                        // entry-driven branch with Native is unreachable in
-                        // practice (target=en + Native isn't returned by
-                        // DefinitionResolver).
-                        val mtDefs = when (defResult) {
-                            is DefinitionResult.MachineTranslated -> defResult.translatedDefinitions
-                            is DefinitionResult.EnglishFallback -> defResult.translatedDefinitions
-                            else -> null
-                        }
-                        flatSenses.mapIndexed { i, sense ->
-                            targetByOrd?.get(i)?.glosses?.joinToString("; ")
-                                ?: mtDefs?.getOrNull(i)?.takeIf { it.isNotBlank() }
-                                ?: sense.targetDefinitions.joinToString("; ")
-                        }
-                    }
-                    val rawLines = importedLines + packLines.filter { it.isNotEmpty() }
-                    val meaning = (
-                        if (rawLines.size > 1) rawLines.mapIndexed { i, l -> "${i + 1}. $l" }
-                        else rawLines
-                        ).joinToString("\n")
-                    if (meaning.isNotEmpty()) {
-                        results[displayWord] = Triple(reading, meaning, entry.freqScore)
-                        // primary is the headword we labelled the row with —
-                        // its pitch/frequencies are what the sentence card's
-                        // target-word fields want.
-                        enrichment[displayWord] = WordEnrichment(
-                            primary?.pitch.orEmpty(), primary?.frequencies.orEmpty(),
-                        )
-                        if (tok.surface != displayWord) {
-                            surfaces[displayWord] = tok.surface
-                        }
-                    }
-                }
-            } catch (_: Exception) {}
-        }
-        WordsPayload(results, surfaces, enrichment)
+        // ONE analysis (readings-only resolution) + ONE senses-bearing lookup
+        // per word, through the SAME row core the result screen uses
+        // (resolveWordRows) — the legacy maps are projections of those rows,
+        // so the Anki words table and the on-screen words panel can never
+        // disagree on content OR policy again. Row hydration reuses each
+        // span's own lookup hint, so a row can never land on a different
+        // entry than the annotation resolved.
+        val annotation = engine.annotate(sentence)
+        val tokens = annotation.spans
+            .filter { it.lookupForm != null }
+            .map {
+                com.playtranslate.language.TokenSpan(
+                    it.surface, it.lookupForm!!, it.lookupHint, it.inflections,
+                )
+            }
+        val lookupCtx = WordLookupContext(engine, prefs.targetLang, prefs.targetChineseVariant)
+        val data = resolveWordRows(appCtx, lookupCtx, tokens)
+        WordsPayload(
+            results = data.rows.toLegacyMap(),
+            surfaces = data.surfaces,
+            enrichment = data.rows.toEnrichmentMap(),
+            annotation = annotation,
+        )
     }
 
     private fun String.preview(): String =

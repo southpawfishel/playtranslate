@@ -111,7 +111,7 @@ class MangaOcrRefinerTest {
 
     @Test
     fun `an identical reading keeps the group instance and its real boxes`() = runBlocking {
-        val baseChars = synthesizeEvenCharBoxes("い", Rect(0, 0, 40, 40), vertical = true)
+        val baseChars = synthesizeEvenCharBoxes("い", OcrBox.upright(Rect(0, 0, 40, 40)), vertical = true)
         val base = line("い", 0, true).copy(chars = baseChars)
         val g = group(listOf(base), vertical = true)
         val fake = FakeReader(mapOf(0 to "い"))
@@ -160,7 +160,9 @@ class MangaOcrRefinerTest {
     }
 
     @Test
-    fun `a group with slanted text is ineligible`() = runBlocking {
+    fun `a line whose slant disagrees with its group past the cap is ineligible`() = runBlocking {
+        // Line at 45°, group at 0 — the crop (framed by the group's angle)
+        // would misframe the line, so the group is skipped.
         val slanted = RecognizedLine(
             text = "あい",
             box = OcrBox(Rect(0, 0, 40, 40), 40f, 40f, angleDeg = 45f),
@@ -171,6 +173,79 @@ class MangaOcrRefinerTest {
 
         assertSame(g, MangaOcrRefiner.refineWith(fake, listOf(g), bitmap, "ja").groups.single())
         assertEquals(0, fake.calls)
+    }
+
+    @Test
+    fun `an unmeasured line does not disqualify its slanted group`() = runBlocking {
+        // The shell admits producer-withheld angles into slanted groups by
+        // position; the eligibility gate must not read their placeholder 0 as
+        // a disagreement (the excursion gate bounds their true residual under
+        // the crop's tolerance).
+        val slanted = RecognizedLine(
+            text = "いたい",
+            box = OcrBox(Rect(10, 10, 120, 80), 100f, 40f, angleDeg = -20f),
+            orientation = TextOrientation.HORIZONTAL,
+        )
+        val short = RecognizedLine(
+            text = "よ",
+            box = OcrBox.upright(Rect(120, 70, 150, 100)).copy(angleUnmeasured = true),
+            orientation = TextOrientation.HORIZONTAL,
+        )
+        val g = LayoutGroup(
+            "いたいよ", listOf(slanted, short), Rect(10, 10, 150, 100),
+            TextOrientation.HORIZONTAL, TextAlignment.LEFT,
+            angleDeg = -20f, orientedWidth = 130f, orientedHeight = 50f,
+        )
+        var calls = 0
+        val fake = MangaOcrRefiner.BlockReader { _, _, _ -> calls++; null }
+        MangaOcrRefiner.refineWith(fake, listOf(g), bitmap, "ja")
+        assertEquals("group with an unmeasured line must stay eligible", 1, calls)
+    }
+
+    @Test
+    fun `a consistently slanted group is eligible and hands the reader its oriented box`() = runBlocking {
+        val slanted = RecognizedLine(
+            text = "いたい",
+            box = OcrBox(Rect(10, 10, 120, 80), 100f, 40f, angleDeg = -20f),
+            orientation = TextOrientation.HORIZONTAL,
+        )
+        val g = LayoutGroup(
+            "いたい", listOf(slanted), Rect(10, 10, 120, 80),
+            TextOrientation.HORIZONTAL, TextAlignment.LEFT,
+            angleDeg = -20f, orientedWidth = 100f, orientedHeight = 40f,
+        )
+        var seenBox: OcrBox? = null
+        val fake = MangaOcrRefiner.BlockReader { _, region, _ ->
+            seenBox = region.box
+            null // decline the read — eligibility + region shape is the assertion
+        }
+        MangaOcrRefiner.refineWith(fake, listOf(g), bitmap, "ja")
+        assertEquals(-20f, seenBox!!.angleDeg, 0f)
+        assertEquals(100f, seenBox!!.orientedWidth, 0f)
+        assertEquals(40f, seenBox!!.orientedHeight, 0f)
+    }
+
+    @Test
+    fun `deskewAffine maps the oriented corner to the destination origin at every test angle`() {
+        for (angle in listOf(0f, 25f, -25f, 30f, -30f)) {
+            val box = OcrBox(Rect(51, 76, 349, 224), 300f, 48f, angle)
+            val m = com.playtranslate.ocr.mangaocr.deskewAffine(box)
+            val rad = Math.toRadians(angle.toDouble())
+            val c = Math.cos(rad).toFloat()
+            val s = Math.sin(rad).toFloat()
+            val cx = box.bounds.exactCenterX()
+            val cy = box.bounds.exactCenterY()
+            // The oriented rect's top-left corner in screen space (clockwise-
+            // positive y-down rotation about the center)...
+            val px = cx + (-150f) * c - (-24f) * s
+            val py = cy + (-150f) * s + (-24f) * c
+            // ...must land on the destination origin; the center on the
+            // destination center. A sign error doubles the skew and misses.
+            assertEquals("corner x @ $angle", 0f, m[0] * px + m[1] * py + m[2], 0.01f)
+            assertEquals("corner y @ $angle", 0f, m[3] * px + m[4] * py + m[5], 0.01f)
+            assertEquals("center x @ $angle", 150f, m[0] * cx + m[1] * cy + m[2], 0.01f)
+            assertEquals("center y @ $angle", 24f, m[3] * cx + m[4] * cy + m[5], 0.01f)
+        }
     }
 
     @Test

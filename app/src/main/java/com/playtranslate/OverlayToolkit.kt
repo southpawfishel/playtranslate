@@ -6,8 +6,11 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.text.TextPaint
+import android.util.Log
 import com.playtranslate.language.HintTextAnnotation
 import com.playtranslate.language.SourceLanguageEngine
+import com.playtranslate.language.hintAnnotations
+import com.playtranslate.language.withFrontierHeld
 import com.playtranslate.language.TextAlignment
 import com.playtranslate.language.TextOrientation
 import com.playtranslate.model.TextSegments
@@ -49,6 +52,9 @@ object OverlayToolkit {
      *  [isEvolvingText]'s prefix match — ≈ the 85%-similarity gate GSM's
      *  evolving-text detector converged on. */
     private const val EVOLVING_PREFIX_MAX_DIFF = 0.15f
+
+    /** Tag for [Prefs.debugLiveMode]-gated live furigana annotation timing. */
+    private const val FURIGANA_TIMING_TAG = "LiveFurigana"
 
     /**
      * Is [new] a growing-prefix extension of [old] — the typewriter
@@ -224,11 +230,12 @@ object OverlayToolkit {
     suspend fun buildFuriganaBoxesByGroup(
         ocrResult: OcrManager.OcrResult,
         engine: SourceLanguageEngine,
-        furiganaPaint: TextPaint
+        furiganaPaint: TextPaint,
+        debugTiming: Boolean = false,
     ): List<FuriganaGroup> {
         val groups = mutableListOf<FuriganaGroup>()
         for (group in ocrResult.groups) {
-            val groupBoxes = buildFuriganaBoxesForGroup(group, engine, furiganaPaint)
+            val groupBoxes = buildFuriganaBoxesForGroup(group, engine, furiganaPaint, debugTiming)
             if (groupBoxes.isNotEmpty()) {
                 groups += FuriganaGroup(
                     groupText = group.text,
@@ -241,21 +248,68 @@ object OverlayToolkit {
     }
 
     /** Per-group variant of [buildFuriganaBoxesByGroup] — the annotation
-     *  machinery for exactly one OCR group. [ReconcilerLiveMode]'s furigana
-     *  presenter re-annotates only regions the reconciler says changed. */
+     *  machinery for exactly one OCR group. [FuriganaMode]'s reuse-or-rebuild
+     *  loop re-annotates only the groups whose text or bounds changed.
+     *  [debugTiming] ([Prefs.debugLiveMode] at the live call sites) logs
+     *  per-line annotation wall time — the live-cell measurement the
+     *  refactor's §6 gate needs, produced by a normal debug-flagged run. */
     suspend fun buildFuriganaBoxesForGroup(
         group: OcrManager.OcrGroup,
         engine: SourceLanguageEngine,
-        furiganaPaint: TextPaint
+        furiganaPaint: TextPaint,
+        debugTiming: Boolean = false,
+        /** Typewriter frontier-hold: this group's text is still being
+         *  revealed, so the LAST line's final span withholds its ruby
+         *  ([withFrontierHeld]) — the one word whose reading could revise
+         *  as glyphs arrive. */
+        holdFrontier: Boolean = false,
     ): List<TextBox> {
         val lines = group.lines
         if (lines.isEmpty()) return emptyList()
 
+        var timedLines = 0
+        var timedTotalMs = 0.0
         val groupBoxes = mutableListOf<TextBox>()
         for (line in lines) {
             val isVertical = line.orientation == com.playtranslate.language.TextOrientation.VERTICAL
             if (line.text.isEmpty()) continue
-            val annotations = engine.annotateForHintText(line.text)
+            // FULL-depth: live furigana shows the SAME dictionary-corrected
+            // readings the result sheet displays and TTS speaks (一泊 →
+            // いっぱく) — never the raw per-token readings. The engine's
+            // annotation LRU makes repeated lines (live re-OCRs the same
+            // text every cycle) near-free; Thor measurement of the cold-line
+            // cost (typewriter sequences included) rides [debugTiming] — if
+            // a budget problem appears, cap the re-glob candidate WINDOWS,
+            // never skip the pass (refactor doc §6: the fallback must stay
+            // reading-neutral).
+            val annotateStartNs = if (debugTiming) System.nanoTime() else 0L
+            val isLastLine = line === lines.last()
+            val annotations = engine.annotate(line.text)
+                .let { if (holdFrontier && isLastLine) it.withFrontierHeld() else it }
+                .hintAnnotations()
+            if (debugTiming) {
+                val ms = (System.nanoTime() - annotateStartNs) / 1e6
+                timedLines++
+                timedTotalMs += ms
+                // Warm LRU hits log ~0ms; cold lines carry the real cost —
+                // the duration distribution separates them without engine
+                // plumbing.
+                Log.i(
+                    FURIGANA_TIMING_TAG,
+                    "annotate %.1fms len=%d ann=%d '%s'".format(
+                        ms, line.text.length, annotations.size,
+                        line.text.take(12),
+                    ),
+                )
+            }
+            // Slanted line: the rotated sibling ([FuriganaSlantPlacement]) does
+            // its placement + merge in the deskewed frame; the upright
+            // arithmetic below stays byte-identical.
+            if (line.angleDeg != 0f) {
+                groupBoxes += FuriganaSlantPlacement.build(line, annotations, furiganaPaint)
+                continue
+            }
+
             val lineBoxes = mutableListOf<TextBox>()
 
             if (line.symbols.isNotEmpty()) {
@@ -363,6 +417,9 @@ object OverlayToolkit {
             groupBoxes += mergeOverlappingFurigana(lineBoxes, furiganaPaint, isVertical)
         }
 
+        if (debugTiming && timedLines > 0) {
+            Log.i(FURIGANA_TIMING_TAG, "group done: %d lines %.1fms total".format(timedLines, timedTotalMs))
+        }
         return groupBoxes
     }
 
@@ -768,6 +825,8 @@ object OverlayToolkit {
         orientations: List<TextOrientation> = emptyList(),
         alignments: List<TextAlignment> = emptyList(),
         confidences: List<Pair<Float, Float>> = emptyList(),
+        /** Per-box (angleDeg, orientedWidth, orientedHeight); zeros when upright. */
+        slants: List<Triple<Float, Float, Float>> = emptyList(),
     ): List<TextBox> {
         val colorScale = 4
         val colorRef = raw.scale(raw.width / colorScale, raw.height / colorScale, false)
@@ -782,8 +841,10 @@ object OverlayToolkit {
             val orient = orientations.getOrElse(idx) { TextOrientation.HORIZONTAL }
             val align = alignments.getOrElse(idx) { TextAlignment.LEFT }
             val (cMin, cMean) = confidences.getOrElse(idx) { -1f to -1f }
+            val (ang, ow, oh) = slants.getOrElse(idx) { Triple(0f, 0f, 0f) }
             TextBox("", rect, bg, tc, lineCounts.getOrElse(idx) { 1 },
                 sourceText = texts.getOrElse(idx) { "" }, orientation = orient, alignment = align,
+                angleDeg = ang, orientedWidth = ow, orientedHeight = oh,
                 sourceConfMin = cMin, sourceConfMean = cMean)
         }
     }

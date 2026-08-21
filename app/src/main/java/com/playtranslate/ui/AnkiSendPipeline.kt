@@ -2,6 +2,7 @@ package com.playtranslate.ui
 
 import android.content.Context
 import androidx.fragment.app.Fragment
+import com.playtranslate.R
 import com.playtranslate.audio.Attribution
 import com.playtranslate.audio.AudioRequest
 import com.playtranslate.audio.AudioSelection
@@ -71,9 +72,10 @@ data class SentenceSendInput(
 )
 
 /** Inputs needed to send a word card. The sheet pre-renders rich,
- *  curation-aware definition HTML in both [classDefinitionHtml] (for
- *  the legacy v004 back) and [inlineDefinitionHtml] (for the
- *  structured path). One-tap callers pass a flat fallback in both via
+ *  curation-aware definition HTML in both [defaultDefinitionHtml] (for
+ *  the default PlayTranslate model's Definition field) and
+ *  [inlineDefinitionHtml] (for the structured path). One-tap callers
+ *  pass a flat fallback in both via
  *  [WordAnkiHtmlBuilder.wrapFlatDefinitionHtml]. */
 data class WordSendInput(
     val word: String,
@@ -94,18 +96,24 @@ data class WordSendInput(
      *  [AudioSelection.Auto] (the default, and what one-tap sends) resolves
      *  the user's saved voice — see [SentenceSendInput.sentenceSelection]. */
     val wordSelection: AudioSelection = AudioSelection.Auto,
-    /** Definition body for the legacy v004 back. Built with
-     *  [classStyler] in the sheet (the back's CSS block supplies the
-     *  gl-* classes); one-tap passes the inline-styled flat fallback
-     *  (works either way — class refs without matching CSS just don't
-     *  bind, which is fine for the flat case). */
-    val classDefinitionHtml: String,
+    /** Definition body (senses only) for the default PlayTranslate
+     *  model's Definition field. Built with [classStyler] in the sheet
+     *  (the model CSS supplies the gl-* classes); one-tap passes the
+     *  inline-styled flat fallback (works either way — class refs
+     *  without matching CSS just don't bind, which is fine for the
+     *  flat case). */
+    val defaultDefinitionHtml: String,
+    /** Tatoeba "More examples" block — WITH its localized gl-section
+     *  header — for the default model's Examples field. Built with
+     *  [classStyler] in the sheet; empty for one-tap. */
+    val defaultExamplesHtml: String = "",
     /** Definition body for the structured (mapped) path's DEFINITION
      *  content source. Built with [inlineStyler] in the sheet; one-tap
      *  passes the same flat-fallback HTML. */
     val inlineDefinitionHtml: String,
     /** Tatoeba "more examples" block for the structured path's
-     *  EXAMPLE_SENTENCES content source. Empty for one-tap (no
+     *  EXAMPLE_SENTENCES content source — headerless (the receiving
+     *  field's template carries its own label). Empty for one-tap (no
      *  resolved entry → no Tatoeba lookup). */
     val inlineExamplesHtml: String = "",
 )
@@ -165,36 +173,77 @@ suspend fun Context.sendSentenceCard(
         if (all.isEmpty()) null else Attribution.creditBlock(all)
     }
     val result = try {
+        // Everything from here sits INSIDE the pin/audio cleanup scope: the
+        // annotation fetch is a suspend point that can throw or be
+        // cancelled, and the finally below must release the screenshot pin
+        // and delete ephemeral audio on EVERY post-pin failure path
+        // (adversarial-review finding — the fetch briefly lived above this
+        // try and could leak both).
         val cardData = input.toCardData()
+        // ONE analysis for the card: reuse the cached annotation when it
+        // still matches the (possibly edited) sentence text, else
+        // re-annotate the final text. snapshotFor only returns
+        // import-generation-CURRENT annotations, so a Yomitan install
+        // mid-session can never leak pre-import readings onto a card. The
+        // renderers draw this annotation — card furigana, highlights, and
+        // wrappers must describe the text actually being sent, and must
+        // match what the result screen displayed and TTS spoke.
+        val annotation = LastSentenceCache.snapshotFor(cardData.source)?.annotation
+            ?.takeIf { it.text == cardData.source }
+            ?: com.playtranslate.language.SourceLanguageEngines
+                .get(ctx.applicationContext, cardData.sourceLangId)
+                .annotate(cardData.source)
+        // Styled payload for the words table: fetched ONCE here so both
+        // the sheet path and one-tap (which funnel through this function)
+        // render imported senses as real structure on the card, with each
+        // dictionary's CSS scoped inline (Tier 2). Null (flat dicts,
+        // styling off) = today's flat rows.
+        val styledPayload = fetchStyledForSenses(
+            ctx.applicationContext,
+            cardData.sourceLangId.yomitanConsumingLang(),
+            cardData.words.flatMap { it.senses },
+        )
+        val structuredGlossaries = styledPayload?.structured.orEmpty()
+        val cardDictStyles = styledPayload?.dictStyles.orEmpty()
         ctx.dispatchSendToAnki(
             deckId = deckId,
             mode = CardMode.SENTENCE,
             screenshotPath = pinnedScreenshotPath,
             audioPath = audioFile?.absolutePath,
             wordAudioPaths = wordAudioFiles.mapValues { it.value.absolutePath },
-            legacyFront = {
-                SentenceAnkiHtmlBuilder.buildFrontHtml(
-                    input.original, input.words, input.selectedWords, input.sourceLangId,
-                )
-            },
-            legacyBack = { imageFilename, audioFilename, wordAudioFilenames ->
-                SentenceAnkiHtmlBuilder.buildBackHtml(
-                    input.original, input.translation, input.words,
-                    imageFilename, input.selectedWords, input.sourceLangId,
+            ptNote = { imageFilename, audioFilename, wordAudioFilenames ->
+                PtNoteBuilder.forSentence(
+                    cardData = cardData,
+                    annotation = annotation,
+                    imageFilename = imageFilename,
                     audioFilename = audioFilename,
                     wordAudioFilenames = wordAudioFilenames,
+                    // Aggregate credit (sentence + per-word) — the default
+                    // model has one AudioCredit field.
                     audioCredit = audioCredit,
+                    wordsSectionHeader = ctx.getString(R.string.card_words_in_sentence),
+                    commonLabel = ctx.getString(R.string.word_detail_common),
+                    localizePos = ctx::localizePos,
+                    renderMisc = ctx::renderMiscText,
+                    structuredGlossaries = structuredGlossaries,
+                    dictStyles = cardDictStyles,
                 )
             },
             structured = { imageFilename, audioFilename, wordAudioFilenames ->
                 AnkiCardOutputBuilder.forSentence(
                     cardData = cardData,
+                    annotation = annotation,
                     imageFilename = imageFilename,
                     examplesHtml = input.examplesHtml,
                     audioFilename = audioFilename,
                     wordAudioFilenames = wordAudioFilenames,
                     sentenceAudioCredit = sentenceCredit,
                     wordAudioCredit = wordCredit,
+                    commonLabel = ctx.getString(R.string.word_detail_common),
+                    localizePos = ctx::localizePos,
+                    renderMisc = ctx::renderMiscText,
+                    structuredGlossaries = structuredGlossaries,
+                    dictStyles = cardDictStyles,
                 )
             },
         )
@@ -250,21 +299,21 @@ suspend fun Context.sendWordCard(
             mode = CardMode.WORD,
             screenshotPath = pinnedScreenshotPath,
             audioPath = audioFile?.absolutePath,
-            legacyFront = { WordAnkiHtmlBuilder.buildFrontHtml(input.word) },
-            legacyBack = { imageFilename, audioFilename, _ ->
+            ptNote = { imageFilename, audioFilename, _ ->
                 // Word cards have no per-target-word audio — drop the
                 // third arg.
-                WordAnkiHtmlBuilder.buildBackHtml(
+                PtNoteBuilder.forWord(
                     word = input.word,
                     reading = input.reading,
                     pos = input.pos,
+                    definitionHtml = input.defaultDefinitionHtml,
+                    examplesHtml = input.defaultExamplesHtml,
                     freqScore = input.freqScore,
                     pitch = input.pitch,
                     frequencies = input.frequencies,
                     imageFilename = imageFilename,
                     audioFilename = audioFilename,
                     audioCredit = audioCredit,
-                    definitionHtml = input.classDefinitionHtml,
                 )
             },
             structured = { imageFilename, audioFilename, _ ->

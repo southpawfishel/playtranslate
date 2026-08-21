@@ -10,6 +10,7 @@ import com.playtranslate.language.SourceLanguageEngines
 import com.playtranslate.language.TokenSpan
 import com.playtranslate.model.FrequencyTag
 import com.playtranslate.model.OcrProvenance
+import com.playtranslate.model.PendingTranslation
 import com.playtranslate.model.ReadingRow
 import com.playtranslate.model.TextSegment
 import com.playtranslate.model.TextSegments
@@ -55,7 +56,14 @@ class TranslationResultViewModel : ViewModel() {
      *  write — see [writeLastSentenceCache]. Null while a lookup is in flight. */
     private var settledLookup: SettledLookup? = null
 
-    private data class SettledLookup(val text: String, val data: LookupData)
+    private data class SettledLookup(
+        val text: String,
+        val data: LookupData,
+        /** The analysis the tokens were projected from — forwarded into the
+         *  cache write so an Anki send finds a matching annotation without
+         *  re-annotating. */
+        val annotation: com.playtranslate.language.SentenceAnnotation? = null,
+    )
 
     // ── Dedup architecture (read this before changing displayResult) ────
     //
@@ -233,6 +241,10 @@ class TranslationResultViewModel : ViewModel() {
                         // so the "Scanned by …" row + gear hide and re-OCR (which would
                         // discard the edit) is disabled.
                         ocrProvenance = null,
+                        // The edit's own re-translate lands via updateTranslation — a
+                        // surviving pending would let a later reveal clobber it with
+                        // the OLD source's translation.
+                        pendingTranslation = null,
                     )
                 )
             }
@@ -258,6 +270,8 @@ class TranslationResultViewModel : ViewModel() {
                     cur.result.copy(
                         translatedText = translated,
                         backendDisplayName = backendDisplayName,
+                        // A caller-supplied translation supersedes a deferred one.
+                        pendingTranslation = null,
                     )
                 )
             }
@@ -283,6 +297,39 @@ class TranslationResultViewModel : ViewModel() {
         writeLastSentenceCache()
     }
 
+    /** Deferred-translation completion landing on the current Ready result:
+     *  patch translation + note + backend, clear the pending, and swap in the
+     *  freshly filled [onScreenBoxes] (null keeps the existing ones). Unlike
+     *  [updateTranslation] it carries the note and preserves the boxes; unlike
+     *  [displayResult] it never restarts word lookups — the source text is
+     *  unchanged, and a restart would flash the settled word list.
+     *
+     *  [expected] is the pending the async completion was LAUNCHED for, and
+     *  the guard is identity against it — not "some pending exists". A newer
+     *  deferred result (recapture, fresh lookup) carries a different pending;
+     *  a stale completion landing on it would show translation A for source B
+     *  and burn B's pending so B never completes. */
+    fun applyDeferredTranslation(
+        expected: PendingTranslation,
+        translated: String,
+        note: String?,
+        backendDisplayName: String?,
+        onScreenBoxes: OnScreenBoxes? = null,
+    ) {
+        val cur = _result.value as? ResultState.Ready ?: return
+        if (cur.result.pendingTranslation != expected) return
+        _result.value = ResultState.Ready(
+            cur.result.copy(
+                translatedText = translated,
+                note = note,
+                backendDisplayName = backendDisplayName,
+                pendingTranslation = null,
+            ),
+            onScreenBoxes ?: cur.onScreenBoxes,
+        )
+        writeLastSentenceCache()
+    }
+
     /**
      * Write [LastSentenceCache] once BOTH halves are known for the SAME source
      * text: a settled word lookup ([settledLookup]) and a Ready translation.
@@ -295,6 +342,12 @@ class TranslationResultViewModel : ViewModel() {
         val ready = _result.value as? ResultState.Ready ?: return
         val settled = settledLookup ?: return
         if (settled.text != ready.result.originalText) return
+        // A blank translation must never reach the cache: LastSentenceCache
+        // treats a cached "" as a HIT (awaitOrStartTranslation), which would
+        // poison every lazy Anki translation fill. Blank here means a deferred
+        // result (pendingTranslation) or an error-path updateTranslation("");
+        // the eventual real translation re-triggers this write.
+        if (ready.result.translatedText.isBlank()) return
         LastSentenceCache.setFromTranslationResult(
             original = ready.result.originalText,
             translation = ready.result.translatedText,
@@ -302,6 +355,7 @@ class TranslationResultViewModel : ViewModel() {
             wordResults = settled.data.rows.toLegacyMap(),
             surfaceForms = settled.data.surfaces,
             wordEnrichment = settled.data.rows.toEnrichmentMap(),
+            annotation = settled.annotation,
         )
     }
 
@@ -323,18 +377,19 @@ class TranslationResultViewModel : ViewModel() {
         _wordLookups.value = WordLookupsState.Loading
         lookupJob = viewModelScope.launch {
             try {
-                val data = performLookups(appCtx, text)
+                val (data, annotation) = performLookups(appCtx, text)
                 _wordLookups.value = WordLookupsState.Settled(
                     rows = data.rows,
                     tokenSpans = data.tokenSpans,
                     lookupToReading = data.lookupToReading,
+                    annotation = annotation,
                 )
                 // Pair the settled lookup with its source text and (re)write the
                 // cache. If the translation has already landed (Ready, same text),
                 // this completes the snapshot now; if not, the Ready transition
                 // will. writeLastSentenceCache no-ops until both agree, so a lookup
                 // that outran the translation never caches a null sentence.
-                settledLookup = SettledLookup(text, data)
+                settledLookup = SettledLookup(text, data, annotation)
                 writeLastSentenceCache()
             } catch (e: CancellationException) {
                 // Caller cancelled (e.g. new text arrived) — let the next
@@ -352,19 +407,30 @@ class TranslationResultViewModel : ViewModel() {
         }
     }
 
-    private suspend fun performLookups(appCtx: Context, text: String): LookupData {
-        // Snapshot source/target prefs ONCE, before tokenizing, so the whole
-        // lookup (tokenize + resolve) runs against one consistent language pair
-        // even if the user changes settings mid-flight (see [WordLookupContext]).
+    private suspend fun performLookups(
+        appCtx: Context,
+        text: String,
+    ): Pair<LookupData, com.playtranslate.language.SentenceAnnotation> {
+        // Snapshot source/target prefs ONCE, before analyzing, so the whole
+        // lookup runs against one consistent language pair even if the user
+        // changes settings mid-flight (see [WordLookupContext]).
         val prefs = Prefs(appCtx)
         val engine = SourceLanguageEngines.get(appCtx, prefs.sourceLangId)
         val context = WordLookupContext(engine, prefs.targetLang, prefs.targetChineseVariant)
-        val allTokens = withContext(Dispatchers.IO) { engine.tokenize(text) }
-        // Hand the per-occurrence tokens to the shared resolver; it owns the
-        // dedup → parallel-lookup → RowState pipeline (see [resolveWordRows]).
-        // tokenSpans round-trips back so the fragment can derive word spans
-        // against the displayed text.
-        return resolveWordRows(appCtx, context, allTokens)
+        // ONE analysis: the same FULL-depth annotation the furigana display
+        // renders — its spans project the per-occurrence tokens the shared
+        // resolver hydrates (dedup → parallel-lookup → RowState, see
+        // [resolveWordRows]); tokenSpans round-trips so the fragment can
+        // derive word spans against the displayed text.
+        val annotation = withContext(Dispatchers.IO) { engine.annotate(text) }
+        val allTokens = annotation.spans
+            .filter { it.lookupForm != null }
+            .map {
+                com.playtranslate.language.TokenSpan(
+                    it.surface, it.lookupForm!!, it.lookupHint, it.inflections,
+                )
+            }
+        return resolveWordRows(appCtx, context, allTokens) to annotation
     }
 }
 
@@ -433,6 +499,9 @@ sealed class WordLookupsState {
         val rows: List<RowState>,
         val tokenSpans: List<TokenSpan>,
         val lookupToReading: Map<String, String>,
+        /** The analysis the rows were projected from; rides into hand-built
+         *  one-tap WordsPayloads so isTrustedFor can prove freshness. */
+        val annotation: com.playtranslate.language.SentenceAnnotation? = null,
     ) : WordLookupsState()
 }
 
@@ -492,7 +561,9 @@ fun List<RowState>.toSurfaceMap(): Map<String, String> =
  *  process-global cache, to keep word→data aligned). Feeds the sentence-card
  *  pitch/frequency Anki fields via [WordEnrichment]. */
 fun List<RowState>.toEnrichmentMap(): Map<String, WordEnrichment> =
-    associate { it.displayWord to WordEnrichment(it.pitch, it.frequencies) }
+    associate {
+        it.displayWord to WordEnrichment(it.pitch, it.frequencies, it.isCommon, it.senses)
+    }
 
 /** The sole resolved word when [sourceText] is exactly one token
  *  (whitespace-insensitive), else null. Drives the single-word Anki

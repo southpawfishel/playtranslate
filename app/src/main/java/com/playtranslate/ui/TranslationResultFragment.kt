@@ -109,6 +109,17 @@ class TranslationResultFragment : Fragment() {
      */
     interface TranslationResultHost {
         fun getCaptureService(): CaptureService?
+
+        /** The bound Ready result carries a deferred translation
+         *  ([com.playtranslate.model.TranslationResult.pendingTranslation]) and a
+         *  consumer needs it NOW: the section was revealed, a bind landed while
+         *  it was visible, or the user asked for the on-screen boxes. The host
+         *  runs the translate + History attach on its own scope and lands the
+         *  outcome via [TranslationResultViewModel.applyDeferredTranslation].
+         *  With no service available right now the host no-ops — the pending
+         *  stays set and the next trigger retries. Must tolerate repeat calls
+         *  while a completion is already in flight. */
+        fun completeDeferredTranslation()
         fun onWordTapped(
             word: String,
             reading: String?,
@@ -298,6 +309,9 @@ class TranslationResultFragment : Fragment() {
     private fun currentSettledRows(): List<RowState>? =
         (vm.wordLookups.value as? WordLookupsState.Settled)?.rows
 
+    private fun currentSettledAnnotation(): com.playtranslate.language.SentenceAnnotation? =
+        (vm.wordLookups.value as? WordLookupsState.Settled)?.annotation
+
     private val host: TranslationResultHost?
         get() = activity as? TranslationResultHost
 
@@ -421,6 +435,10 @@ class TranslationResultFragment : Fragment() {
         }
         binder.onChooseLanguage = { isSource -> host?.onChangeLanguageRequested(isSource) }
         binder.setShowOnScreenAction { onShowOnScreenTapped() }
+        // This vertical page just reflows on an eye toggle (no re-layout work),
+        // but REVEALING the translation section on a deferred result must run
+        // the translation that was skipped while it was hidden.
+        binder.onSectionVisibilityChanged = { maybeRequestDeferredCompletion() }
         resultsContent.setOnScrollChangeListener(scrollListener)
         btnToggleWords.setOnClickListener {
             prefs.hideWordsSection = !prefs.hideWordsSection
@@ -565,6 +583,11 @@ class TranslationResultFragment : Fragment() {
                     if (scrollAnchor != null) restoreScrollAnchor(scrollAnchor)
                     else scrollToFreshResultStart()
                 }
+                // A deferred result bound while the section is visible (revealed
+                // on another surface — the pref is global and nothing listens
+                // for flips) must run its skipped translation now. No-op for
+                // results without a pending, so safe on every Ready render.
+                maybeRequestDeferredCompletion()
             }
         }
     }
@@ -679,10 +702,26 @@ class TranslationResultFragment : Fragment() {
             host?.hideResultBoxesOnScreen()
         } else {
             currentOnScreenBoxes?.let { host?.showResultBoxesOnScreen(it) }
+            // Boxes on a deferred result go up as skeletons — run the skipped
+            // translation; its completion swaps the filled boxes in.
+            maybeRequestDeferredCompletion(force = true)
         }
         // Ownership flipped synchronously (or the show was refused); the
         // refresh reads whichever reality landed.
         refreshShowOnScreen()
+    }
+
+    /** Deferred-translation trigger funnel (mirror of the over-game panel's
+     *  maybeCompleteDeferred): ask the host to run the skipped translation
+     *  when the bound Ready result still carries a pending AND either the
+     *  translation section is visible or [force] — a consumer needs the
+     *  translation regardless of the section's visibility (on-screen boxes,
+     *  an Anki flow). The host is the single completion owner and guards
+     *  against duplicate triggers. */
+    private fun maybeRequestDeferredCompletion(force: Boolean = false) {
+        if (currentReady()?.pendingTranslation == null) return
+        if (prefs.hideTranslationSection && !force) return
+        host?.completeDeferredTranslation()
     }
 
     private companion object {
@@ -812,6 +851,17 @@ class TranslationResultFragment : Fragment() {
         resultsContent.restoreScrollSilently(target, scrollListener)
     }
 
+    /** Game-audio ring anchor for an Anki launch from this page: a
+     *  history-seeded page anchors at the ROW's capture moment (this page's
+     *  result object is stamped at page-open, which says nothing about when
+     *  the row's line was heard); every other launch anchors at the result's
+     *  own creation. */
+    private fun audioAnchorMsFor(result: com.playtranslate.model.TranslationResult?): Long? =
+        activity?.intent
+            ?.getLongExtra(TranslationResultActivity.EXTRA_HISTORY_AT_MS, 0L)
+            ?.takeIf { it > 0 }
+            ?: result?.createdAtMs?.takeIf { it > 0 }
+
     /** First sense's POS (blank-filtered, " · "-joined) + the flattened card
      *  definition — the shared (POS, definition) extraction the word-Anki paths use. */
     private fun com.playtranslate.model.DictionaryEntry.ankiPosAndDefinition(): Pair<String, String> {
@@ -844,6 +894,12 @@ class TranslationResultFragment : Fragment() {
             ready?.screenshotPath?.let { putExtra(WordAnkiReviewActivity.EXTRA_SCREENSHOT_PATH, it) }
             ready?.originalText?.let { putExtra(WordAnkiReviewActivity.EXTRA_SENTENCE_ORIGINAL, it) }
             ready?.translatedText?.let { putExtra(WordAnkiReviewActivity.EXTRA_SENTENCE_TRANSLATION, it) }
+            audioAnchorMsFor(ready)?.let { putExtra(WordAnkiReviewActivity.EXTRA_AUDIO_ANCHOR_MS, it) }
+            // Same result as the sentence extras above, so the pending rides
+            // its own original (resolveAnkiTranslation's caller contract) —
+            // the sheet's fill then COMPLETES a deferred capture instead of
+            // translating around its null History rows.
+            ready?.pendingTranslation?.let { putExtra(WordAnkiReviewActivity.EXTRA_SENTENCE_PENDING, it) }
             putExtra(WordAnkiReviewActivity.EXTRA_SOURCE_LANG, prefs.sourceLangId.code)
         }
         activity.startActivity(intent)
@@ -887,6 +943,13 @@ class TranslationResultFragment : Fragment() {
     private fun oneTapSentenceFromResult() {
         host?.onInteraction()
         val result = currentReady() ?: return
+        // Anki consumes the sentence translation — a deferred result must
+        // complete through the funnel (translation + History attach + ring),
+        // not only through the dispatch's own lazy translateOnce, which
+        // would leave the capture's null rows unfilled and the pending set.
+        // The dispatch's fill still covers the card if it runs first; at
+        // worst this flow costs one duplicate backend call.
+        maybeRequestDeferredCompletion(force = true)
         val activity = activity ?: return
         val ankiManager = AnkiManager(activity)
         if (!ankiManager.isAnkiDroidInstalled() || !ankiManager.hasPermission()) {
@@ -904,7 +967,10 @@ class TranslationResultFragment : Fragment() {
         // (see LastSentenceCache.awaitOrStartWordLookups docs).
         val settledRows = currentSettledRows()
         val wordsPayload = settledRows?.let {
-            LastSentenceCache.WordsPayload(it.toLegacyMap(), it.toSurfaceMap(), it.toEnrichmentMap())
+            LastSentenceCache.WordsPayload(
+                it.toLegacyMap(), it.toSurfaceMap(), it.toEnrichmentMap(),
+                annotation = currentSettledAnnotation(),
+            )
         }
         val screenshotPath = result.screenshotPath
         val appCtx = requireContext().applicationContext
@@ -923,16 +989,20 @@ class TranslationResultFragment : Fragment() {
                     wordsPayload = wordsPayload,
                     screenshotPath = screenshotPath,
                     sourceLangId = langId,
+                    // Deferred result: the lazy translate runs the deferred
+                    // completion; overlapping with the host funnel triggered
+                    // above is fine — the attach is idempotent and the second
+                    // per-group batch is cache-served.
+                    pendingTranslation = result.pendingTranslation,
                 )
             },
             resultOf = { it },
+            modeOf = { CardMode.SENTENCE },
             presentResult = { sendResult ->
                 when (sendResult) {
                     is AnkiSendResult.Success -> {
-                        val msgRes = if (sendResult.audioDropped || sendResult.wordAudioDropped)
-                            R.string.anki_added_no_audio
-                        else
-                            R.string.anki_added_success
+                        val msgRes = sendResult.mediaShortfallRes()
+                            ?: ankiAddedSuccessRes(CardMode.SENTENCE)
                         Toast.makeText(appCtx, msgRes, Toast.LENGTH_SHORT).show()
                         refreshWordBadges()
                     }
@@ -940,7 +1010,7 @@ class TranslationResultFragment : Fragment() {
                         val ctx = requireContext()
                         OverlayAlert.Builder(requireActivity())
                             .setTitle(getString(R.string.anki_send_failed_title))
-                            .setMessage(getString(sendResult.messageRes))
+                            .setMessage(sendResult.message ?: getString(sendResult.messageRes))
                             .addButton(
                                 getString(android.R.string.ok),
                                 ctx.themeColor(R.attr.ptAccent),
@@ -1002,7 +1072,10 @@ class TranslationResultFragment : Fragment() {
         // surface-forms-race rationale.
         val settledRows = currentSettledRows()
         val wordsPayload = settledRows?.let {
-            LastSentenceCache.WordsPayload(it.toLegacyMap(), it.toSurfaceMap(), it.toEnrichmentMap())
+            LastSentenceCache.WordsPayload(
+                it.toLegacyMap(), it.toSurfaceMap(), it.toEnrichmentMap(),
+                annotation = currentSettledAnnotation(),
+            )
         }
         dismissWordPopup()
         val appCtx = activity.applicationContext
@@ -1028,24 +1101,27 @@ class TranslationResultFragment : Fragment() {
                     wordsPayload = wordsPayload,
                     screenshotPath = screenshotPath,
                     sourceLangId = langId,
+                    // Same result as ready_sentence — a deferred pending
+                    // rides so the sentence branch completes, not bypasses.
+                    pendingTranslation = ready?.pendingTranslation,
                 )
             },
             resultOf = { it.first },
-            presentResult = { (result, _) ->
+            modeOf = { it.second },
+            presentResult = { (result, mode) ->
                 when (result) {
                     is AnkiSendResult.Success -> {
                         // Sentence-mode one-tap can drop per-target-word
-                        // audio (the target word may fail TTS or upload);
-                        // surface that the same way the other handlers do.
-                        val msgRes = if (result.audioDropped || result.wordAudioDropped)
-                            R.string.anki_added_no_audio
-                        else
-                            R.string.anki_added_success
+                        // audio (the target word may fail TTS or upload)
+                        // or the screenshot; surface that the same way the
+                        // other handlers do.
+                        val msgRes = result.mediaShortfallRes() ?: ankiAddedSuccessRes(mode)
                         Toast.makeText(appCtx, msgRes, Toast.LENGTH_SHORT).show()
                         refreshWordBadges()
                     }
                     is AnkiSendResult.Failed -> {
-                        Toast.makeText(appCtx, result.messageRes,
+                        Toast.makeText(appCtx,
+                            result.message ?: appCtx.getString(result.messageRes),
                             Toast.LENGTH_LONG).show()
                     }
                     is AnkiSendResult.NeedsMapping -> {
@@ -1064,6 +1140,14 @@ class TranslationResultFragment : Fragment() {
     private fun onAnkiClicked() {
         host?.onInteraction()
         val result = currentReady() ?: return
+        // Anki consumes the sentence translation — a deferred result must
+        // complete through the funnel (translation + History attach + ring),
+        // not only through the review sheet's own lazy fill, which would
+        // leave the capture's null rows unfilled and the pending set. The
+        // sheet's fill still covers the card if it opens before the
+        // completion lands; at worst this flow costs one duplicate backend
+        // call.
+        maybeRequestDeferredCompletion(force = true)
         val activity = activity ?: return
         val ankiManager = AnkiManager(activity)
         // Snapshot the settled rows ONCE so wordResults + surfaces + enrichment
@@ -1083,6 +1167,7 @@ class TranslationResultFragment : Fragment() {
                 // sentence/word toggle) — a sentence card would just repeat
                 // the word. WordAnkiReviewSheet renders word-only with no
                 // toggle whenever it's launched without sentence args.
+                val audioAnchorMs = audioAnchorMsFor(result)
                 val singleRow = (vm.wordLookups.value as? WordLookupsState.Settled)
                     ?.singleWordRow(getDisplayedOriginalText())
                 if (singleRow != null) {
@@ -1101,7 +1186,13 @@ class TranslationResultFragment : Fragment() {
                         getDisplayedOriginalText(), result.translatedText, wordResults,
                         settledRows?.toSurfaceMap() ?: emptyMap(),
                         settledRows?.toEnrichmentMap() ?: emptyMap(),
-                        result.screenshotPath, prefs.sourceLangId
+                        result.screenshotPath, prefs.sourceLangId,
+                        // Deferred result: the sheet's lazy fill runs the
+                        // deferred completion; overlapping with the host
+                        // funnel triggered above is fine — the attach is
+                        // idempotent and the second batch is cache-served.
+                        pendingTranslation = result.pendingTranslation,
+                        audioAnchorMs = audioAnchorMs,
                     ).show(childFragmentManager, AnkiReviewBottomSheet.TAG)
                 }
             }

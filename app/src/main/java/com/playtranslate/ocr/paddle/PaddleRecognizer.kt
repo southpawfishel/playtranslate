@@ -45,8 +45,10 @@ class PaddleRecognizer(private val session: PaddleOcrSession) : TextRecognizer {
         val r = session.recognizeQuad(matFor(image.bitmap), pts) ?: return null
         if (r.text.isBlank()) return null
         // CTC firing positions → per-char boxes. Axis = r.stripVertical (warpCrop's own
-        // rotation), geometry = the region AABB. Empty unless decode emitted positions.
-        val chars = synthesizeCharBoxes(r.chars, region.box.bounds, r.stripVertical)
+        // rotation). Upright regions distribute across the AABB; rotated regions walk
+        // the baseline and emit upright cells riding it (the shared slanted-char
+        // representation) — see [synthesizeCharBoxes].
+        val chars = synthesizeCharBoxes(r.chars, region.box, r.stripVertical)
         val line = RecognizedLine(
             text = r.text, box = region.box, orientation = region.orientation, chars = chars,
         )

@@ -25,6 +25,10 @@ data class LensActionContext(
     val entry: DictionaryEntry?,
     val sentence: String?,
     val screenshotPath: String?,
+    /** Game-audio ring anchor for the Anki flow: when the sentence's capture
+     *  was produced ([com.playtranslate.model.TranslationResult.createdAtMs]).
+     *  Null when the hosting surface has no capture moment (drag flow). */
+    val audioAnchorMs: Long? = null,
 )
 
 /**
@@ -78,6 +82,7 @@ class SourceLensActions(
         val sentence: String?,
         val sentenceTranslation: String?,
         val sourceLangCode: String,
+        val audioAnchorMs: Long?,
     )
 
     private fun openSentenceInApp() {
@@ -184,7 +189,7 @@ class SourceLensActions(
         ankiOneTapSendScope.launch {
             // Sentence card (dragged word bolded) vs word card routing — incl.
             // the single-word-sentence rule — is shared via oneTapSend.
-            val (result, _) = context.oneTapSend(
+            val (result, mode) = context.oneTapSend(
                 word = snap.word,
                 reading = snap.reading,
                 pos = snap.pos,
@@ -200,7 +205,7 @@ class SourceLensActions(
             )
             when (result) {
                 is AnkiSendResult.NeedsMapping -> launchWordAnkiActivity(snap)
-                else -> oneTapResultToast(context.applicationContext, result)
+                else -> oneTapResultToast(context.applicationContext, result, mode)
             }
         }
     }
@@ -235,6 +240,7 @@ class SourceLensActions(
             sentence = sentence,
             sentenceTranslation = sentenceTranslation,
             sourceLangCode = Prefs(context).sourceLangId.code,
+            audioAnchorMs = cur.audioAnchorMs,
         )
     }
 
@@ -258,6 +264,9 @@ class SourceLensActions(
                 putExtra(WordAnkiReviewActivity.EXTRA_SENTENCE_TRANSLATION, it)
             }
             putExtra(WordAnkiReviewActivity.EXTRA_SOURCE_LANG, snap.sourceLangCode)
+            snap.audioAnchorMs?.let {
+                putExtra(WordAnkiReviewActivity.EXTRA_AUDIO_ANCHOR_MS, it)
+            }
         }
         val targetDisplay = PlayTranslateApplication.foregroundDisplayId() ?: displayId
         val opts = android.app.ActivityOptions.makeBasic()

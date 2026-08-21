@@ -113,7 +113,6 @@
 
     <string name="onboarding_notif_row_status_sub"><xliff:g id="app_name" example="PlayTranslate">PlayTranslate</xliff:g>が実行中であることを示す控えめな表示です</string>
 
-
     <string name="onboarding_a11y_hint"><b><xliff:g id="app_name" example="PlayTranslate">PlayTranslate</xliff:g></b>を探してください</string>
 
     <string name="onboarding_a11y_title">他のアプリの上に重ねて表示</string>
@@ -133,7 +132,6 @@
     <string name="onboarding_a11y_row_lookup_title">単語を調べる</string>
 
     <string name="onboarding_a11y_row_lookup_sub">画面上の単語の定義をすぐに表示します</string>
-
 
     <string name="btn_grant_permission">権限を許可</string>
 
@@ -163,9 +161,10 @@
 
     <string name="word_detail_common">常用</string>
 
+    <string name="card_words_in_sentence">文中の単語</string>
+
     <string name="word_anki_in_decks"><xliff:g id="count" example="3">%1$d</xliff:g>個のAnkiデッキ</string>
     <string name="word_anki_deck_badge_cd">Anki登録済み：<xliff:g id="label" example="Core 2k">%1$s</xliff:g></string>
-
 
     <string name="word_detail_numbered_definition"><xliff:g id="number" example="1">%1$d</xliff:g>. <xliff:g id="definition" example="to eat">%2$s</xliff:g></string>
 
@@ -225,6 +224,8 @@
     <string name="lang_search_no_results">結果がありません</string>
 
     <string name="lang_section_suggested">おすすめ</string>
+
+    <string name="lang_pick_any">任意の言語</string>
 
     <string name="lang_section_all">すべて</string>
 
@@ -382,8 +383,6 @@
 
     <string name="capture_lifecycle_state_off">オフ</string>
 
-
-
     <string name="capture_lifecycle_on_subtitle">画面キャプチャを許可済み</string>
 
     <string name="capture_lifecycle_off_subtitle">画面キャプチャを許可</string>
@@ -469,7 +468,6 @@
 
     <string name="anki_not_installed_get"><xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>を入手</string>
 
-
     <string name="anki_permission_rationale_title"><xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>の権限が必要です</string>
 
     <string name="anki_permission_rationale_message"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>にフラッシュカードを追加するには、<xliff:g id="app_name" example="PlayTranslate">PlayTranslate</xliff:g>に<xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>へのアクセス権限が必要です。\n\n「続ける」をタップして権限を許可してください。</string>
@@ -482,7 +480,13 @@
 
     <string name="anki_added_no_audio"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>に追加しました（音声は利用できません）</string>
 
-    <string name="anki_added_success"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>に追加しました</string>
+    <string name="anki_added_no_screenshot"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>に追加しました（スクリーンショットは利用できません）</string>
+
+    <string name="anki_added_no_screenshot_or_audio"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>に追加しました（スクリーンショットと音声は利用できません）</string>
+
+    <string name="anki_added_sentence_success">文カードを<xliff:g id="brand_anki" example="Anki">Anki</xliff:g>に追加しました</string>
+
+    <string name="anki_added_word_success">単語カードを<xliff:g id="brand_anki" example="Anki">Anki</xliff:g>に追加しました</string>
 
     <string name="anki_adding_in_progress"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>に追加中…</string>
 
@@ -546,6 +550,8 @@
 
     <string name="audio_source_game_enable_hint">録音していません。オンにすると、今後のカード用にゲーム音声を録音します</string>
 
+    <string name="game_audio_zoom_hint">ピンチ操作で音声の表示範囲を調整</string>
+
     <string name="game_audio_trim_duration">選択：<xliff:g id="seconds" example="2.4">%1$s</xliff:g>秒 · 録音済み：<xliff:g id="total_seconds" example="147">%2$s</xliff:g>秒</string>
 
     <string name="anki_game_audio_cell_untrimmed">保存時にトリミング</string>
@@ -576,7 +582,9 @@
 
     <string name="anki_field_mapping_unconfigured">送信する前に、このカードタイプのフィールドを設定してください</string>
 
-    <string name="anki_sort_field_empty">「<xliff:g id="sort_field_name" example="Expression">%1$s</xliff:g>」に値を割り当ててください。<xliff:g id="brand_anki" example="Anki">Anki</xliff:g>はこのフィールドでノートを識別するため、値が空だと送信時に重複エラーで拒否されます。</string>
+    <string name="anki_first_field_unmapped"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>がノートを識別できるよう、「<xliff:g id="field_name" example="Key">%1$s</xliff:g>」に値を割り当ててください</string>
+
+    <string name="anki_first_field_empty">このカードでは「<xliff:g id="field_name" example="Key">%1$s</xliff:g>」が空です。<xliff:g id="brand_anki" example="Anki">Anki</xliff:g>は最初のフィールドでノートを識別するため、どのカードでもこのフィールドに値が必要です。</string>
 
     <string name="anki_models_unavailable"><xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>に接続できず、カードタイプを取得できませんでした。しばらくしてからもう一度お試しください。</string>
 
@@ -906,6 +914,8 @@
     <string name="bergamot_warmup_downloading_multi">オフラインモデルをダウンロード中（<xliff:g id="file_index" example="1">%1$d</xliff:g>/<xliff:g id="file_count" example="2">%2$d</xliff:g>）… <xliff:g id="bytes_so_far" example="12 MB">%3$s</xliff:g> / <xliff:g id="bytes_total" example="50 MB">%4$s</xliff:g></string>
     <string name="bergamot_pair_unsupported">現在の言語ペアには対応していません</string>
 
+    <string name="bergamot_device_unsupported">この端末には対応していません</string>
+
     <string name="offline_backend_downloaded_cd">ダウンロード済み</string>
     <string name="offline_backend_not_downloaded_cd">未ダウンロード</string>
     <string name="offline_backend_enabled_cd">有効</string>
@@ -1069,7 +1079,6 @@
     <string name="llm_low_memory_title">空きメモリが不足しています</string>
 
     <string name="llm_low_memory_message"><xliff:g id="model_name" example="Qwen 2.5 1.5B">%1$s</xliff:g>の実行には約<xliff:g id="needed_memory" example="4 GB">%2$s</xliff:g>の空きメモリが必要です。現在の空きは<xliff:g id="free_memory" example="1.2 GB">%3$s</xliff:g>のみです。\n\n他のアプリを閉じてメモリを空けるか、このモデルが端末に合わない場合はキャンセルしてください。</string>
-
 
     <string name="llm_low_memory_start_anyway">このまま開始</string>
 
@@ -1433,7 +1442,6 @@
 
     <string name="settings_ocr_download_failed">OCRモデルをダウンロードできませんでした。接続を確認して、もう一度お試しください。</string>
 
-
     <string name="settings_ocr_use_manga_subtitle">試験運用版。漫画を読む用途にのみ使用してください。処理が遅く、ゲームなど他のコンテンツでは品質が低下します。</string>
 
     <string name="settings_ocr_disable_manga_title">MangaOCRをオフにしますか？</string>
@@ -1534,6 +1542,10 @@
 
     <string name="yomitan_single_dict_subtitle">定義は、結果のある辞書のうち最も優先順位の高いものから表示されます。内蔵辞書が最後の代替となります</string>
 
+    <string name="yomitan_styling_title">辞書のスタイル</string>
+
+    <string name="yomitan_styling_subtitle">各辞書独自のレイアウトとスタイルで定義を表示します。これ以降にインポートする辞書に適用されます。オフにすると常にプレーンテキストで表示します</string>
+
     <string name="yomitan_auto_update_label">自動更新</string>
 
     <string name="yomitan_auto_update_subtitle">この辞書の新しいバージョンを自動的にダウンロードしてインストールします</string>
@@ -1580,6 +1592,46 @@
 
     <string name="yomitan_accent_default_cd">デフォルト（サブタイトルのテキスト色）</string>
 
+    <string name="yomitan_source_language_label">翻訳元の言語</string>
+
+    <string name="yomitan_check_updates_label">更新を確認</string>
+
+    <string name="yomitan_update_checking_title">更新を確認中</string>
+
+    <string name="yomitan_update_available_title">更新があります</string>
+
+    <string name="yomitan_update_available_message">「<xliff:g id="title" example="Jitendex.org">%1$s</xliff:g>」をバージョン<xliff:g id="revision" example="2026.02.05">%2$s</xliff:g>に更新できます。</string>
+
+    <string name="yomitan_update_confirm">更新</string>
+
+    <string name="yomitan_update_repair_title">再ダウンロードが必要です</string>
+
+    <string name="yomitan_update_repair_message">このバージョンのアプリで使用するには、「<xliff:g id="title" example="Jitendex.org">%1$s</xliff:g>」のデータを再ダウンロードする必要があります。</string>
+
+    <string name="yomitan_update_redownload_confirm">再ダウンロード</string>
+
+    <string name="yomitan_update_none_title">最新の状態です</string>
+
+    <string name="yomitan_update_none_message">「<xliff:g id="title" example="Jitendex.org">%1$s</xliff:g>」は最新バージョンです。</string>
+
+    <string name="yomitan_update_check_failed_title">更新を確認できませんでした</string>
+
+    <string name="yomitan_update_check_failed_message">辞書の更新サーバーに接続できませんでした。接続を確認して、もう一度お試しください。</string>
+
+    <string name="yomitan_update_busy_title">今は更新できません</string>
+
+    <string name="yomitan_update_busy_message">翻訳セッションの実行中です。終了してから、もう一度お試しください。</string>
+
+    <string name="yomitan_update_scan_active_message">辞書の更新をバックグラウンドで確認中です。しばらくしてからもう一度お試しください。</string>
+
+    <string name="yomitan_update_skipped_title">更新は適用されませんでした</string>
+
+    <string name="yomitan_update_skipped_message">更新はダウンロードされましたが、この辞書と一致しないためインストールされませんでした。</string>
+
+    <string name="yomitan_update_done_title">辞書を更新しました</string>
+
+    <string name="yomitan_update_done_message">「<xliff:g id="title" example="Jitendex.org">%1$s</xliff:g>」は最新の状態になりました。</string>
+
     <string name="settings_header_tools">ツール</string>
 
     <string name="settings_cell_dictionary">辞書</string>
@@ -1619,6 +1671,10 @@
     <string name="history_capture_image_toggle_title">キャプチャ画像を保存</string>
 
     <string name="history_capture_image_toggle_subtitle">カメラや画面のキャプチャごとに画像を保存します</string>
+
+    <string name="history_hide_translations_toggle_title">翻訳を非表示</string>
+
+    <string name="history_hide_translations_toggle_subtitle">キャプチャした文のみを表示します。項目をタップすると翻訳が表示されます。</string>
 
     <string name="history_live_session_title">ライブセッション</string>
 
@@ -1728,7 +1784,6 @@
          SETTINGS — Text-to-Speech section
          ═══════════════════════════════════════════════════════════════ -->
 
-
     <string name="tts_voice_numbered">音声<xliff:g id="voice_index" example="3">%1$d</xliff:g></string>
 
     <string name="tts_voice_region_numbered"><xliff:g id="region" example="China">%1$s</xliff:g> <xliff:g id="region_index" example="2">%2$d</xliff:g></string>
@@ -1738,7 +1793,6 @@
     <string name="tts_voice_default_subtitle">エンジンのデフォルト音声</string>
 
     <string name="tts_voice_needs_download">ダウンロードが必要</string>
-
 
     <string name="tts_no_engine_row_subtitle">利用できる音声エンジンがありません。タップして追加してください。</string>
 
@@ -1823,8 +1877,6 @@
     <string name="anki_deck_not_selected_subtitle">未選択</string>
 
 
-
-
     <!-- ═══════════════════════════════════════════════════════════════
          SETTINGS — Support section rows
          ═══════════════════════════════════════════════════════════════ -->
@@ -1855,6 +1907,7 @@
     <string name="settings_debug_log_pinhole">ライブモードのピンホール指標をログ</string>
     <string name="settings_debug_save_ocr_seed">OCRキャプチャをシードとして保存</string>
     <string name="settings_debug_log_grouping">OCRのグループ化判定をログ</string>
+    <string name="settings_debug_angle_gate">従来の角度しきい値（10°）</string>
     <string name="settings_debug_log_trace">翻訳ログのトレースを記録</string>
     <string name="settings_debug_force_crash_title">クラッシュを強制</string>
 
