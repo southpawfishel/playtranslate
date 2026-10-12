@@ -299,8 +299,8 @@
       "licenses": [
         {
           "component": "Gemma 4 E2B Instruct (MNN format)",
-          "license": "Gemma Terms of Use",
-          "attribution": "© Google. Gemma model weights are governed by the Gemma Terms of Use (https://ai.google.dev/gemma/terms). MNN conversion by taobao-mnn (https://huggingface.co/taobao-mnn/gemma-4-E2B-it-MNN), Apache 2.0."
+          "license": "Apache-2.0",
+          "attribution": "© Google. Gemma 4 model weights are released under the Apache License 2.0 (https://ai.google.dev/gemma/docs/gemma_4_license); unlike Gemma 3, this generation carries no Gemma Terms of Use. MNN conversion by taobao-mnn (https://huggingface.co/taobao-mnn/gemma-4-E2B-it-MNN), Apache 2.0."
         },
         {
           "component": "MNN runtime (libMNN.so / libllm.so / libMNN_Express.so)",
@@ -358,8 +358,62 @@
         }
       ]
     },
+    "engine-hy-mt2-1-8b-mnn": {
+      "display": "Hy-MT2 1.8B (MNN)",
+      "type": "engine",
+      "script": "",
+      "bundled": false,
+      "packVersion": 1,
+      "additiveFromVersion": 1,
+      "size": 1012570351,
+      "files": [
+        {
+          "path": "config.json",
+          "url": "https://huggingface.co/playtranslate/hy-mt2-1.8b-mnn/resolve/main/config.json",
+          "size": 502,
+          "sha256": "801311d0461dceffb4fe06f71a38b8ffb9616022626109537d3343ecc747619f"
+        },
+        {
+          "path": "llm.mnn",
+          "url": "https://huggingface.co/playtranslate/hy-mt2-1.8b-mnn/resolve/main/llm.mnn",
+          "size": 575192,
+          "sha256": "e58616348ba5d80d6e2d51913104edaa08c4aea6926ed61ecc72865462f979ce"
+        },
+        {
+          "path": "llm.mnn.weight",
+          "url": "https://huggingface.co/playtranslate/hy-mt2-1.8b-mnn/resolve/main/llm.mnn.weight",
+          "size": 1008538714,
+          "sha256": "bae6b34bff0234e95c98460649578f7fb6febbca340e72bc99c37a3412fc39f0"
+        },
+        {
+          "path": "tokenizer.mtok",
+          "url": "https://huggingface.co/playtranslate/hy-mt2-1.8b-mnn/resolve/main/tokenizer.mtok",
+          "size": 3454710,
+          "sha256": "c8b146938905b88f5aeff4dac65aeea5f3dc0e3a2f8e0e9f1ae56b405e4a71aa"
+        },
+        {
+          "path": "llm_config.json",
+          "url": "https://huggingface.co/playtranslate/hy-mt2-1.8b-mnn/resolve/main/llm_config.json",
+          "size": 1233,
+          "sha256": "b72080d8d0096ab93dfbcb164a2d7ff0ee1716335eac97ef41d61681cb2d7196"
+        }
+      ],
+      "licenses": [
+        {
+          "component": "Hy-MT2 1.8B (MNN format)",
+          "license": "Apache-2.0",
+          "attribution": "\u00a9 Tencent. Apache 2.0 \u2014 https://www.apache.org/licenses/LICENSE-2.0 (LICENSE.txt in https://huggingface.co/tencent/Hy-MT2-1.8B). Unlike Hunyuan-MT 1.5, this line carries no territory restriction. MNN conversion by @starsharp06sharp (https://huggingface.co/starsharp06sharp/Hy-MT2-1.8B-MNN), re-hosted unmodified at https://huggingface.co/playtranslate/hy-mt2-1.8b-mnn with the base model's LICENSE.txt and attribution alongside."
+        },
+        {
+          "component": "MNN runtime (libMNN.so / libllm.so / libMNN_Express.so)",
+          "license": "Apache-2.0",
+          "attribution": "\u00a9 Alibaba. Apache 2.0 \u2014 https://www.apache.org/licenses/LICENSE-2.0."
+        }
+      ]
+    },
     "engine-hunyuan-mt1-5-1-8b-mnn": {
       "display": "Hunyuan-MT 1.5 1.8B (MNN)",
+      "deprecated": true,
       "type": "engine",
       "script": "",
       "bundled": false,
@@ -415,11 +469,11 @@
       "display": "Japanese",
       "script": "CJK_JAPANESE",
       "bundled": false,
-      "packVersion": 4,
+      "packVersion": 5,
       "additiveFromVersion": 3,
-      "size": 99620074,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/ja-v4/ja.zip",
-      "sha256": "11412e812e6f9ab162705124f9540d4d0de734bef2e311251f188d88a7690762",
+      "size": 99889772,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/ja-v5/ja.zip",
+      "sha256": "a58536ca98590cef75d80085d1090dcb4aa16227ed61d2a118c81f7e7f83b83a",
       "licenses": [
         {
           "component": "JMdict",
@@ -469,11 +523,11 @@
       "display": "Spanish",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 6096410,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/es-v3/es.zip",
-      "sha256": "d547756c6bc8d6036c455ec61d262b1dd553195c16244fc4fdb01eb5d944e156",
+      "size": 18237353,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/es-v4/es.zip",
+      "sha256": "2783308055e0ca5ad402f99996a1c6d9589f40dcc10015cf0e1e996f557edfee",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -486,11 +540,11 @@
       "display": "Russian",
       "script": "CYRILLIC",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 2151109,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/ru-v3/ru.zip",
-      "sha256": "631163985299b1f862a8bc6f5f5cdd194d089d17fb1583e4c889f0877353f415",
+      "size": 12223132,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/ru-v4/ru.zip",
+      "sha256": "392d656f37c5964fc0bd80f5c73871156f8a5988e7ab46e9f95bc75335751c92",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -503,11 +557,11 @@
       "display": "Arabic",
       "script": "ARABIC",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 5192198,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/ar-v3/ar.zip",
-      "sha256": "6ed384ec7ee748e26e49b4a443fd35e0d0a87473a89b020c731156ea922fcbfc",
+      "size": 14653896,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/ar-v4/ar.zip",
+      "sha256": "982493550a12c0ca28e4bab2f79d41a68b4de83f808e8a182e12b0ada157e78e",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -530,11 +584,11 @@
       "display": "Thai",
       "script": "THAI",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 1717427,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/th-v3/th.zip",
-      "sha256": "47e2eed83007ac9f83958f2012f40cda4754428c13015c4e1547b3985df97932",
+      "size": 2303692,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/th-v4/th.zip",
+      "sha256": "966ae93a1009c93c5593b2bcd04aa4c9addd17f9eca82ed6d5b0d10f1649a131",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -552,11 +606,11 @@
       "display": "Hindi",
       "script": "DEVANAGARI",
       "bundled": false,
-      "packVersion": 4,
+      "packVersion": 5,
       "additiveFromVersion": 1,
-      "size": 1850498,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/hi-v4/hi.zip",
-      "sha256": "81b2381dc56401c2eaf55948e59ddc977c1b95c18539d44b3ac392fd8a95e371",
+      "size": 2534975,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/hi-v5/hi.zip",
+      "sha256": "a0f0e36cc8ecb03aec955cf7da9bf7ac36e93b1fc96d956bddf3343ee0a67990",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -569,11 +623,11 @@
       "display": "English",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 25298222,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/en-v3/en.zip",
-      "sha256": "6ba311daa407dd0c2fb9124897b11bc2a6f05e8fbfbfaee7591f740288792d6b",
+      "size": 34324755,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/en-v4/en.zip",
+      "sha256": "705d6e1a44e02fa2b387d4bd59c5d9dd6cb6e6275d1c0ab075dae285f9ec9cc7",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -586,11 +640,11 @@
       "display": "French",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 5016678,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/fr-v3/fr.zip",
-      "sha256": "8e61343472e89c0a35ead15517717bbdc433434835190728fee24643a630ef98",
+      "size": 8943720,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/fr-v4/fr.zip",
+      "sha256": "a8bd8e81e0a2ef09796b4cb54a5c279a672b1c23c5e52a532a529fe40490e2ad",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -603,11 +657,11 @@
       "display": "German",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 4808229,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/de-v3/de.zip",
-      "sha256": "c45c49ec53095ed27dc14f2027066620a247c8af011ea124ce94b2bb1aaa9967",
+      "size": 11759759,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/de-v4/de.zip",
+      "sha256": "68a3abf19bf1590429ef31392d32b39f2a01a4b86623c04516d78697d58a71aa",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -620,11 +674,11 @@
       "display": "Italian",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 4436930,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/it-v3/it.zip",
-      "sha256": "a3acc20a4b1c6fe9d32683fbf0a7d98b83fe23d09b2a10cc56493efe26b05c05",
+      "size": 8422764,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/it-v4/it.zip",
+      "sha256": "e291cb93c49fb50e0398911e358f27a8faa647a3e8fc644518e270b129d43a3c",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -637,11 +691,11 @@
       "display": "Portuguese",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 4731751,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/pt-v3/pt.zip",
-      "sha256": "1cf8c2b7f4363e0076681b1dac4944545c9c0eb7bdfd55f991dce7d22fba2fab",
+      "size": 9553617,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/pt-v4/pt.zip",
+      "sha256": "bf1deb15e47ca2b73b5de5e2dbe82ca842d6a6c40c9c9c0dae7c2ebbdb1e92e2",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -654,11 +708,11 @@
       "display": "Dutch",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 2449294,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/nl-v3/nl.zip",
-      "sha256": "f72ba25a4963865aeed92159e5a21e90e0309658f3201b275bd911798983ce3e",
+      "size": 4484726,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/nl-v4/nl.zip",
+      "sha256": "3ea6ced1602a9704be648748fa17931a187d4f749afcafbfd64b82c93b0274a8",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -671,11 +725,11 @@
       "display": "Turkish",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 1451459,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/tr-v3/tr.zip",
-      "sha256": "9baedfb7ada21dc9969308fc945ae452e1783825b7fad074307e81616da16049",
+      "size": 37798324,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/tr-v4/tr.zip",
+      "sha256": "a0e7e78433ab62e08f6f6819a9b46aff582c4e1ebd5f77864df7c51a27adf37f",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -688,11 +742,11 @@
       "display": "Vietnamese",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 2057781,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/vi-v3/vi.zip",
-      "sha256": "e611dbc549a882eacf0356877066c25574a158f6e2bcd4e7d228f043499d0d25",
+      "size": 2536690,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/vi-v4/vi.zip",
+      "sha256": "97dcfab03d68a9ab05558f7b85b3c03bfc7e9be9061e086d782b0e3fc62468fb",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -705,11 +759,11 @@
       "display": "Indonesian",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 1588809,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/id-v3/id.zip",
-      "sha256": "16ae5d42b72e28b60d90ff38941c779457b1221175e391fd92185c69c231b564",
+      "size": 2337977,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/id-v4/id.zip",
+      "sha256": "782636050a52d6285563ba5d18dba3688ce75062f1f3237b2ef1fd9fb0b2c02f",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -722,11 +776,11 @@
       "display": "Swedish",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 3634699,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/sv-v3/sv.zip",
-      "sha256": "9abddbc9557ae899f16f4d9f0436e189eac78a57aade5bbf85ba32d7b9b2ff92",
+      "size": 5868479,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/sv-v4/sv.zip",
+      "sha256": "f7bd879664050b1fa7d83cbc89ea6d0ff4b7a4639146fd153d446d88558a2338",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -739,11 +793,11 @@
       "display": "Danish",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 1328964,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/da-v3/da.zip",
-      "sha256": "02d2d92da3d76e293451fb59f4c2f5c88919b2eadf3385a261b21f5c91decf1d",
+      "size": 2661287,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/da-v4/da.zip",
+      "sha256": "6210642759d8518df2d4be20f64280e8b24fca7c06da1260b08df76e7bbad812",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -756,11 +810,11 @@
       "display": "Norwegian",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 1329715,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/no-v3/no.zip",
-      "sha256": "4d0c18a43ce9d92ae71b1767ba28fe8f3aa173638ab30fc9bb8d0ab0bb941607",
+      "size": 2237215,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/no-v4/no.zip",
+      "sha256": "d589da61eca09c6a9bb347dfa6094260bd20552cfd1eafc337547419c70ddd62",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -773,11 +827,11 @@
       "display": "Finnish",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 3229344,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/fi-v3/fi.zip",
-      "sha256": "bf54dc2650dcfc85c36fc3a51ce3efd8b8e3bdb87237f835a04ed16bfa05b5a7",
+      "size": 14804966,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/fi-v4/fi.zip",
+      "sha256": "0ddfd89c13a98d8e421b25346efdec35a535e3c7c5e826185c99208519d57214",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -790,11 +844,11 @@
       "display": "Hungarian",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 2309765,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/hu-v3/hu.zip",
-      "sha256": "6aaf6308cc30fd614d85df04fdf54788f28003ee72b315eacc12bd100180f101",
+      "size": 17247305,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/hu-v4/hu.zip",
+      "sha256": "c990600a41f6ce64933640e32d0c97131f5ab096d0154d6114305c858e351ee2",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -807,11 +861,11 @@
       "display": "Romanian",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 1549539,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/ro-v3/ro.zip",
-      "sha256": "1406399122ba400575ba296febb2ccac1a2169dc96f3727f9b686b4c1469b544",
+      "size": 4901955,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/ro-v4/ro.zip",
+      "sha256": "d084ab5476b1e296ea98898279f50f9533a9370ff9156c8adff5b0a435540859",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -824,11 +878,11 @@
       "display": "Catalan",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 2758214,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/ca-v3/ca.zip",
-      "sha256": "eaaf865647c736f34428db4dde887426d9661dfe11bd371857659e33a8d0b07a",
+      "size": 5519009,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/ca-v4/ca.zip",
+      "sha256": "92d5ed5c9087b9b1deadad45e677cbea47bb6511d21eda40cd957428d94f8bbb",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -841,11 +895,11 @@
       "display": "Korean",
       "script": "CJK_KOREAN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 4666427,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/ko-v3/ko.zip",
-      "sha256": "57aa5398cd4e5406f21b77b237622733962e217388e434585066679944e7604d",
+      "size": 16463700,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/ko-v4/ko.zip",
+      "sha256": "1978056e126fe858c167728522709fe3b794cc5d87b3d1ba3ca4ab131f65eb59",
       "licenses": [
         {
           "component": "Wiktionary",
@@ -863,11 +917,11 @@
       "display": "Polish",
       "script": "LATIN",
       "bundled": false,
-      "packVersion": 3,
+      "packVersion": 4,
       "additiveFromVersion": 1,
-      "size": 11532814,
-      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/pl-v3/pl.zip",
-      "sha256": "5e4d952bb27ab9ddcf8e9f0fbdf1490f6af3117f5bfc98b5051e41248c6d2db7",
+      "size": 18216271,
+      "url": "https://github.com/dominostars/playtranslate-langpacks/releases/download/pl-v4/pl.zip",
+      "sha256": "0384331b33619608272f67095e138055f86ae1f8b2694eda8d38c78a859330f1",
       "licenses": [
         {
           "component": "Wiktionary",

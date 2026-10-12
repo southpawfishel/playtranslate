@@ -14,6 +14,7 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.os.SystemClock
 import android.text.TextUtils
 import android.util.TypedValue
@@ -25,6 +26,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ViewTreeObserver
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -36,6 +38,7 @@ import androidx.appcompat.content.res.AppCompatResources
 import androidx.core.graphics.drawable.DrawableCompat
 import com.playtranslate.dictionary.Deinflector
 import com.playtranslate.overlay.OverlayHost
+import com.playtranslate.overlay.WindowChurnGate
 import com.playtranslate.Prefs
 import com.playtranslate.R
 import com.playtranslate.isEffectivelyDark
@@ -59,8 +62,10 @@ import kotlin.math.sign
  *  - A rounded card (16dp radius, BWI_PANEL #15181B, 1dp white-16% border)
  *    holds the zoom / loading / definitions body.
  *  - A coral pill (accent-themed) overhangs the card's top edge by half its
- *    height. It carries the word, a hairline divider, the reading, and a
- *    trailing chevron that signals "tap to drill into Details."
+ *    height. It carries the word, a hairline divider, and the reading. It
+ *    has no chevron of its own: the "tap to drill into Details" cue is a
+ *    chevron on each body cell — the lone word's body, or every section of
+ *    a split — so a plain word and a compound read the same way.
  *  - Two "calm" chip buttons (32dp visible disk, 48dp hit halo) flank the
  *    pill — Speak on the left, Anki on the right. They are no-ops in this
  *    commit; the wiring will land in a follow-up.
@@ -80,8 +85,17 @@ import kotlin.math.sign
  *
  * Tap routing:
  *  - In sticky mode, tapping anywhere on the card OR the pill fires
- *    [onOpenTap] (opens the detail page). The chevron is purely a visual
- *    cue.
+ *    [onOpenTap] (opens the detail page). The body's chevron is purely a
+ *    visual cue ([setDefinitions]' `opens` withholds it when the caller
+ *    has nothing to open into); it never routes taps itself.
+ *  - Split mode ([setSplitDefinitions] — a tapped unit with a related
+ *    unit: word + containing phrase on the space-delimited surfaces,
+ *    fused expression + member word on JA): the body is two sections,
+ *    the longer unit on top, each its OWN tap target ([onOpenTap] for
+ *    the tapped/primary unit, [onSecondaryOpenTap] for the related one)
+ *    with its own chevron; the card-wide open detector stands down over
+ *    the body. The pill still fires [onOpenTap] — it carries the tapped
+ *    unit's identity.
  *  - Chip taps are absorbed (no-op) — they do NOT fall through to the
  *    card-wide open handler.
  *  - The arrow strip and the (currently hidden) pill chrome region outside
@@ -92,6 +106,31 @@ import kotlin.math.sign
  *  is a small floating card, so it renders the same body scaled down to keep
  *  its compact footprint (definitions land near the lens's former ~13sp). */
 private const val LENS_DEFINITIONS_SCALE = 0.8f
+
+/** How long a flat→styled bind holds BOTH bodies for the styled render
+ *  before falling back to flat ([LensView.holdBodyForStyled]): under the
+ *  "feels instant" threshold, and a warm WebView pipeline beats it
+ *  essentially always — so the same content rendering twice (flat, then
+ *  restyled: the visible "hop") is never seen on a device fast enough to
+ *  ever avoid it. */
+private const val STYLED_HOLD_DEADLINE_MS = 150L
+
+/** How long a styled→styled in-place rebind waits for the new word's
+ *  painted-height report before dropping to flat. Longer than the hold:
+ *  the previous content is still on screen, so nothing is missing while
+ *  it waits. */
+private const val STYLED_INPLACE_DEADLINE_MS = 250L
+
+/** One section of the lens's split (phrase + word) definitions body — see
+ *  [MagnifierLens.setSplitDefinitions]. [opens] renders the section's
+ *  trailing chevron and makes the whole section a tap target for its
+ *  open-detail callback; pass false on surfaces (or entries) with nothing
+ *  to open into. */
+data class LensSection(
+    val data: WordDefinitionData,
+    val label: String?,
+    val opens: Boolean,
+)
 
 /**
  * Clamped card-body height for the post-release grow-to-fit. The card grows
@@ -223,6 +262,16 @@ class MagnifierLens(
     private val growBufferPx = dp(8f)
 
     private var lensView: LensView? = null
+    /** A caller announced styled dictionaries are live: every window this
+     *  lens builds should construct its styled renderer eagerly so the
+     *  shell loads during the drag, not at first bind ([LensView.
+     *  prewarmStyledRenderer]). Sticky for the lens's lifetime — set from
+     *  an async styling check that races window construction, so
+     *  [ensureWindow] honors it at build and [prewarmStyledRenderer]
+     *  covers the already-built case. Worst case after a mid-session
+     *  styling-off is one idle parked WebView per window, destroyed with
+     *  it. */
+    private var styledPrewarmRequested = false
     /** Full-screen host that owns the window; [lensView] is its single child,
      *  slid horizontally inside it. The window is the whole display so a tap
      *  anywhere off the card is caught and consumed (dismiss without leaking
@@ -266,8 +315,15 @@ class MagnifierLens(
     /** Fires once per actual window teardown (tap-outside in sticky mode,
      *  new drag start, [dismiss] caller). */
     var onDismiss: (() -> Unit)? = null
-    /** Fires when the card or pill is tapped in sticky mode. */
+    /** Fires when the card or pill is tapped in sticky mode. In split mode
+     *  ([setSplitDefinitions]) this is the PRIMARY section's open action —
+     *  the pill and the primary section both fire it. */
     var onOpenTap: (() -> Unit)? = null
+    /** Fires when one of the split body's SECONDARY sections is tapped in
+     *  sticky mode, with its index into the [setSplitDefinitions]
+     *  secondaries list — the containing phrase on the space-delimited
+     *  surfaces, a member word on JA. Never fires outside split mode. */
+    var onSecondaryOpenTap: ((Int) -> Unit)? = null
     /** Fires when the right chip (Anki) is tapped in sticky mode. */
     var onAnkiTap: (() -> Unit)? = null
     /** Fires when the right chip (Anki) is long-pressed in sticky mode.
@@ -283,6 +339,18 @@ class MagnifierLens(
     private val useActivityWindow: Boolean get() = overlayHost == null
 
     val isInteractive: Boolean get() = lensView?.isInteractive == true
+
+    /** Styled dictionaries are live for this session: build each window's
+     *  styled renderer eagerly so its shell page loads during the drag
+     *  instead of at the first styled bind — the shell load is what makes
+     *  a fresh renderer lose [LensView.setDefinitions]'s grace hold and
+     *  flash flat-then-styled on every lookup. Call whenever styling is
+     *  known active (e.g. drag start, beside [YomitanDefinitionsView.
+     *  warmUp]); sticky for this lens's lifetime. */
+    fun prewarmStyledRenderer() {
+        styledPrewarmRequested = true
+        lensView?.prewarmStyledRenderer()
+    }
 
     /** True while the sticky lens HOLDS WINDOW FOCUS for controller input —
      *  [makeInteractive] found a controller, so A/B/dpad/stick are driving the
@@ -304,17 +372,54 @@ class MagnifierLens(
         lensView?.setSourceBitmap(bitmap)
     }
 
+    /** The bars the app beneath keeps hidden, for [makeInteractive]'s focus
+     *  flip: the host's read of the display's own insets state (overlay
+     *  hosting) or the hosting activity's decor (activity-window hosting;
+     *  [rawCtx] may be a themed wrapper around the Activity — the capture
+     *  sheet's is — which the host read unwraps). Neither reads our own
+     *  root, so the answer never depends on whether it has traversed yet.
+     *  Null pre-R, by [OverlayHost]'s policy. */
+    private fun gameHiddenBarsForFlip(): Int? =
+        if (overlayHost != null) overlayHost.hiddenSystemBarsOnDisplay(displayId)
+        else OverlayHost.hiddenSystemBarsOfActivity(rawCtx)
+
     /** Update the word + reading on the pill. Pass null for either to hide. */
     fun setLabel(word: String?, reading: String?) {
         lensView?.setLabel(word, reading)
     }
 
-    fun setDefinitions(data: WordDefinitionData?, label: String?) {
-        lensView?.setDefinitions(data, label)
+    /** Single-unit definitions body. [opens] draws the body's floating
+     *  chevron — the same open cue every split section carries — and is
+     *  false only when the caller has nothing to open into (no entry, so
+     *  no [onOpenTap]); it is a cue, not a gate, so tap routing is
+     *  unchanged either way. Pass null [data] to return to the zoom body. */
+    fun setDefinitions(data: WordDefinitionData?, label: String?, opens: Boolean = true) {
+        lensView?.setDefinitions(data, label, opens)
         // Re-fit when an already-interactive lens gets new content (the Anki
         // deck-badge back-fill re-binds after makeInteractive). Pre-release
         // and dwell-preview binds aren't interactive, so they stay at base
         // height until makeInteractive runs the first fit.
+        if (isInteractive) fitHeightToContent()
+    }
+
+    /** Split definitions body: the [primary] section plus one or more
+     *  [secondaries], dividers between, each headed by its own headword and
+     *  (when it opens) a trailing chevron. [primary] is the TAPPED unit —
+     *  the pill keeps its identity and [onOpenTap] is its open action;
+     *  each secondary routes to [onSecondaryOpenTap] with its list index.
+     *  [secondariesOnTop] places the LONGER unit above: true on the
+     *  space-delimited surfaces (tapped word + containing phrase above it),
+     *  false on JA (tapped fused expression on top + its member words
+     *  below, in expression order). Sections bind flat instantly; any
+     *  section whose data carries a structured Yomitan payload upgrades to
+     *  its own styled (WebView) renderer once painted, exactly like the
+     *  single-unit body. */
+    fun setSplitDefinitions(
+        primary: LensSection,
+        secondaries: List<LensSection>,
+        secondariesOnTop: Boolean = true,
+    ) {
+        lensView?.setSplitDefinitions(primary, secondaries, secondariesOnTop)
         if (isInteractive) fitHeightToContent()
     }
 
@@ -343,10 +448,9 @@ class MagnifierLens(
         // The interactive card needs window focus only for key/stick
         // navigation (dpad + A over the pill/chips, stick scroll, B/Escape
         // dismiss). With no gamepad or hardware keyboard attached there is
-        // nothing to navigate WITH, so stay non-focusable: that keeps the
-        // window from becoming the system-bar owner and showing the nav
-        // pill over an immersive game. Touch and outside-touch dismissal
-        // work either way — neither needs focus.
+        // nothing to navigate WITH, so stay non-focusable: focus taking is
+        // never free (it steals key input from the app beneath). Touch and
+        // outside-touch dismissal work either way — neither needs focus.
         var flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
@@ -355,6 +459,17 @@ class MagnifierLens(
         tookControllerFocus = hasNavInputDevice(rawCtx)
         if (!tookControllerFocus) {
             flags = flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        } else {
+            // Focus makes this window the system-bar control target, whose
+            // default request would show the nav pill over an immersive game.
+            // Mirror the game's state, armed before the flag flip so the
+            // request rides the focus grant. The mask is read from windows
+            // attached BEFORE this one, never from this root: show() and this
+            // flip can run in the same frame (the capture sheet's word tap),
+            // and a window's own rootWindowInsets are null until its first
+            // traversal — a self-read there silently left the default request
+            // in place and the pill came up with the lens.
+            OverlayHost.mirrorSystemBars(root, gameHiddenBarsForFlip())
         }
         // The window is already full-screen (set in show()); this flag change
         // is flags-only — no size or position change, so it can't trigger the
@@ -504,7 +619,7 @@ class MagnifierLens(
         p.flags = zoomWindowFlags()
         try { wm.updateViewLayout(root, p) } catch (_: Exception) {}
         view.detachInteractiveListeners()
-        view.setDefinitions(null, null)
+        view.setDefinitions(null, null, opens = false)
         view.setLabel(null, null)
         view.setSourceBitmap(null)
         view.setArrowVisible(false, 0)
@@ -637,11 +752,32 @@ class MagnifierLens(
         lensCardHeight = lensH
         lensView = null
         lensRoot = null
+        val p = params
         params = null
-        if (overlayHost != null) {
-            overlayHost.removeOverlayWindow(root)
+        val remove: () -> Unit = {
+            if (overlayHost != null) {
+                overlayHost.removeOverlayWindow(root)
+            } else {
+                // Activity-window lens: deliberately NOT gated through
+                // WindowChurnGate — a destroy deferred past the hosting
+                // activity's finish would trip the framework's window-leak
+                // detection. Its add still ticks the gate's quiet clock.
+                try { wm.removeView(root) } catch (_: Exception) {}
+            }
+        }
+        // Orphaned-UP guard: a key that went down on this focused window is
+        // still held (the Anki one-tap long-press fires at the timeout and
+        // dismisses mid-press) — the window must outlive its UI as an
+        // invisible, untouchable key sink until the release lands here, or
+        // the UP would be delivered unmatched to whatever window is focused
+        // next (the game, in the drag flow). See [WindowKeyPairGuard].
+        if (root.keyGuard.hasPendingDown && p != null) {
+            root.visibility = View.INVISIBLE
+            p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            try { wm.updateViewLayout(root, p) } catch (_: Exception) {}
+            root.keyGuard.beginLinger(remove)
         } else {
-            try { wm.removeView(root) } catch (_: Exception) {}
+            remove()
         }
     }
 
@@ -669,6 +805,7 @@ class MagnifierLens(
             chipHaloPadPx = chipHaloPadPx,
             density = density,
             onOpenTap = { onOpenTap?.invoke() },
+            onSecondaryOpenTap = { i -> onSecondaryOpenTap?.invoke(i) },
             onAnkiTap = { onAnkiTap?.invoke() },
             onAnkiLongPress = { onAnkiLongPress?.invoke() },
             onSpeakTap = { onSpeakTap?.invoke() },
@@ -698,12 +835,16 @@ class MagnifierLens(
         val attached = if (overlayHost != null) {
             overlayHost.addOverlayWindow(root, wm, lp, displayId)
         } else {
-            try { wm.addView(root, lp); true } catch (_: Exception) { false }
+            try {
+                wm.addView(root, lp)
+                true
+            } catch (_: Exception) { false }
         }
         if (!attached) return
         lensView = view
         lensRoot = root
         params = lp
+        if (styledPrewarmRequested) view.prewarmStyledRenderer()
         // A bitmap attached before this view existed (deferred-reveal scene
         // flow) applies now; null is a harmless no-op-equivalent.
         view.setSourceBitmap(sourceBitmapForShow)
@@ -740,7 +881,14 @@ class MagnifierLens(
          *  for a press that began on this window. */
         private var backDownSeen = false
 
+        /** Orphaned-UP guard: pairs tracked here, and the dismissal seam
+         *  ([removeOverlayInternal]) lingers this window as an invisible key
+         *  sink while a press is still in flight. */
+        val keyGuard = WindowKeyPairGuard()
+
         override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
+            if (keyGuard.isLingering) return keyGuard.lingerKey(ev)
+            keyGuard.track(ev)
             if (interactive && ControllerKeys.isBack(ev.keyCode)) {
                 // Fire on UP, not DOWN: dismissing removes this FOCUSED window,
                 // and acting on the DOWN would orphan the UP into whatever sits
@@ -823,12 +971,17 @@ class MagnifierLens(
         private val chipHaloPadPx: Int,
         private val density: Float,
         private val onOpenTap: () -> Unit,
+        private val onSecondaryOpenTap: (Int) -> Unit,
         private val onAnkiTap: () -> Unit,
         private val onAnkiLongPress: () -> Unit,
         private val onSpeakTap: () -> Unit,
         private val showAnkiChip: Boolean,
-        /** Styled body reported a (new) painted height — the owner re-runs
-         *  its card-height fit (LensView is not an inner class). */
+        /** The body the card should fit changed height — a styled paint
+         *  report, or a fallback to flat in a card fitted to a styled
+         *  panel (deadline, empty render, renderer death). The owner
+         *  re-runs its card-height fit, which is grow-only, so calling it
+         *  when the body already fits is a no-op (LensView is not an
+         *  inner class). */
         private val onStyledHeightChanged: () -> Unit,
     ) : FrameLayout(ctx) {
         private fun dp(v: Float): Int = (density * v).toInt()
@@ -976,15 +1129,13 @@ class MagnifierLens(
         }
 
         // -----------------------------------------------------------------
-        // Pill: word | reading > (chevron)
+        // Pill: word | reading
         // -----------------------------------------------------------------
         private val pillPaddingLead = dp(18f)
         private val pillPaddingTrail = dp(14f)
         private val pillGap = dp(12f)
         private val pillDividerWidth = dp(2f)
         private val pillDividerHeight = dp(22f)
-        private val pillChevronSize = dp(13f)
-        private val pillChevronMarginStart = dp(4f)
         private val pillPlaceholderIconSize = dp(22f)
         private val pillPlaceholderGap = dp(8f)
         private val pillPlaceholderText = "Find a word"
@@ -1056,16 +1207,6 @@ class MagnifierLens(
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         }
-        private val pillChevronView = ImageView(ctx).apply {
-            val d = AppCompatResources.getDrawable(ctx, R.drawable.ic_lens_chevron)?.mutate()
-            if (d != null) {
-                DrawableCompat.setTint(d, pillInkColor)
-                setImageDrawable(d)
-            }
-            val params = LinearLayout.LayoutParams(pillChevronSize, pillChevronSize)
-            params.marginStart = pillChevronMarginStart
-            layoutParams = params
-        }
         private val pillView = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1086,22 +1227,21 @@ class MagnifierLens(
             }
             // Placeholder children added first so they pack to the leading
             // edge when shown; they're GONE in word state, leaving the
-            // word/divider/reading/chevron to take their place.
+            // word/divider/reading to take their place.
             addView(pillPlaceholderIconView)
             addView(pillPlaceholderSpinnerView)
             addView(pillPlaceholderTextView)
             addView(pillWordView)
             addView(pillDividerView)
             addView(pillReadingView)
-            addView(pillChevronView)
             // Pill is hidden until [setLabel] applies a state (placeholder
             // or word) on the controller's first label call after show().
             visibility = GONE
         }
         // Manual sizing for the reading: shrink 1sp at a time down to 11sp
         // so a long reading still fits inside the pill, rather than
-        // ellipsizing or pushing the chevron off the pill. Word stays at
-        // 24sp because the spec considers the word the headline.
+        // ellipsizing or pushing the capsule past its width cap. Word
+        // stays at 24sp because the spec considers the word the headline.
         private val pillWordSizingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             typeface = Typeface.DEFAULT_BOLD
             letterSpacing = 0.0125f
@@ -1236,14 +1376,61 @@ class MagnifierLens(
             // both the drag lens and the in-app tap-word lens.
             emptyPlaceholder = ctx.getString(R.string.word_detail_no_definitions)
         }
-        /** The scroll's single child: the flat renderer plus (lazily) the
-         *  styled WebView renderer, visibility-swapped per bind. Keeping
-         *  the ScrollView as the ONE scroller preserves the stick-scroll
-         *  repeater and the clip/translation grow animation unchanged —
-         *  the styled view is always sized to its full content height and
-         *  never scrolls itself ([YomitanDefinitionsView]'s contract). */
+        /** Split (phrase + word) body — built per bind by
+         *  [setSplitDefinitions], visibility-swapped against the flat and
+         *  styled renderers. */
+        private val splitContent = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = GONE
+        }
+        /** True while [splitContent] is the visible body. Drives the
+         *  height fit, the tap-eligibility carve-out (sections own their
+         *  taps), and the controller-nav candidate list. */
+        private var splitActive = false
+        /** The split body's tappable section roots in VISUAL order (top →
+         *  bottom) — the nav walk's candidates and activation targets
+         *  (activation is the section's own click, so the wiring lives in
+         *  one place). Non-opening sections aren't listed. */
+        private var splitSectionViews: List<View> = emptyList()
+
+        /** The open-cue chevron every body cell carries — trailing a split
+         *  section's header, or floating over a headerless body. */
+        private val sectionChevronSize = dp(13f)
+        /** The single-unit body's open cue: floats over the body's top-right
+         *  at the CONTENT edge (the flat and styled renderers share that
+         *  inset), level with the first row, the same placement the
+         *  headerless top section of a split uses — so a lone word's cell
+         *  reads exactly like a compound's. Shown by [setDefinitions] when
+         *  the unit opens; hidden for the zoom body and for a split, whose
+         *  sections carry their own. Kept painted over a styled swap-in
+         *  ([ensureStyledView] brings it back to the front). */
+        private val singleChevronView = buildSectionChevron().apply { visibility = GONE }
+
+        /** The scroll's single child: the flat renderer plus the split
+         *  container plus (lazily) the styled WebView renderer,
+         *  visibility-swapped per bind. Keeping the ScrollView as the ONE
+         *  scroller preserves the stick-scroll repeater and the
+         *  clip/translation grow animation unchanged — the styled view is
+         *  always sized to its full content height and never scrolls itself
+         *  ([YomitanDefinitionsView]'s contract). */
         private val bodyContainer = FrameLayout(ctx).apply {
             addView(definitionsContent)
+            addView(
+                splitContent,
+                LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT),
+            )
+            // Absolute RIGHT, matching the lens's canvas-aligned layout
+            // discipline (as the split sections' floating chevron).
+            addView(
+                singleChevronView,
+                LayoutParams(
+                    sectionChevronSize, sectionChevronSize,
+                    Gravity.TOP or Gravity.RIGHT,
+                ).apply {
+                    topMargin = dp(4f)
+                    rightMargin = bodyHPaddingPx + dp(2f)
+                },
+            )
         }
         private val definitionsScroll = ScrollView(ctx).apply {
             isVerticalScrollBarEnabled = true
@@ -1274,21 +1461,82 @@ class MagnifierLens(
         var styledActive = false
             private set
         private var styledContentHeight = 0
+        /** Identity (headword + reading) of the last single-body bind fed
+         *  to the styled view — [setDefinitions] compares against it to
+         *  decide whether a bind may ride the in-place path. Only consulted
+         *  while [styledActive], which is set exclusively in the funnel
+         *  that also writes this, so it can never be stale when it
+         *  matters. */
+        private var styledBoundKey: Pair<String, String?>? = null
+
+        // ── Split-section styled (WebView) renderers ──────────────────
+        /** Pool of per-SECTION styled renderers for the split body, handed
+         *  out in section order by [obtainSplitStyledView] and reused across
+         *  binds — WebView construction is the expensive part, content swaps
+         *  are cheap, and the drag lens rebinds on every dwell. Detached
+         *  from their section columns between binds; destroyed only with the
+         *  window ([releaseStyledView]) or on renderer death. Distinct from
+         *  [styledView] (the single-unit body's renderer) so the two modes
+         *  can't fight over one instance's height reports. */
+        private val splitStyledPool = mutableListOf<YomitanDefinitionsView>()
+        /** Next pool slot to hand out during the current split build. */
+        private var splitStyledCursor = 0
+        /** Bind generation for the split styled closures, bumped at every
+         *  [hideSplitBody]: a pooled view's late height report from a
+         *  superseded bind must not resurrect detached section views or
+         *  re-fit the card ([YomitanDefinitionsView]'s own render-seq guard
+         *  covers reports superseded by a NEW setContent, but not reports
+         *  from content that was simply torn down). */
+        private var splitBindSeq = 0
+
+        /** A styled renderer for the next split section: reuse the pool in
+         *  order, growing it on demand. Null when styled rendering is
+         *  unavailable (no WebView provider / a renderer died) — the
+         *  section then simply stays flat. */
+        private fun obtainSplitStyledView(): YomitanDefinitionsView? {
+            if (styledUnavailable) return null
+            splitStyledPool.getOrNull(splitStyledCursor)?.let { pooled ->
+                splitStyledCursor++
+                (pooled.parent as? ViewGroup)?.removeView(pooled)
+                return pooled
+            }
+            val v = YomitanDefinitionsView(context, lensStyledTokens())
+            if (!v.isUsable()) {
+                styledUnavailable = true
+                return null
+            }
+            // Symmetric insets, matching the split sections' flat bodies
+            // (not the single body's scrollbar-gutter asymmetry).
+            v.setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx - dp(6f), 0)
+            splitStyledPool.add(v)
+            splitStyledCursor++
+            return v
+        }
+
+        /** Builds the styled renderer AHEAD of the first styled bind so its
+         *  shell page loads while the user is still dragging toward a word
+         *  — the shell is the expensive part (~150ms on the Thor), and a
+         *  bind against a loaded shell is what lets [setDefinitions]'s
+         *  grace hold actually win. The view idles INVISIBLE at 1px until
+         *  a bind swaps content in; no-op when styled rendering is
+         *  unavailable or the view already exists. */
+        fun prewarmStyledRenderer() {
+            ensureStyledView()
+        }
+
+        private fun lensStyledTokens() = DefinitionsDocument.Tokens(
+            text = context.themeColor(R.attr.ptText),
+            textMuted = context.themeColor(R.attr.ptTextMuted),
+            textHint = context.themeColor(R.attr.ptTextHint),
+            accent = accentColor,
+            panel = context.themeColor(R.attr.ptSurface),
+            baseFontSizePx = 16.5f * LENS_DEFINITIONS_SCALE,
+        )
 
         private fun ensureStyledView(): YomitanDefinitionsView? {
             styledView?.let { return it }
             if (styledUnavailable) return null
-            val v = YomitanDefinitionsView(
-                context,
-                DefinitionsDocument.Tokens(
-                    text = context.themeColor(R.attr.ptText),
-                    textMuted = context.themeColor(R.attr.ptTextMuted),
-                    textHint = context.themeColor(R.attr.ptTextHint),
-                    accent = accentColor,
-                    panel = context.themeColor(R.attr.ptSurface),
-                    baseFontSizePx = 16.5f * LENS_DEFINITIONS_SCALE,
-                ),
-            )
+            val v = YomitanDefinitionsView(context, lensStyledTokens())
             if (!v.isUsable()) {
                 styledUnavailable = true
                 return null
@@ -1311,20 +1559,41 @@ class MagnifierLens(
             // path, so a gesture crossing both regions can't double-fire.
             v.onBodyTap = { fireOpenTap() }
             bodyContainer.addView(v, LayoutParams(LayoutParams.MATCH_PARENT, 1))
+            // The single body's open cue must stay painted over the page.
+            singleChevronView.bringToFront()
             styledView = v
             return v
         }
 
         /** Painted-height report from the page: size the styled view, and
-         *  if this bind was waiting to swap, reveal it now — the flat
-         *  content showed instantly and the styled render replaces it only
-         *  once it actually has pixels (no blank-panel gap). */
+         *  if this bind was waiting to swap, reveal it now — flat (shown,
+         *  or held back by [holdBodyForStyled]) stands until the styled
+         *  render actually has pixels (no blank-panel gap). */
         private fun onStyledContentHeight(h: Int) {
             val sv = styledView ?: return
             if (h <= 0) {
-                pendingStyledSwap = false
+                if (pendingStyledSwap) {
+                    // Empty render: styled is not coming for this bind.
+                    // Settle on the flat body — the flat-first path already
+                    // has it showing, but a held or in-place bind doesn't.
+                    pendingStyledSwap = false
+                    cancelStyledDeadline()
+                    styledActive = false
+                    parkStyledView()
+                    definitionsContent.visibility = VISIBLE
+                    // Refit for the flat body — see the deadline runnable.
+                    onStyledHeightChanged()
+                }
                 return
             }
+            // Neither pending nor live: the bind this report belongs to was
+            // superseded WITHOUT a new setContent on this view (a split or
+            // loading rebind — [showFlatBody] parked it at 1px), so the
+            // component's render-generation guard can't catch it. Sizing the
+            // INVISIBLE view here would silently stretch the scroll range
+            // under whatever body is now showing.
+            if (!pendingStyledSwap && !styledActive) return
+            cancelStyledDeadline()
             styledContentHeight = h
             sv.layoutParams = (sv.layoutParams as? LayoutParams
                 ?: LayoutParams(LayoutParams.MATCH_PARENT, h)).apply { height = h }
@@ -1348,6 +1617,12 @@ class MagnifierLens(
             styledView = null
             styledActive = false
             pendingStyledSwap = false
+            cancelStyledDeadline()
+            splitStyledPool.forEach {
+                it.destroy()
+                (it.parent as? ViewGroup)?.removeView(it)
+            }
+            splitStyledPool.clear()
         }
 
         /** Render process death: drop the instance and stay flat — the
@@ -1358,19 +1633,35 @@ class MagnifierLens(
             styledUnavailable = true
             styledActive = false
             pendingStyledSwap = false
+            cancelStyledDeadline()
             definitionsContent.visibility = VISIBLE
+            // Pre-existing member of the same refit gap (predates the hop
+            // fix): renderer death mid-styled revealed flat in a card
+            // fitted to the dead styled panel. Same closure as the
+            // deadline runnable.
+            onStyledHeightChanged()
         }
 
         /** Back to the flat renderer as the visible body (loading, ZOOM,
-         *  or a bind with no styled payload). The styled view drops to
-         *  INVISIBLE at 1px — not GONE (it must stay laid out at real
-         *  width for the next swap's measurement), and not its old height
-         *  (an INVISIBLE view still counts toward the container's
-         *  wrap-content measure; a stale tall view would leave the scroll
-         *  full of blank space under the flat content). */
+         *  or a bind with no styled payload). The split body is fully torn
+         *  down — unlike the styled view it has no deferred measurement to
+         *  keep warm, and stale section views must not stay controller-nav
+         *  candidates. */
         private fun showFlatBody() {
+            cancelStyledDeadline()
             styledActive = false
             pendingStyledSwap = false
+            parkStyledView()
+            hideSplitBody()
+            definitionsContent.visibility = VISIBLE
+        }
+
+        /** The styled view drops to INVISIBLE at 1px — not GONE (it must
+         *  stay laid out at real width for the next swap's measurement),
+         *  and not its old height (an INVISIBLE view still counts toward
+         *  the container's wrap-content measure; a stale tall view would
+         *  leave the scroll full of blank space under the visible body). */
+        private fun parkStyledView() {
             styledView?.let { sv ->
                 sv.visibility = INVISIBLE
                 (sv.layoutParams as? LayoutParams)?.let { lp ->
@@ -1380,7 +1671,64 @@ class MagnifierLens(
                     }
                 }
             }
-            definitionsContent.visibility = VISIBLE
+        }
+
+        /** Grace hold for a warm flat→styled bind ([setDefinitions]):
+         *  NEITHER body is visible while the styled render races the
+         *  deadline. Flat is bound and ready underneath — INVISIBLE, not
+         *  GONE, so the card still sizes to it and the reveal doesn't grow
+         *  from nothing. Every exit reveals exactly one body: the
+         *  painted-height report reveals styled; the deadline, an empty
+         *  render, and renderer death reveal flat. */
+        private fun holdBodyForStyled() {
+            styledActive = false
+            parkStyledView()
+            hideSplitBody()
+            definitionsContent.visibility = INVISIBLE
+        }
+
+        /** Bounds a pending styled swap that is NOT showing flat meanwhile
+         *  (a held first reveal, or an in-place styled→styled rebind): if
+         *  the page hasn't reported painted height by the deadline, reveal
+         *  flat now. The swap stays PENDING — a late report still upgrades
+         *  to styled, exactly the old flat-first contract, so a slow render
+         *  costs the hop but never the content. */
+        private var styledDeadline: Runnable? = null
+
+        private fun scheduleStyledDeadline(delayMs: Long) {
+            cancelStyledDeadline()
+            val r = Runnable {
+                styledDeadline = null
+                styledActive = false
+                parkStyledView()
+                definitionsContent.visibility = VISIBLE
+                // The card may have been fitted to the styled height (an
+                // in-place rebind measures the OLD styled panel at bind
+                // time); refit against what's actually showing now. Grow-
+                // only, so a flat body that already fits is a no-op.
+                onStyledHeightChanged()
+            }
+            styledDeadline = r
+            postDelayed(r, delayMs)
+        }
+
+        private fun cancelStyledDeadline() {
+            styledDeadline?.let { removeCallbacks(it) }
+            styledDeadline = null
+        }
+
+        private fun hideSplitBody() {
+            splitActive = false
+            splitBindSeq++
+            applySectionTint(null)
+            splitSectionViews = emptyList()
+            // Pool views come OUT of the dying section columns (they're
+            // reused next split bind — never destroyed here); the columns
+            // themselves are discarded wholesale.
+            splitStyledPool.forEach { (it.parent as? ViewGroup)?.removeView(it) }
+            splitStyledCursor = 0
+            splitContent.removeAllViews()
+            splitContent.visibility = GONE
         }
 
         private val clipPath = Path()
@@ -1622,6 +1970,13 @@ class MagnifierLens(
          *  call only after [setDefinitions] has bound a word. */
         fun desiredCardHeightForContent(): Int {
             val chrome = bodyPillSidePadPx + bodyOuterSidePadPx + 2 * bodyEdgeBufferPx
+            if (splitActive) {
+                splitContent.measure(
+                    MeasureSpec.makeMeasureSpec(cardW - 2 * bodyEdgeBufferPx, MeasureSpec.EXACTLY),
+                    MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED),
+                )
+                return splitContent.measuredHeight + chrome
+            }
             // Styled body: a WebView can't report a synchronous measured
             // height — use the page's own painted-height report (which
             // re-runs [MagnifierLens.fitHeightToContent] whenever it lands,
@@ -1636,14 +1991,22 @@ class MagnifierLens(
             return definitionsContent.measuredHeight + chrome
         }
 
-        /** Debounce so the open handler can't fire twice from a single
-         *  gesture that crosses the open detector and any other receiver. */
+        /** Debounce so the open handlers can't fire twice from a single
+         *  gesture that crosses the open detector and any other receiver —
+         *  shared between the word and phrase opens (one gesture, one open). */
         private var lastOpenTapMs = 0L
         private fun fireOpenTap() {
             val now = SystemClock.uptimeMillis()
             if (now - lastOpenTapMs < 300L) return
             lastOpenTapMs = now
             onOpenTap()
+        }
+
+        private fun fireSecondaryOpenTap(index: Int) {
+            val now = SystemClock.uptimeMillis()
+            if (now - lastOpenTapMs < 300L) return
+            lastOpenTapMs = now
+            onSecondaryOpenTap(index)
         }
 
         private val tapDetector = GestureDetector(ctx, object : GestureDetector.SimpleOnGestureListener() {
@@ -1718,7 +2081,24 @@ class MagnifierLens(
             // lands first, tears the lens down, and destroys the WebView
             // before the click ever processes.
             if (isInStyledView(x, y)) return false
+            if (isInSplitBody(x, y)) return false
             return true
+        }
+
+        /** In split mode the definitions area belongs to the section views —
+         *  each section is its own tap target and the space between (the
+         *  divider band) deliberately inert — so the card-wide open detector
+         *  must stand down there. The pill overhangs the scroll frame and
+         *  keeps the card-wide open (it carries the WORD's identity). */
+        private fun isInSplitBody(x: Float, y: Float): Boolean {
+            if (!splitActive) return false
+            if (x >= pillView.left && x < pillView.right &&
+                y >= pillView.top && y < pillView.bottom
+            ) {
+                return false
+            }
+            return x >= definitionsScroll.left && x < definitionsScroll.right &&
+                y >= definitionsScroll.top && y < definitionsScroll.bottom
         }
 
         /** Whether a LensView-space point lands on the styled view (visible
@@ -1896,7 +2276,6 @@ class MagnifierLens(
             pillWordView.visibility = if (wordVisible) VISIBLE else GONE
             pillDividerView.visibility = if (wordVisible && showReading) VISIBLE else GONE
             pillReadingView.visibility = if (wordVisible && showReading) VISIBLE else GONE
-            pillChevronView.visibility = if (wordVisible) VISIBLE else GONE
         }
 
         /** Animate the pill's width from its current measured width to the
@@ -1972,7 +2351,6 @@ class MagnifierLens(
         private fun fitPillText(word: String, reading: String) {
             val showReading = reading.isNotEmpty()
             val fixedChrome = pillPaddingLead + pillPaddingTrail +
-                pillChevronSize + pillChevronMarginStart +
                 if (showReading) pillDividerWidth + 2 * pillGap else 0
             val textBudget = (pillMaxWidthPx - fixedChrome).coerceAtLeast(0).toFloat()
 
@@ -2007,11 +2385,12 @@ class MagnifierLens(
             pillReadingView.maxWidth = readingAllot
         }
 
-        fun setDefinitions(data: WordDefinitionData?, label: String?) {
+        fun setDefinitions(data: WordDefinitionData?, label: String?, opens: Boolean) {
             if (data == null) {
                 if (mode == Mode.ZOOM) return
                 mode = Mode.ZOOM
                 showFlatBody()
+                singleChevronView.visibility = GONE
                 definitionsScroll.visibility = GONE
                 leftChip.visibility = GONE
                 rightChip.visibility = GONE
@@ -2020,22 +2399,61 @@ class MagnifierLens(
             }
             mode = Mode.DEFINITIONS
             setLabel(data.word, data.reading, data.pitch)
+            singleChevronView.visibility = if (opens) VISIBLE else GONE
             // Drag lens keeps its compact layout — no misc line. The detail
             // sheet reached on tap-through still shows misc (it re-resolves).
             // The flat renderer binds UNCONDITIONALLY: it is the instant
             // content of every lookup and the standing fallback the styled
             // path degrades to (renderer death, empty render).
             definitionsContent.bind(data, label, LENS_DEFINITIONS_SCALE, showMisc = false)
-            showFlatBody()
             val styledData = data.styled
             val sv = if (styledData != null && styledData.structured.isNotEmpty()) {
                 ensureStyledView()
             } else {
                 null
             }
-            if (sv != null) {
-                // Styled upgrade: swap over the flat content when the page
-                // reports painted height (see [onStyledContentHeight]).
+            if (sv == null) {
+                showFlatBody()
+            } else {
+                // Styled upgrade: the page reports painted height and the
+                // styled body swaps in ([onStyledContentHeight]). Which body
+                // shows UNTIL then decides whether the user watches the same
+                // content render twice (the flat→styled "hop"):
+                //  - styled already live with the SAME logical word
+                //    (headword + reading): keep it — ptSwap repaints the
+                //    visible page in place, no flat flash, and what stands
+                //    meanwhile is that same word (deck backfill,
+                //    dwell→release). The same-word gate is a lens-enforced
+                //    invariant, not a caller courtesy: a DIFFERENT word
+                //    riding in place would leave the pill naming the new
+                //    word over the old word's body until the swap paints
+                //    (Codex adversarial catch — today's callers all pass
+                //    through ZOOM/loading/dismiss between words, but
+                //    nothing in this method's contract said so).
+                //    (A live split is impossible here: split binds go
+                //    through [showFlatBody], dropping styledActive first.)
+                //  - flat→styled on a READY shell ([isPageReady] — this
+                //    view's page is loaded, so the swap is a JS round-trip):
+                //    hold both bodies ([holdBodyForStyled]) so the reveal is
+                //    styled-or-flat, never flat-then-styled. A styled bind
+                //    of a DIFFERENT word over a live styled body lands here
+                //    too (a live page is ready by definition): the old body
+                //    parks instantly, so mislabeled content never shows.
+                //    The capture flow prewarms the shell at drag start
+                //    ([prewarmStyledRenderer]) precisely so binds land here.
+                //  - shell still loading (a just-built view — measured
+                //    ~150ms on the Thor, dwarfing any sane hold):
+                //    flat-first as always.
+                // Every path keeps flat bound as the standing fallback;
+                // the non-flat-first paths are bounded by
+                // [scheduleStyledDeadline].
+                val bindKey = data.word to data.reading
+                val inPlace = styledActive && bindKey == styledBoundKey
+                styledBoundKey = bindKey
+                val hold = !inPlace && sv.isPageReady()
+                if (!inPlace) {
+                    if (hold) holdBodyForStyled() else showFlatBody()
+                }
                 pendingStyledSwap = true
                 sv.setContent(
                     DefinitionsDocument.contentHtml(
@@ -2049,6 +2467,11 @@ class MagnifierLens(
                     styledData.dictStyles,
                     styledData.sourceLanguage,
                 )
+                if (inPlace || hold) {
+                    scheduleStyledDeadline(
+                        if (inPlace) STYLED_INPLACE_DEADLINE_MS else STYLED_HOLD_DEADLINE_MS,
+                    )
+                }
             }
             definitionsScroll.scrollTo(0, 0)
             definitionsScroll.visibility = VISIBLE
@@ -2057,10 +2480,288 @@ class MagnifierLens(
             invalidate()
         }
 
+        /** Split body — see [MagnifierLens.setSplitDefinitions]. The pill
+         *  keeps the PRIMARY (tapped) unit's identity; each section carries
+         *  its own headword header (the pill can't name them all) and, when
+         *  it opens, a trailing chevron + full-section tap target.
+         *  [secondariesOnTop] picks the visual order (the longer unit
+         *  renders on top on every surface). Every section binds flat
+         *  instantly and upgrades to its OWN styled renderer when its data
+         *  carries a structured payload ([attachSectionStyled]) — one
+         *  WebView per section, because a single shared page's body-tap
+         *  report couldn't attribute a tap to a section. */
+        fun setSplitDefinitions(
+            primary: LensSection,
+            secondaries: List<LensSection>,
+            secondariesOnTop: Boolean,
+        ) {
+            mode = Mode.DEFINITIONS
+            setLabel(primary.data.word, primary.data.reading, primary.data.pitch)
+            // Styled steps aside; any prior split is torn down for rebuild.
+            showFlatBody()
+            definitionsContent.visibility = GONE
+            // Sections carry their own open cues.
+            singleChevronView.visibility = GONE
+            // The primary section rendering FIRST (the JA shape: expression
+            // on top) drops its header — the pill directly above already
+            // carries the same headword + reading, and repeating them costs
+            // a row. A bottom-rendered primary (Latin: word under the
+            // phrase) keeps its header for scannability.
+            val ordered: List<Triple<LensSection, () -> Unit, Boolean>> = buildList {
+                val secs = secondaries.mapIndexed { i, s ->
+                    Triple(s, { fireSecondaryOpenTap(i) }, true)
+                }
+                if (secondariesOnTop) {
+                    addAll(secs)
+                    add(Triple(primary, ::fireOpenTap, true))
+                } else {
+                    add(Triple(primary, ::fireOpenTap, false))
+                    addAll(secs)
+                }
+            }
+            val views = mutableListOf<View>()
+            ordered.forEachIndexed { i, (section, fire, showHeader) ->
+                if (i > 0) splitContent.addView(buildSplitDivider())
+                addSplitSection(section, fire, showHeader)?.let { views += it }
+            }
+            splitSectionViews = views
+            splitActive = true
+            splitContent.visibility = VISIBLE
+            definitionsScroll.scrollTo(0, 0)
+            definitionsScroll.visibility = VISIBLE
+            invalidate()
+        }
+
+        /** Builds one split section — headword header (name + reading side
+         *  by side, chevron alone at the trailing edge when it opens) over
+         *  the flat definitions body — into [splitContent]. [showHeader]
+         *  false skips the header entirely (the top-rendered primary: the
+         *  pill already names it). Returns the section root when it's a tap
+         *  target ([LensSection.opens]), null otherwise. [fire] is the
+         *  section's (already-debounced) open action. */
+        private fun addSplitSection(
+            section: LensSection,
+            fire: () -> Unit,
+            showHeader: Boolean,
+        ): View? {
+            val col = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            if (showHeader) {
+                val header = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    // Symmetric insets for the split sections — the single
+                    // view's scrollbar-gutter asymmetry (+8dp on the right)
+                    // read as a lopsided frame here.
+                    setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx - dp(6f), 0)
+                }
+                // Name and reading sit ADJACENT ([Name] [Reading]); the
+                // stretch lives in the spacer after them, so only the
+                // chevron is pushed to the trailing edge.
+                header.addView(
+                    TextView(context).apply {
+                        text = section.data.word
+                        setTextColor(panelPrimaryText)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    },
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
+                section.data.reading?.let { reading ->
+                    header.addView(
+                        TextView(context).apply {
+                            text = reading
+                            setTextColor(panelSecondaryText)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            maxLines = 1
+                            ellipsize = TextUtils.TruncateAt.END
+                        },
+                        LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                        ).apply { marginStart = dp(8f) },
+                    )
+                }
+                if (section.opens) {
+                    header.addView(
+                        View(context),
+                        LinearLayout.LayoutParams(0, 1, 1f),
+                    )
+                    header.addView(
+                        buildSectionChevron(),
+                        LinearLayout.LayoutParams(sectionChevronSize, sectionChevronSize)
+                            .apply { marginStart = dp(8f) },
+                    )
+                }
+                col.addView(
+                    header,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ).apply { bottomMargin = dp(2f) },
+                )
+            }
+            val body = WordDefinitionsView(context).apply {
+                setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx - dp(6f), 0)
+                metaChipFill = panelBadgeBg
+                emptyPlaceholder = context.getString(R.string.word_detail_no_definitions)
+                bind(section.data, section.label, LENS_DEFINITIONS_SCALE, showMisc = false)
+            }
+            // Flat and (maybe) styled renderers share one holder, so the
+            // styled swap-in is a visibility flip INSIDE the section —
+            // invisible to the column layout around it.
+            val holder = FrameLayout(context).apply {
+                addView(body, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+            }
+            attachSectionStyled(holder, body, section, fire)
+            if (!showHeader && section.opens) {
+                // A headerless section keeps its open affordance: the
+                // chevron floats over the body's top-right at the CONTENT
+                // edge — the same column every header chevron ends at —
+                // level with the first row, no header row, no vertical
+                // cost; the single-unit body ([singleChevronView]) uses
+                // the same placement. (A maximal-width first gloss line
+                // could reach under it; the usual first row is the
+                // left-packed meta chips.)
+                // Absolute RIGHT, matching the lens's canvas-aligned layout
+                // discipline. Added LAST so it stays painted over a styled
+                // swap-in.
+                holder.addView(
+                    buildSectionChevron(),
+                    LayoutParams(
+                        sectionChevronSize, sectionChevronSize,
+                        Gravity.TOP or Gravity.RIGHT,
+                    ).apply {
+                        topMargin = dp(4f)
+                        rightMargin = bodyHPaddingPx - dp(6f)
+                    },
+                )
+            }
+            col.addView(
+                holder,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            if (section.opens) {
+                col.isClickable = true
+                col.setOnClickListener { fire() }
+            }
+            splitContent.addView(
+                col,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            return col.takeIf { section.opens }
+        }
+
+        /** The section's styled (WebView) upgrade, mirroring the single-unit
+         *  body's contract: the flat [body] renders instantly and stands as
+         *  the fallback; when the section's data carries a structured
+         *  payload, a pooled renderer binds behind it — INVISIBLE at 1px,
+         *  never GONE, for the same laid-out-at-real-width reasons as
+         *  [ensureStyledView] — and swaps over the flat view only once the
+         *  page reports painted height. Body taps report through the page's
+         *  own hit testing ([YomitanDefinitionsView.onBodyTap]) into the
+         *  SECTION's (already-debounced) open action — per-section views are
+         *  exactly what makes tap attribution possible here, where one
+         *  shared page couldn't say which section a tap landed in — and
+         *  link taps stay live, handing off to the browser as in the
+         *  single-unit body. */
+        private fun attachSectionStyled(
+            holder: FrameLayout,
+            body: WordDefinitionsView,
+            section: LensSection,
+            fire: () -> Unit,
+        ) {
+            val styledData = section.data.styled ?: return
+            if (styledData.structured.isEmpty()) return
+            val sv = obtainSplitStyledView() ?: return
+            val bindSeq = splitBindSeq
+            sv.visibility = INVISIBLE
+            // A non-opening section's body must stay inert — and a pooled
+            // view must never keep a previous bind's handler.
+            sv.onBodyTap = if (section.opens) {
+                { fire() }
+            } else {
+                null
+            }
+            sv.onContentHeight = { h ->
+                // Superseded-bind reports must not touch the live tree; the
+                // splitActive check additionally covers the window between
+                // this bind and a non-split rebind that hasn't detached yet.
+                if (h > 0 && bindSeq == splitBindSeq && splitActive) {
+                    sv.layoutParams = (sv.layoutParams as? LayoutParams
+                        ?: LayoutParams(LayoutParams.MATCH_PARENT, h)).apply { height = h }
+                    if (sv.visibility != VISIBLE) {
+                        sv.visibility = VISIBLE
+                        body.visibility = GONE
+                    }
+                    onStyledHeightChanged()
+                }
+            }
+            sv.onRendererGone = {
+                // The component destroyed itself; drop it from the pool (its
+                // siblings will report their own deaths) and never build
+                // another — flat is the standing fallback.
+                splitStyledPool.remove(sv)
+                (sv.parent as? ViewGroup)?.removeView(sv)
+                styledUnavailable = true
+                if (bindSeq == splitBindSeq) body.visibility = VISIBLE
+            }
+            holder.addView(sv, LayoutParams(LayoutParams.MATCH_PARENT, 1))
+            sv.setContent(
+                DefinitionsDocument.contentHtml(
+                    section.data,
+                    styledData.structured,
+                    localizePos = { context.localizePos(it) },
+                    showMisc = false,
+                    metaChips = styledMetaChips(context, section.data),
+                    label = section.label,
+                ),
+                styledData.dictStyles,
+                styledData.sourceLanguage,
+            )
+        }
+
+        private fun buildSectionChevron(): ImageView = ImageView(context).apply {
+            val d = AppCompatResources.getDrawable(context, R.drawable.ic_lens_chevron)?.mutate()
+            if (d != null) {
+                DrawableCompat.setTint(d, panelSecondaryText)
+                setImageDrawable(d)
+            }
+        }
+
+        /** Hairline between the split sections — card-border color, inset to
+         *  the text column. */
+        private fun buildSplitDivider(): View = View(context).apply {
+            setBackgroundColor(cardBorderColor)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                (density * 1f).toInt().coerceAtLeast(1),
+            ).apply {
+                topMargin = dp(9f)
+                bottomMargin = dp(9f)
+                marginStart = bodyHPaddingPx - dp(6f)
+                marginEnd = bodyHPaddingPx - dp(6f)
+            }
+        }
+
         fun setLoading(word: String?, reading: String?) {
             mode = Mode.LOADING
             setLabel(word, reading)
             showFlatBody()
+            // Nothing to open into yet; the bind that follows decides.
+            singleChevronView.visibility = GONE
             populateLoading()
             definitionsScroll.scrollTo(0, 0)
             definitionsScroll.visibility = VISIBLE
@@ -2138,8 +2839,11 @@ class MagnifierLens(
             navPreDraw?.let { viewTreeObserver.removeOnPreDrawListener(it) }
             navPreDraw = null
             stopNavScroll()
+            keyPressView?.let { ConfirmKeyPress.cancel(it) }
+            keyPressView = null
             navCursor = null
             navConsumedDown.clear()
+            applySectionTint(null)
             focusRing.setTarget(null, null)
             dismissRequest = null
             clearFocus()
@@ -2171,8 +2875,11 @@ class MagnifierLens(
             syncNavRing()
         }
 
-        private fun navCandidates(): List<View> =
-            listOf(pillView, leftChip, rightChip).filter { it.isShown }
+        private fun navChromeRow(): List<View> =
+            listOf(leftChip, pillView, rightChip).filter { it.isShown }
+
+        private fun navSections(): List<View> =
+            splitSectionViews.filter { it.isShown }
 
         /** Item rect in THIS view's coordinates. Chips ring their 32dp visible
          *  disk, not the 48dp hit halo. */
@@ -2190,8 +2897,43 @@ class MagnifierLens(
             return true
         }
 
+        /** The split section currently carrying the cursor tint, so the
+         *  per-preDraw [syncNavRing] only mutates backgrounds on an actual
+         *  cursor change. */
+        private var tintedSection: View? = null
+
+        /** Move the cursor tint to [target] (null clears). Sections render
+         *  selection as a soft accent fill (10% alpha) instead of the
+         *  boundary ring — a full-width definitions cell wants a
+         *  background, not chrome. The inset is a LayerDrawable layer inset
+         *  with padding pinned to zero, NOT an InsetDrawable: a background's
+         *  reported padding becomes the VIEW's padding on setBackground,
+         *  which shifted the section's text on selection. */
+        private fun applySectionTint(target: View?) {
+            if (tintedSection === target) return
+            tintedSection?.background = null
+            tintedSection = target
+            target?.background = LayerDrawable(
+                arrayOf(
+                    GradientDrawable().apply {
+                        setColor(withAlpha(accentColor, 0x1A))
+                        cornerRadius = dp(10f).toFloat()
+                    },
+                ),
+            ).apply {
+                setLayerInset(0, dp(8f), dp(2f), dp(8f), dp(2f))
+                setPadding(0, 0, 0, 0)
+            }
+        }
+
         private fun syncNavRing() {
             val cur = navCursor
+            val curSection = cur?.takeIf { it in splitSectionViews && it.isShown }
+            applySectionTint(curSection)
+            if (curSection != null) {
+                focusRing.setTarget(null, null)
+                return
+            }
             if (cur == null || !navRectInView(cur, navTmp)) {
                 focusRing.setTarget(null, null)
                 return
@@ -2199,18 +2941,31 @@ class MagnifierLens(
             focusRing.setTarget(navTmp, null)
         }
 
-        /** Dpad + A for the sticky lens (B stays in [LensRoot]). A fires on
-         *  UP: the pill and the Anki chip tear this focused window down
-         *  (detail / review launch), so the pair must be consumed first —
-         *  the same invariant as the sheet's activations. */
+        /** Dpad + A for the sticky lens (B stays in [LensRoot]). On the Anki
+         *  chip the A is delivered as a real press on the chip
+         *  ([ConfirmKeyPress]), so a held A runs the chip's own long-press
+         *  (the headless one-tap) at the long-press timeout, exactly as a
+         *  held finger does; an early release is the chip's click (the
+         *  review sheet). Everything else activates on the consumed UP.
+         *  Any of these — the timeout-fired one-tap included — may dismiss
+         *  this focused window mid-press: the dismissal seam lingers the
+         *  window as an invisible key sink until every tracked press
+         *  releases ([WindowKeyPairGuard] on [LensRoot]), so a still-held
+         *  key's UP cannot orphan into the app beneath. */
         fun handleNavKey(ev: KeyEvent): Boolean {
             if (!isInteractive) return false
             if (ev.action == KeyEvent.ACTION_UP) {
                 if (!navConsumedDown.remove(ev.keyCode)) return false
                 if (ControllerKeys.isActivate(ev.keyCode)) {
-                    val cur = navCursor
-                    // First A selects the pill; only a second activates.
-                    if (cur == null || !cur.isShown) focusPill() else activateNav(cur)
+                    val held = keyPressView
+                    if (held != null) {
+                        keyPressView = null
+                        ConfirmKeyPress.up(held, ev)
+                    } else {
+                        val cur = navCursor
+                        // First A selects the pill; only a second activates.
+                        if (cur == null || !cur.isShown) focusPill() else activateNav(cur)
+                    }
                 }
                 return true
             }
@@ -2218,27 +2973,79 @@ class MagnifierLens(
             val dir = ControllerKeys.direction(ev.keyCode)
             if (dir == null && !ControllerKeys.isActivate(ev.keyCode)) return false
             if (dir != null) {
+                // Cursor leaving the chip mid-press: cancel the view press
+                // (no click, no pending long-press). The ref is deliberately
+                // KEPT — the eventual A-UP then routes to the now-unpressed
+                // chip and no-ops, instead of activating the moved-to item.
+                keyPressView?.let { ConfirmKeyPress.cancel(it) }
                 val cur = navCursor
                 if (cur == null || !cur.isShown) focusPill() else moveNav(cur, dir)
+            } else if (ev.repeatCount == 0 && keyPressView == null &&
+                navCursor === rightChip && rightChip.isShown
+            ) {
+                keyPressView = rightChip
+                ConfirmKeyPress.down(rightChip, ev)
             }
             navConsumedDown.add(ev.keyCode)
             return true
         }
 
+        /** The view holding an in-flight forwarded key press (the Anki chip —
+         *  the lens's one hold-capable item). See [ConfirmKeyPress]. */
+        private var keyPressView: View? = null
+
+        /** Explicit nav graph instead of spatial scoring. The lens is two
+         *  strips: the chrome row (Speak chip · pill · Anki chip) along one
+         *  card edge, and the split body's sections stacked on the body
+         *  side. Spatial scoring breaks on this layout — a section is a
+         *  card-wide rect centered like the pill, so once the body has
+         *  scrolled (unclipped rects, center rounding) a section can beat a
+         *  chip on a LEFT/RIGHT move with a near-zero axis distance.
+         *  LEFT/RIGHT walk the chrome row only; the vertical axis moves
+         *  between the row and the sections (direction flip-aware: the
+         *  body is below the chrome when the lens sits above the word,
+         *  above it when flipped). */
         private fun moveNav(cur: View, dir: SheetNavGeometry.Dir) {
-            val cands = navCandidates()
-            val fromIdx = cands.indexOf(cur)
-            if (fromIdx < 0) {
+            val chrome = navChromeRow()
+            val sections = navSections()
+            if (cur !in chrome && cur !in sections) {
                 focusPill()
                 return
             }
-            val rects = cands.map { v ->
-                val r = Rect()
-                navRectInView(v, r)
-                SheetNavGeometry.NavRect(r.left, r.top, r.right, r.bottom)
+            val towardBody =
+                if (lensFlipped) SheetNavGeometry.Dir.UP else SheetNavGeometry.Dir.DOWN
+            val towardChrome =
+                if (lensFlipped) SheetNavGeometry.Dir.DOWN else SheetNavGeometry.Dir.UP
+            // Walk order into/through the body follows the physical axis:
+            // chrome-on-top enters at the stack's top (phrase) and walks
+            // down; a flipped lens (chrome at the bottom) enters at the
+            // stack's bottom (word) and walks up.
+            val bodyWalk = if (lensFlipped) sections.reversed() else sections
+            val next: View = when {
+                cur in chrome &&
+                    (dir == SheetNavGeometry.Dir.LEFT || dir == SheetNavGeometry.Dir.RIGHT) -> {
+                    val i = chrome.indexOf(cur)
+                    chrome.getOrNull(if (dir == SheetNavGeometry.Dir.LEFT) i - 1 else i + 1)
+                }
+                cur in chrome && dir == towardBody -> bodyWalk.firstOrNull()
+                cur in sections && dir == towardBody ->
+                    bodyWalk.getOrNull(bodyWalk.indexOf(cur) + 1)
+                cur in sections && dir == towardChrome ->
+                    bodyWalk.getOrNull(bodyWalk.indexOf(cur) - 1)
+                        ?: pillView.takeIf { it.isShown }
+                else -> null
+            } ?: return
+            navCursor = next
+            // A selected definitions section reads top-aligned: scroll its
+            // top to where the first row rests at scroll 0 (clear of the
+            // pill band — section tops within splitContent ARE resting
+            // scroll offsets, see the scroll's padding derivation). Stepping
+            // back out to the chrome restores the resting scroll.
+            if (next in sections) {
+                definitionsScroll.smoothScrollTo(0, next.top)
+            } else if (cur in sections) {
+                definitionsScroll.smoothScrollTo(0, 0)
             }
-            val next = SheetNavGeometry.nextInDirection(rects[fromIdx], rects, dir) ?: return
-            navCursor = cands[next]
             syncNavRing()
         }
 
@@ -2247,6 +3054,9 @@ class MagnifierLens(
                 v === pillView -> fireOpenTap()
                 v === leftChip -> onSpeakTap()
                 v === rightChip -> onAnkiTap()
+                // Sections carry their own (debounced) open action as their
+                // click listener — one wiring for touch and controller.
+                v in splitSectionViews -> v.performClick()
             }
         }
 

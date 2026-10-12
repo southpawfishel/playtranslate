@@ -31,7 +31,8 @@ object PosVocabulary {
     /** Universal POS we localize. Anything outside this set renders English. */
     enum class PosCode {
         NOUN, PRONOUN, VERB, ADJECTIVE, ADVERB, PARTICLE, CONJUNCTION,
-        INTERJECTION, PREPOSITION, PREFIX, SUFFIX, COUNTER, NUMERAL,
+        INTERJECTION, PREPOSITION, POSTPOSITION, DETERMINER, ARTICLE,
+        PREFIX, SUFFIX, COUNTER, NUMERAL,
         EXPRESSION, PHRASE, PROVERB, ABBREVIATION, CONTRACTION, AUXILIARY,
     }
 
@@ -77,6 +78,12 @@ object PosVocabulary {
         put(PosCode.CONJUNCTION, "conjunction", "conj")
         put(PosCode.INTERJECTION, "interjection", "interjection (kandoushi)", "intj")
         put(PosCode.PREPOSITION, "prep")
+        // det / article / postp entered CONTENT_POS in the 2026-08 coverage
+        // fix (en "every", fr/es possessives+articles, hi postpositions), so
+        // rebuilt packs store these Wiktionary tokens.
+        put(PosCode.POSTPOSITION, "postp", "postposition")
+        put(PosCode.DETERMINER, "det", "determiner")
+        put(PosCode.ARTICLE, "article")
         put(PosCode.PREFIX, "prefix")
         put(PosCode.SUFFIX, "suffix")
         put(PosCode.COUNTER, "counter")
@@ -136,4 +143,34 @@ object PosVocabulary {
             .replace('`', '\'')
             .replace('´', '\'')   // acute accent
             .replace('’', '\'')   // right single quote
+}
+
+/**
+ * The expression-class verdict carried as [DictionaryEntry.isExpression]:
+ * true when any sense's POS marks the entry EXPRESSION-class (JMdict exp /
+ * phrase / proverb) rather than an ordinary word or compound. Evaluated
+ * once, where the entry is built (DictionaryManager.buildEntry and the
+ * Wiktionary / Chinese builders); the property's doc says why it is carried
+ * instead of re-derived where it is read.
+ *
+ * The gate deciding whether a no-whitespace fused span's member words are
+ * offered: 気になる [exp,v5r] yes, 図書館 [n] no — Sudachi's short units
+ * plus the re-glob fuse BOTH, and only the entry's own POS separates them.
+ * ANY sense, not the first one alone (where [kanaOnlyFrom] takes the first):
+ * the class describes the join itself, so a headword listed as an expression
+ * in any of its senses still owes the reader its member words.
+ */
+fun expressionFrom(senses: List<Sense>): Boolean = senses.any { isExpressionPos(it.partsOfSpeech) }
+
+/** The expression-class test on ONE sense's parsed POS list — JMdict exp /
+ *  phrase / proverb. Shared by [expressionFrom] (built entries) and the
+ *  member re-glob's phrase exclusion, which reads raw sense rows
+ *  (DictionaryManager.expressionClassForms) so the two can't drift. */
+fun isExpressionPos(partsOfSpeech: List<String>): Boolean = partsOfSpeech.any {
+    when (PosVocabulary.canonical(it)) {
+        PosVocabulary.PosCode.EXPRESSION,
+        PosVocabulary.PosCode.PHRASE,
+        PosVocabulary.PosCode.PROVERB -> true
+        else -> false
+    }
 }

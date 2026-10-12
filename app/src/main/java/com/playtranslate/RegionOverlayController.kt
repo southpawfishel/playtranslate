@@ -11,6 +11,8 @@ import android.view.View
 import android.view.WindowManager
 import com.playtranslate.overlay.OverlayHost
 import com.playtranslate.ui.RegionDragView
+import com.playtranslate.ui.RegionEditorChrome
+import com.playtranslate.overlay.OwnWindows
 
 /**
  * Owns the game-screen region overlays: the region picker preview, the brief
@@ -101,7 +103,7 @@ class RegionOverlayController(
         if (region.isFullScreen) return
 
         val ctx = context.createDisplayContext(display)
-        val wm = ctx.getSystemService(WindowManager::class.java) ?: return
+        val wm = OwnWindows.manager(ctx) ?: return
         val dp = ctx.resources.displayMetrics.density
         val displayLabel = region.displayName(ctx)
 
@@ -290,7 +292,7 @@ class RegionOverlayController(
         onRegionChanged: (RegionEntry) -> Unit
     ) {
         hideRegionDragOverlay()
-        val wm = context.createDisplayContext(display).getSystemService(WindowManager::class.java) ?: return
+        val wm = OwnWindows.manager(context.createDisplayContext(display)) ?: return
         val view = RegionDragView(context.createDisplayContext(display)).apply {
             setRegion(initRegion.top, initRegion.bottom, initRegion.left, initRegion.right)
             this.onRegionChanged = onRegionChanged
@@ -325,22 +327,18 @@ class RegionOverlayController(
         hideTranslationOverlay()
         hideRegionOverlay()
 
-        val currentRegion = CaptureService.instance?.activeRegionForDisplay(display.displayId)
-        val initRegion = if (currentRegion == null || currentRegion.isFullScreen)
-            RegionEntry("", 0.25f, 0.75f, 0.25f, 0.75f) else currentRegion
+        val existingRegion = CaptureService.instance?.activeRegionForDisplay(display.displayId)
+            ?.takeUnless { it.isFullScreen }
+        val initRegion = existingRegion ?: RegionEntry("", 0.25f, 0.75f, 0.25f, 0.75f)
 
         showRegionDragOverlay(display, initRegion) { _ -> }
         dragView?.onDragStart = {
             regionEditorBar?.visibility = View.INVISIBLE
             regionEditorLabel?.visibility = View.INVISIBLE
         }
-        dragView?.onDragEnd = {
-            regionEditorBar?.visibility = View.VISIBLE
-            regionEditorLabel?.visibility = View.VISIBLE
-        }
 
         val ctx = context.createDisplayContext(display)
-        val wm = ctx.getSystemService(WindowManager::class.java) ?: return
+        val wm = OwnWindows.manager(ctx) ?: return
         val dp = ctx.resources.displayMetrics.density
         val btnSize = (48 * dp).toInt()
         val barPad = (12 * dp).toInt()
@@ -444,21 +442,6 @@ class RegionOverlayController(
         bar.addView(trashBtn)
         bar.addView(useBtn)
 
-        val barParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayHost.windowType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            y = (32 * dp).toInt()
-        }
-
-        overlayHost.addOverlayWindow(bar, wm, barParams, display.displayId)
-        regionEditorBar = bar
-
         val label = android.widget.TextView(ctx).apply {
             text = ctx.getString(R.string.region_overlay_drag_instruction)
             setTextColor(textColor)
@@ -471,13 +454,39 @@ class RegionOverlayController(
                 cornerRadius = 100 * dp
             }
         }
-        val screenW = context.createDisplayContext(display).displaySizePx().x
-        val maxLabelW = screenW - (32 * dp).toInt()
+        val screenSize = ctx.displaySizePx()
+        val maxLabelW = screenSize.x - (32 * dp).toInt()
         label.setSingleLine(true)
         label.measure(
             View.MeasureSpec.makeMeasureSpec(maxLabelW, View.MeasureSpec.AT_MOST),
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
         )
+        bar.measure(
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        val stackDepth = RegionEditorChrome.stackDepthPx(
+            label.measuredHeight, bar.measuredHeight, dp
+        ).toFloat() / screenSize.y
+        fun chromeGravity(region: ClosedFloatingPointRange<Float>?) =
+            RegionEditorChrome.edgeFor(region, topChromeEnd = stackDepth, bottomChromeStart = 1f - stackDepth)
+                .gravity or Gravity.CENTER_HORIZONTAL
+        val gravity = chromeGravity(existingRegion?.let { it.top..it.bottom })
+
+        val barParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayHost.windowType,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            this.gravity = gravity
+            y = RegionEditorChrome.barOffsetPx(label.measuredHeight, dp)
+        }
+        overlayHost.addOverlayWindow(bar, wm, barParams, display.displayId)
+        regionEditorBar = bar
+
         val labelParams = WindowManager.LayoutParams(
             label.measuredWidth,
             label.measuredHeight,
@@ -487,11 +496,28 @@ class RegionOverlayController(
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = (16 * dp).toInt()
+            this.gravity = gravity
+            y = RegionEditorChrome.pillOffsetPx(dp)
         }
         overlayHost.addOverlayWindow(label, wm, labelParams, display.displayId)
         regionEditorLabel = label
+
+        // The chrome comes back at each drag's end on the edge the box, as it
+        // now stands, calls for. The same params objects OverlayHost holds,
+        // so its capture blanking keeps seeing what is on screen.
+        dragView?.let { drag ->
+            drag.onDragEnd = {
+                val next = chromeGravity(drag.topFraction..drag.bottomFraction)
+                if (next != barParams.gravity) {
+                    barParams.gravity = next
+                    labelParams.gravity = next
+                    try { wm.updateViewLayout(bar, barParams) } catch (_: Exception) {}
+                    try { wm.updateViewLayout(label, labelParams) } catch (_: Exception) {}
+                }
+                bar.visibility = View.VISIBLE
+                label.visibility = View.VISIBLE
+            }
+        }
     }
 
     fun hideRegionEditor() {

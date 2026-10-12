@@ -25,6 +25,19 @@ data class TokenSpan(
 )
 
 /**
+ * One multi-word dictionary expression located in a text
+ * ([SourceLanguageEngine.phrasesIn]): [range] is its char range there,
+ * [surface] the verbatim slice at that range, [lookupForm] the
+ * space-joined, engine-normalized key ready for
+ * [SourceLanguageEngine.lookup].
+ */
+data class PhraseOccurrence(
+    val range: IntRange,
+    val surface: String,
+    val lookupForm: String,
+)
+
+/**
  * A hint-text annotation positioned over a range of the source text (e.g.
  * furigana over kanji). Phase 1 only produces these from [JapaneseEngine].
  */
@@ -104,6 +117,83 @@ interface SourceLanguageEngine {
     /** Full dictionary lookup. [reading] is a narrowing hint (JA hiragana). */
     suspend fun lookup(word: String, reading: String? = null): DictionaryResponse?
 
+    /**
+     * The longest multi-word dictionary expression CONTAINING the word that
+     * contains [offset] in [text], returned as a lookup key for [lookup] —
+     * null when no known expression spans that word. Word-tap surfaces call
+     * this so a tap on ANY member word — "great" OR "deal" in "a great
+     * deal", "door" in "open the door" — surfaces the expression alongside
+     * the word itself (the popup shows both; the tap target stays the
+     * single word).
+     *
+     * Defaulted to null: engines whose segmentation already resolves
+     * multi-token units (JA re-glob, ZH/TH dictionary segmentation) have
+     * nothing to add at tap time. [LatinEngine] overrides it for the
+     * space-delimited languages, whose one-token-per-word [tokenize] can't
+     * reach the packs' multi-word headwords.
+     */
+    suspend fun longestPhraseAt(text: String, offset: Int): String? = null
+
+    /**
+     * Every known multi-word dictionary expression in [text], as
+     * non-overlapping occurrences in text order — the sentence-level
+     * counterpart of [longestPhraseAt], used to surface idiomatic phrases
+     * as their own rows in the words list (and, through it, the Anki
+     * sentence card). Overlaps resolve by longest-first claiming with a
+     * leftmost tie-break — the same pinned no-data-signal ordering
+     * [longestPhraseAt] uses.
+     *
+     * Defaulted to empty: engines whose segmentation already emits
+     * multi-word units as single tokens (JA re-glob, ZH/TH dictionary
+     * segmentation) have nothing to add. [LatinEngine] overrides it for
+     * the space-delimited languages.
+     */
+    suspend fun phrasesIn(text: String): List<PhraseOccurrence> = emptyList()
+
+    /**
+     * The member words of the multi-word unit [headword] — each a
+     * [TokenSpan] whose lookupForm feeds the shared row/section pipelines.
+     * Drives BOTH member surfaces: the popup's member sections under a
+     * fused unit, and the detail page's Words section. Empty when
+     * [headword] isn't a multi-member unit or no member qualifies.
+     *
+     * [expressionClass] is the caller's POS verdict on the entry
+     * ([com.playtranslate.model.DictionaryEntry.isExpression]; spaced headwords count
+     * as expressions by form). [JapaneseEngine] widens it structurally: a
+     * STANDALONE particle or auxiliary unit marks a phrase whatever JMdict
+     * tagged it (瞬く間に and 一斉に are adv); glue folded into a verb is
+     * inflection, not phrase structure (思いがけない, 分からず屋 are
+     * compounds). Phrases get the loose
+     * per-member gate (気になる → 気, 瞬く間に → 瞬く and 間 — one char,
+     * load-bearing). Non-phrase fused entries — transparent compounds like
+     * 放送番組 and 国内向け — get members only when EVERY unit is accounted
+     * for: a ≥2-char kanji-bearing word (rendered), a ≥2-char katakana
+     * word (excused — katakana self-decodes, so ペース配分 offers 配分 with
+     * no ペース row), or a grammar unit (excused). Partial decompositions
+     * of OPAQUE units mislead (図書館 → 図書 alone implies 館 is nothing,
+     * and single characters are the kanji-breakdown section's job), so any
+     * other unit turns the whole offer off. Members come out at WORD
+     * granularity: sub-words re-fuse (日本語), sub-phrases don't (瞬く間).
+     *
+     * [headwordReading] is the displayed headword's reading, used to pick
+     * each member's reading hint by alignment (瞬く reads またたく inside
+     * またたくまに, not the tokenizer's しばたたく); null keeps the
+     * tokenizer's hints.
+     *
+     * Callers must pass the DISPLAYED headword form: for JA `uk` entries
+     * the kanji variant (かも知れない) would let 知れ through the
+     * kanji-member gate the displayed kana form (かもしれない) correctly
+     * fails. Default: whitespace split, the space-delimited languages'
+     * behavior ([whitespaceMemberWords]), which ignores [expressionClass];
+     * [JapaneseEngine] overrides with a member-level re-glob (members come
+     * out at dictionary-word granularity, kanji-bearing only).
+     */
+    suspend fun memberWordsOf(
+        headword: String,
+        expressionClass: Boolean = true,
+        headwordReading: String? = null,
+    ): List<TokenSpan> = whitespaceMemberWords(headword)
+
     /** Character-level lookup. JA returns [com.playtranslate.model.KanjiDetail];
      *  ZH returns [com.playtranslate.model.HanziDetail]. Other engines return null.
      *
@@ -120,18 +210,28 @@ interface SourceLanguageEngine {
      * reading-bearing surface projects from (see [SentenceAnnotation] and
      * docs/sentence-annotation-refactor.md). FULL-tier engines (JA, ZH)
      * override with dictionary-resolved, text-tiled annotations; this
-     * default is the LEXICAL/PLAIN tier: offsetless spans from [tokenize]
-     * (no consumer of a lexical annotation renders ruby, so tiling is not
-     * required), or one plain span when tokenization yields nothing.
+     * default is the LEXICAL/PLAIN tier: spans from [tokenize] positioned
+     * in [text] by a forward-cursor search (every engine's tokenizer emits
+     * verbatim slices in text order, so the walk is exact, and duplicate
+     * surfaces resolve to successive occurrences). Offsets matter here: the
+     * drag lens hit-tests lexical spans by [AnnotatedSpan.start] and drops
+     * offsetless ones. Spans need not tile — whitespace/punctuation gaps
+     * stay uncovered — and a surface the search can't locate keeps the
+     * offsetless sentinel without derailing the spans after it. One plain
+     * span when tokenization yields nothing.
      */
     suspend fun annotate(
         text: String,
         depth: AnnotationDepth = AnnotationDepth.FULL,
     ): SentenceAnnotation {
         if (text.isEmpty()) return SentenceAnnotation(text, profile.id, 0, emptyList())
+        var pos = 0
         val spans = tokenize(text).map {
+            val at = text.indexOf(it.surface, pos)
+            if (at >= 0) pos = at + it.surface.length
             AnnotatedSpan(
-                start = -1, end = -1, surface = it.surface,
+                start = at, end = if (at < 0) -1 else at + it.surface.length,
+                surface = it.surface,
                 lookupForm = it.lookupForm, reading = it.reading,
                 inflections = it.inflections,
             )
@@ -154,6 +254,21 @@ interface SourceLanguageEngine {
 
     fun close()
 }
+
+private val MEMBER_SPLIT_WHITESPACE = Regex("\\s+")
+
+/** [SourceLanguageEngine.memberWordsOf]'s default: whitespace split of a
+ *  space-delimited multi-word headword ("a great deal" → a/great/deal),
+ *  letter-bearing words only, deduped; empty below two members (a
+ *  single-word headword has no Words section). Top-level + internal so the
+ *  contract is unit-testable without an engine instance. */
+internal fun whitespaceMemberWords(headword: String): List<TokenSpan> =
+    headword.split(MEMBER_SPLIT_WHITESPACE)
+        .filter { w -> w.any(Char::isLetter) }
+        .distinct()
+        .takeIf { it.size >= 2 }
+        .orEmpty()
+        .map { TokenSpan(surface = it, lookupForm = it) }
 
 /**
  * Process-scoped engine cache. Enforces application-context at the boundary so
@@ -183,6 +298,40 @@ object SourceLanguageEngines {
         val victims = cache.keys.filter { it.packId == packId }
         for (id in victims) cache.remove(id)?.close()
     }
+
+    /**
+     * Preload the engine for [id], off the main thread: the app does it at
+     * launch, and CaptureService after every change of the game language.
+     * Callers gate on [LanguagePackStore.isInstalled]. Recovery behavior is
+     * tiered so we don't punish transient failures with destructive pack
+     * deletion:
+     *  - [PreloadResult.PackMissing]: shouldn't happen (caller gated on
+     *    isInstalled). Log as anomaly.
+     *  - [PreloadResult.PackCorrupt]: confirmed on-disk integrity failure
+     *    (e.g. SQLite can't open). Uninstall the pack so the user's next
+     *    deliberate language interaction routes through download/recovery
+     *    rather than a silent crash loop.
+     *  - [PreloadResult.TokenizerInitFailed]: tokenizer library threw
+     *    during warm-up but the pack on disk looks fine. Likely OOM or
+     *    transient; log and let the next user action retry instead of
+     *    destroying a valid offline install.
+     */
+    suspend fun preloadAndRecover(ctx: Context, id: SourceLangId) {
+        val app = ctx.applicationContext
+        when (val r = get(app, id).preload()) {
+            is PreloadResult.Success -> { /* nothing to do */ }
+            is PreloadResult.PackMissing ->
+                android.util.Log.w(TAG, "preload($id) reported PackMissing after isInstalled() passed")
+            is PreloadResult.PackCorrupt -> {
+                android.util.Log.w(TAG, "preload($id) reported PackCorrupt: ${r.reason} — uninstalling")
+                LanguagePackStore.uninstall(app, id)
+            }
+            is PreloadResult.TokenizerInitFailed ->
+                android.util.Log.w(TAG, "preload($id) tokenizer warm-up failed: ${r.reason} — keeping pack, next call retries")
+        }
+    }
+
+    private const val TAG = "SourceLanguageEngines"
 
     private fun create(app: Context, id: SourceLangId): SourceLanguageEngine = when (id) {
         SourceLangId.JA -> JapaneseEngine(app)

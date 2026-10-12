@@ -656,3 +656,195 @@ than clipping. No accuracy was traded for brevity.
 **PASS after fix.** One ⚠️ carrying three sub-issues, no ❌, no 🛑. The delta's hardest
 spot — four sentences built around an arbitrary, indeclinable dictionary title — is solved
 with the head-noun construction the file already uses, so no case ever has to be guessed.
+
+## Delta review 2026-09-08 (7 keys: oversize-card guard + two debug rows)
+
+Mechanical layer verified programmatically across all 12 locales: all 7 delta names
+present, no extras, no duplicate `name=`; every `<xliff:g>` span byte-identical to EN
+(`id`, `example`, inner brand text); no `%n$s` in this delta; `<b>`, `\n`, `\{ \}`,
+`&lt;/&gt;/&amp;` counts match; no unescaped `'`/`"`; no em/en dashes. Analyzer reports
+`missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD SUCCESSFUL. No
+`<plurals>` in this delta. **No 🛑 build-breaking issues.**
+
+**Render code read before reviewing** (per the 2026-07-14 lesson): the prompt is an
+`OverlayAlert` capped at 280 dp with **full-width, vertically stacked** buttons
+(`OverlayAlert.kt` :306-341) and the debug rows are `settings_row_switch.xml` →
+`Text.PT.RowTitle`, 15 sp, **no `maxLines`, no `ellipsize`**. Nothing in this delta
+clips; long labels wrap. Accuracy was preferred over brevity throughout.
+
+**Source-side finding (EN, applies to all 12 locales) — ❌ fixed in this pass.** The
+comment on `anki_card_too_large_title` claimed the title serves "the oversize-card prompt
+AND the too-large failure alert". It does not: every failure path shows
+`anki_card_too_large_failed` either under `anki_send_failed_title` (`AnkiUiHelper.kt`
+:1060, `TranslationResultFragment.kt` :967, `WordDetailBinder.kt` :691) or with **no title
+at all** as a `LENGTH_LONG` Toast (`AnkiOneTapDispatch.kt` :162,
+`TranslationResultFragment.kt` :1082). The failure string therefore has to name its own
+subject, and was reviewed on that basis in every locale. The EN comment now says so.
+
+### Findings (delta)
+
+None. No 🛑/❌/⚠️; one 💬 recorded as a decision rather than a defect.
+
+| name | severity | current | note |
+|---|---|---|---|
+| settings_debug_force_mmap_weights | 💬 | «(локальная LLM)» | LLM is inflected as feminine, agreeing with the elided модель. That follows the file's own «Локальные модели» (`llm_prompt_advisory_too_long`) and «облачным и локальным» (`llm_prompt_row_system_subtitle`), which is also why "on-device" is локальная here and not «на устройстве» — the app already picked a word for this concept. |
+
+### Clean areas (delta) — checked, no findings
+
+**Nothing needed case restructuring.** The only runtime fills in this delta are the fixed
+brand names AnkiDroid and Anki, and each sits where the nominative is what the grammar
+wants: «слишком велики для отправки в AnkiDroid», «слишком велика для AnkiDroid»,
+«Добавлено в Anki». No placeholder was put in an oblique slot, so the standing hazard for
+this locale does not arise.
+
+**Infinitive questions match the file.** «Сохранить упрощённую карточку…?» follows
+`llm_prompt_discard_title` «Не сохранять изменения?» and `bergamot_disable_title`
+«Выключить Firefox Translations?». The button «Сохранить в упрощённом виде» is a full
+prepositional phrase rather than a dangling «упрощённую», so nothing agrees with an absent
+noun.
+
+**Register and length.** Formal lowercase вы («Попробуйте убрать…»), matching
+`anki_send_failed_message` «Убедитесь, что… и повторите попытку». Russian runs ~30% long,
+so both debug rows were kept to a single noun phrase; neither row clips (the title
+TextView has no maxLines), and the alert body is comparable in length to the sibling it
+replaces.
+
+**Terminology.** карточка (card), определения (definitions), «простой текст» — the last
+from `yomitan_styling_subtitle`'s «всегда использовать простой текст», not re-coined.
+«слово» and «предложение» in the failure body match `anki_mode_word` / `anki_mode_sentence`
+exactly, so the advice names the same two things the card editor does.
+
+**Offline prefix.** «Офлайн-маршрутизация» keeps the hyphenated prefix the file already
+uses in `settings_header_offline_translations` «Офлайн-перевод» and
+`lang_section_offline_models_title` «Скачать офлайн-модели».
+
+### Verdict
+
+**PASS.** No fixes required — the highest-risk locale for this delta turned out to be its
+cleanest, because the delta carries no placeholders that could land in an oblique case and
+no plurals.
+
+## Delta review 2026-09-23 (6 keys: the results headers' ⋯ overflow menu)
+
+Mechanical layer verified programmatically across all 12 locales: all 6 delta names
+present once, no extras; no `<xliff:g>`, placeholders, `<plurals>`, quotes or
+apostrophes, and no em/en dashes in this delta. The two orphans `cd_copy_original` /
+`cd_copy_translation` (the headers' copy buttons, removed with this change) are deleted.
+For this delta's keys the analyzer reports nothing missing and nothing orphaned; the
+remaining `missing=14 orphan=1` belong to other, not-yet-synced features (icon gestures,
+edge indicator, the Anki words helper). `:app:processDebugResources` BUILD SUCCESSFUL.
+**No 🛑 build-breaking issues.**
+
+**Render code read before reviewing.** The four `header_action_*` names, like the reused
+`cd_add_to_anki`, `cd_text_size` and `capture_show_on_screen`, are the rows of
+`ActionOverflowMenu`: 15 sp medium, `maxLines=1` + `ellipsize=end`, in a card 160 to 280
+dp wide less 72 dp of icon and padding, so up to about 208 dp of label. `cd_more_actions`
+is spoken only (the ⋯ button's description and the menu's pane title);
+`cd_toggle_inline_pinyin` is the furigana button's spoken name when the source is Chinese
+(it replaces a hardcoded English "Toggle inline pinyin").
+
+### Findings (delta)
+
+None.
+
+### Clean areas (delta) — checked, no findings
+
+**Siblings, one term swapped.** «Включить или выключить встроенный пиньинь» keeps the
+furigana string's structure, with the adjective agreeing with masculine пиньинь (inanimate
+accusative = nominative).
+
+**The ⋯ names what the parked sheet's hint names.** «Другие действия» is the noun
+`capture_sliver_expand_hint` already uses («Нажмите для других действий»).
+
+**Row names.** «Фуригана» «Пиньинь» are `overlay_mode_option_*`; «Прочитать вслух» is
+`cd_read_original_aloud` without its object; «Изменить текст» uses `label_edit`'s verb.
+Longest row: the reused «Показать на экране», 18 characters, fits.
+
+### Verdict
+
+**PASS.** Every delta string reuses the locale's own committed wording for its sibling
+(the furigana toggle, the read-aloud and edit descriptions, the parked sheet's "more"
+hint), so the menu reads in the same voice as the buttons it replaces.
+
+## Delta review 2026-09-29 (39 keys + 1 orphan: floating-icon gestures and the no-menu alert, "Change game language", the translation error pill and its discard confirm, the hold failure pill, the Overlay card rows, the Anki words helper)
+
+Mechanical layer verified programmatically across all 12 locales: all 39 delta names
+present once, the orphan `anki_words_helper` deleted (its replacement
+`anki_words_helper_hide` was translated afresh, as its commit asked), no duplicate `name=`;
+every `<xliff:g>` span byte-identical to EN (`id`, `example`, inner text); `%1$s`/`%2$s`
+parity; `<b>`, `\n`, `\{ \}`, `&lt;/&gt;/&amp;` counts match; no unescaped `'`/`"`; each file
+parses. Analyzer reports `missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD
+SUCCESSFUL. No `<plurals>` in this delta. `settings_filter_furigana_title` (already
+translated) was moved from its old Debug position to its English position between the new
+Overlay rows, text unchanged, so the file stays diffable against English. **No 🛑
+build-breaking issues.**
+
+**Render code read before reviewing.**
+- `icon_gesture_*` are bold 15 sp in the Settings cell's `TableLayout`; only the action
+  column shrinks (`shrinkColumns="2"`), so the longest gesture word sets the width left for
+  all three action titles. They are also the picker page's section headers
+  (`Text.PT.GroupHeader`, ALL CAPS, 11 sp). Action titles wrap freely in the cell and in the
+  picker's `settings_row_choice` rows (no `maxLines`).
+- `icon_action_translating_from` and `hold_translation_failed` are drawn by
+  `OverlayUiController.showNoTextPill` as ONE line of `Canvas.drawText` in a window sized to
+  the text: no wrapping, so both must stay short. `%1$s` is `SourceLangId.displayName()`,
+  the language name in the UI locale with its first letter capitalized.
+- The error pill (`TranslationErrorPills`) is a 14 sp TextView, `maxLines=2`, ellipsized,
+  spanning most of the display width; every message but the connection one leads with the
+  service name.
+- The no-menu alert and the discard confirm are `OverlayAlert`s with full-width stacked
+  buttons (the confirm in the danger colour, then `btn_cancel`).
+- `anki_words_helper_hide`'s `%1$s` becomes an ImageSpan of the eye glyph
+  (`inlineIconString`).
+- The Overlay card on screen: Overlay Mode, Minimum text size (title, subtitle, warning,
+  value + slider, example), Filter furigana (Japanese only), Widen vertical text, Edge
+  indicator.
+
+**Source-side observations (EN; reported, not changed):**
+1. `settings_overlay_min_text_warning` ends without a period after two sentences; every
+   locale mirrors that.
+2. The comments on `icon_action_translating_from` and `hold_translation_failed` do not say
+   the pill is a single canvas-drawn line that never wraps. A translator who writes a long
+   sentence there gets it drawn past the pill's edge.
+3. The error-pill banner asks every message to start with the service name. In an RTL
+   locale that makes the first strong character Latin, so the pill's TextView resolves an
+   LTR paragraph (see the ar report).
+4. `icon_gesture_*` asks for "short imperative verbs". Several locales label gestures with
+   an infinitive or a noun instead (see each report); the binding constraint is the width
+   one above.
+
+### Findings (delta, round 1)
+
+| name | severity | current | suggested | note |
+|---|---|---|---|---|
+| icon_action_swap_furigana, icon_action_swap_pinyin (2 strings, one fix) | ⚠️ | «Переключать перевод и фуригану» / «…и пиньинь» | «Переключаться между переводом и фуриганой» / «…и пиньинем» | With a direct object, «переключать X и Y» reads as switching both on or off; the action alternates between them. |
+| icon_action_lookup_words | 💬 | «Определение слова при наведении» | «Показать определение слова при наведении» | The cell stacks it over «Показать перевод на экране» and «Открыть быстрое меню»; one noun phrase among infinitives. |
+| icon_gesture_drag | 💬 (decision) | «Перетаскивание» | — | 14 letters set the gesture column's width on narrow phones, but it is the Android term and no shorter noun is natural. Kept. |
+
+### Clean areas (delta) — checked, no findings
+
+**No placeholder in an oblique slot.** The pill is «Язык игры: %1$s»: the language name
+arrives nominative and capitalized, so it goes after a colon, as in `status_no_text`
+(«%1$s: текст не найден…»). Service names end at a colon with a lowercase continuation.
+The alert names the gestures in nominative apposition («жесту «Удержание» или «Нажатие»»),
+so they byte-match the section headers.
+
+**Terms.** Reused: «Изменить язык игры» (`cd_change_source_language`), «Не удалось
+перевести», «быстрое меню» (the removed tap hint), «Запустить/остановить автоперевод» (the
+hotkey), «недействительный API-ключ», «квота исчерпана», «ЭКСПЕРИМЕНТАЛЬНО.», «Наложение»
+(the screen title and «Режим наложения»), «размер текста» (`cd_text_size`). ё as the file
+uses it (отклонён, удаётся, придётся, её, краёв).
+
+**Register.** Formal вы; « » quotes.
+
+### Verdict (round 1)
+
+1 ⚠️ + 1 💬 to apply; 1 💬 recorded as a decision.
+
+### Round 2 (2026-09-29), after applying round 1
+
+Round-1 fixes present: «Переключаться между переводом и фуриганой» / «…и пиньинем» (the file's first declined пиньинь; instrumental пиньинем is standard), «Показать определение слова при наведении». Mechanical layer re-run after the fixes: 0 problems; analyzer `missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD SUCCESSFUL. Every screen of the delta was re-read in full, not only the changed keys.
+
+No new findings.
+
+**Verdict (round 2):** **PASS.**

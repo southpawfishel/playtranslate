@@ -283,6 +283,9 @@
     <string name="note_mlkit_no_internet">⚠ 인터넷 연결 없음 — 오프라인 번역 표시 중(품질 저하).</string>
 
     <string name="note_mlkit_service_unavailable">⚠ 번역 서비스 사용 불가 — 오프라인 번역 표시 중(품질 저하).</string>
+    <string name="note_mlkit_service_cooldown">⚠ 번역 서비스를 일시적으로 사용할 수 없습니다. <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>까지 오프라인 번역 표시 중(품질 저하).</string>
+    <string name="note_mlkit_quota_exhausted">⚠ 번역 할당량을 모두 사용했습니다. <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>까지 오프라인 번역 표시 중(품질 저하).</string>
+    <string name="note_mlkit_account_issue">⚠ 번역 서비스 계정 문제(결제 또는 크레딧). 오프라인 번역 표시 중(품질 저하). 설정에서 서비스를 확인하세요.</string>
 
     <string name="note_low_memory_fallback">⚠ 메모리 부족 — 오프라인 번역 표시 중(품질 저하).</string>
 
@@ -386,6 +389,7 @@
     <string name="audio_recording_row_start">오디오 녹음 시작</string>
 
     <string name="audio_recording_row_active">오디오 녹음 중</string>
+    <string name="audio_recording_row_failed">오디오 녹음 실패</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          MEDIAPROJECTION OVERLAY-PERMISSION DIALOG
@@ -398,14 +402,38 @@
     <string name="mp_overlay_permission_button">설정 열기</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
-         FLOATING-ICON GESTURE HINTS
+         FLOATING-ICON GESTURES
          ═══════════════════════════════════════════════════════════════ -->
 
-    <string name="overlay_icon_gesture_drag">단어 위로 <b>드래그</b>하여 빠른 정의 보기</string>
+    <string name="icon_gesture_drag">드래그</string>
 
-    <string name="overlay_icon_gesture_hold"><b>길게 눌러</b> 번역 미리 보기</string>
+    <string name="icon_gesture_hold">길게 누르기</string>
 
-    <string name="overlay_icon_gesture_tap"><b>탭하여</b> 빠른 메뉴 열기</string>
+    <string name="icon_gesture_tap">탭</string>
+
+    <string name="icon_action_lookup_words">단어 위에 올려 정의 보기</string>
+
+    <string name="icon_action_show_translations">화면에 번역 표시</string>
+
+    <string name="icon_action_open_quick_menu">빠른 메뉴 열기</string>
+
+    <string name="icon_action_capture_screen">화면 캡처</string>
+
+    <string name="icon_action_toggle_auto_translate">자동 번역 시작/중지</string>
+
+    <string name="icon_action_swap_furigana">번역과 후리가나 전환</string>
+
+    <string name="icon_action_swap_pinyin">번역과 병음 전환</string>
+
+    <string name="icon_action_change_game_language">게임 언어 변경</string>
+
+    <string name="icon_action_translating_from"><xliff:g id="language" example="Japanese">%1$s</xliff:g>에서 번역 중</string>
+
+    <string name="icon_gestures_no_menu_title">빠른 메뉴를 여는 제스처가 없습니다</string>
+
+    <string name="icon_gestures_no_menu_message">플로팅 아이콘에서 빠른 메뉴를 열 수 없게 됩니다. 계속 사용하려면 “빠른 메뉴 열기”를 길게 누르기 또는 탭에 지정하세요.</string>
+
+    <string name="icon_gestures_no_menu_confirm">알겠습니다</string>
 
     <string name="overlay_icon_a11y_required_title">접근성 필요</string>
 
@@ -449,6 +477,7 @@
     <string name="anki_deck_picker_empty">덱을 찾을 수 없음</string>
 
     <string name="anki_deck_picker_loading">덱 불러오는 중…</string>
+    <string name="anki_deck_picker_title">Anki 덱 선택</string>
 
     <string name="anki_card_type_picker_loading">카드 유형 불러오는 중…</string>
 
@@ -484,6 +513,16 @@
 
     <string name="anki_send_failed_message"><xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>가 카드를 수락하지 않았습니다. <xliff:g id="brand_ankidroid2" example="AnkiDroid">AnkiDroid</xliff:g>가 실행 중인지 확인한 후 다시 시도하세요.</string>
 
+    <string name="anki_card_too_large_title">카드가 너무 큼</string>
+
+    <string name="anki_card_too_large_prompt">이 카드의 사전 정의가 너무 커서 <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>에 보낼 수 없습니다. 정의를 일반 텍스트로 바꾼 간소화된 카드를 저장하시겠습니까?</string>
+
+    <string name="anki_card_too_large_simplify">간소화하여 저장</string>
+
+    <string name="anki_card_too_large_failed">이 카드는 정의를 간소화해도 <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>가 받아들이기에 너무 큽니다. 단어를 몇 개 줄이거나 문장을 짧게 해 보세요.</string>
+
+    <string name="anki_added_simplified"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>에 추가됨(크기에 맞게 정의 간소화)</string>
+
     <string name="anki_mode_sentence">문장</string>
 
     <string name="anki_mode_word">단어</string>
@@ -512,17 +551,22 @@
 
     <string name="anki_group_screenshot">스크린샷</string>
 
-    <string name="anki_words_helper">이 단어들이 <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> 카드에 포함됩니다. 단어를 탭하면 카드에서 강조 표시됩니다. ×를 탭하면 카드에서 제거됩니다.</string>
+    <string name="anki_words_helper_hide">이 단어들이 <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> 카드에 포함됩니다. 단어를 탭하면 강조 표시됩니다. <xliff:g id="hide_icon" example="👁">%1$s</xliff:g> 아이콘을 탭하면 카드에서 제외됩니다.</string>
 
     <string name="anki_translation_error">번역할 수 없음</string>
 
     <string name="anki_word_remove_content_description">카드에서 제거</string>
+    <string name="hidden_word_hide_content_description">단어 숨기기</string>
+    <string name="hidden_word_show_content_description">단어 표시</string>
+    <string name="hidden_word_save_failed">저장하지 못했습니다. 다시 시도해 주세요</string>
 
     <string name="anki_screenshot_remove_content_description">스크린샷 제거</string>
 
     <string name="anki_group_audio">오디오</string>
 
     <string name="anki_audio_preview_content_description">오디오 미리 듣기</string>
+
+    <string name="anki_word_audio_row_title">오디오 포함</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          GAME-AUDIO RECORDING (Settings → Anki → Audio; trim editor)
@@ -733,6 +777,7 @@
     <string name="llm_backend_invalid_key_alert_title">API 키를 확인할 수 없음</string>
 
     <string name="llm_backend_invalid_key_alert_message_fmt">입력하신 키를 <xliff:g id="backend_name" example="OpenAI">%1$s</xliff:g>에서 거부했습니다. <xliff:g id="dev_console_url" example="platform.openai.com">%2$s</xliff:g>에서 다시 확인하고 시도하세요.</string>
+    <string name="llm_backend_key_needs_workspace_scope">이 키는 워크스페이스에 연결되어 있지 않아 여기서 사용할 수 없습니다. Claude Console에서 특정 워크스페이스 안에 키를 만들고 그 키를 입력하세요.</string>
 
     <string name="llm_backend_invalid_key_alert_button">확인</string>
 
@@ -968,6 +1013,18 @@
 
     <!-- ── Tencent Hunyuan-MT 1.5 1.8B ────────────────────────────── -->
 
+    <string name="hymt2_status_not_downloaded">메모리 <xliff:g id="ram" example="4 GB">%1$s</xliff:g>, 저장공간 <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g> 필요</string>
+    <string name="hymt2_status_downloaded_disabled">다운로드됨, 사용 안 함(저장공간 <xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g>)</string>
+    <string name="hymt2_status_ready">메모리 <xliff:g id="ram" example="4 GB">%1$s</xliff:g>, 저장공간 <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g> 필요</string>
+    <string name="hymt2_status_downloading">다운로드 중… <xliff:g id="bytes_total" example="1.5 GB">%2$s</xliff:g> 중 <xliff:g id="bytes_so_far" example="120 MB">%1$s</xliff:g></string>
+    <string name="hymt2_status_verifying">다운로드 확인 중…</string>
+    <string name="hymt2_disable_title"><xliff:g id="brand_hymt2" example="Hy-MT2">Hy-MT2</xliff:g> 사용을 중지하시겠습니까?</string>
+    <string name="hymt2_disable_message"><xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g> 모델이 설치되어 있습니다. 나중을 위해 보관하거나 삭제하여 공간을 확보할 수 있습니다.</string>
+    <string name="hymt2_download_failed">다운로드 실패: <xliff:g id="error_message" example="Network unreachable">%1$s</xliff:g></string>
+    <string name="hymt2_metered_warning_title">종량제 네트워크에서 다운로드하시겠습니까?</string>
+    <string name="hymt2_metered_warning_message"><xliff:g id="brand_hymt2" example="Hy-MT2">Hy-MT2</xliff:g> 크기는 <xliff:g id="download_size" example="1.5 GB">%1$s</xliff:g>입니다. 이 네트워크는 종량제로 표시되어 있습니다. 계속하시겠습니까?</string>
+    <string name="hymt2_disable_keep">사용 중지만</string>
+    <string name="hymt2_disable_delete">모델 삭제</string>
     <string name="hymt_status_not_downloaded">메모리 <xliff:g id="ram" example="4 GB">%1$s</xliff:g>, 저장공간 <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g> 필요</string>
 
     <string name="hymt_status_downloaded_disabled">다운로드됨, 사용 안 함(저장공간 <xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g>)</string>
@@ -1045,7 +1102,46 @@
          ═══════════════════════════════════════════════════════════════ -->
 
     <string name="degraded_warning_offline">오프라인 — 번역 품질 저하</string>
+    <string name="degraded_warning_cooldown">서비스 사용 불가, <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>까지 품질 저하</string>
+    <string name="degraded_warning_quota">할당량 소진, <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>까지 품질 저하</string>
+    <string name="degraded_warning_account">서비스 계정 문제, 품질 저하</string>
     <string name="degraded_warning_low_memory">메모리 부족 — 번역 품질 저하</string>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         TRANSLATION ERROR PILL
+         ═══════════════════════════════════════════════════════════════ -->
+
+    <string name="translation_error_connection">연결 오류</string>
+
+    <string name="translation_error_auth"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: 잘못된 API 키</string>
+
+    <string name="translation_error_billing"><xliff:g id="service" example="Claude">%1$s</xliff:g>: 크레딧 소진</string>
+
+    <string name="translation_error_daily_quota"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: 일일 한도 도달</string>
+
+    <string name="translation_error_monthly_quota"><xliff:g id="service" example="DeepL">%1$s</xliff:g>: 월간 할당량 소진</string>
+
+    <string name="translation_error_rate_limited"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: 요청이 너무 많음</string>
+
+    <string name="translation_error_server"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: 서버 오류</string>
+
+    <string name="translation_error_rejected_code"><xliff:g id="service" example="OpenAI">%1$s</xliff:g>: 요청 거부됨(HTTP <xliff:g id="status_code" example="404">%2$s</xliff:g>)</string>
+
+    <string name="translation_error_rejected"><xliff:g id="service" example="OpenAI">%1$s</xliff:g>: 요청 거부됨</string>
+
+    <string name="translation_error_bad_response"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: 예기치 않은 응답</string>
+
+    <string name="translation_error_timeout"><xliff:g id="service" example="DeepSeek">%1$s</xliff:g>: 응답 없음</string>
+
+    <string name="translation_error_unreachable"><xliff:g id="service" example="Lingva">%1$s</xliff:g>: 연결할 수 없음</string>
+
+    <string name="translation_error_discard_card_title">카드를 삭제하시겠습니까?</string>
+
+    <string name="translation_error_discard_card_message">설정을 열면 이 카드가 사라지며, 새로 캡처해서 다시 만들어야 합니다.</string>
+
+    <string name="translation_error_discard_card_confirm">설정으로 이동</string>
+
+    <string name="hold_translation_failed">번역할 수 없음</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          MAIN SCREEN — bottom-bar and overflow-menu items
@@ -1183,6 +1279,22 @@
 
     <string name="settings_vertical_grow_subtitle">좁은 세로 텍스트 상자를 넓혀 번역이 가로로 읽히도록 합니다. 주변 콘텐츠를 가릴 수 있습니다.</string>
 
+    <string name="settings_header_overlay">오버레이</string>
+
+    <string name="settings_overlay_min_text_title">최소 글자 크기</string>
+
+    <string name="settings_overlay_min_text_subtitle">이 값을 변경하면 오버레이가 원본 텍스트보다 커질 수 있습니다.</string>
+
+    <string name="settings_overlay_min_text_warning">실험적 기능입니다. 특히 애니메이션이 많은 게임을 플레이할 때 자동 번역 오버레이가 더 자주 제거될 수 있습니다</string>
+
+    <string name="settings_overlay_min_text_example">예시 텍스트</string>
+
+    <string name="settings_filter_furigana_title">OCR 결과에서 후리가나 제외</string>
+
+    <string name="settings_edge_indicator_title">가장자리 표시</string>
+
+    <string name="settings_edge_indicator_subtitle">오버레이가 표시되는 동안 화면 가장자리가 은은하게 빛납니다.</string>
+
     <!-- ═══════════════════════════════════════════════════════════════
          HOTKEY SETUP DIALOG
          ═══════════════════════════════════════════════════════════════ -->
@@ -1201,11 +1313,11 @@
 
     <string name="cd_translation_result_back">뒤로</string>
 
-    <string name="cd_copy_translation">번역 복사</string>
-
     <string name="cd_toggle_translation_visibility">번역 표시 전환</string>
 
     <string name="cd_toggle_inline_furigana">인라인 후리가나 전환</string>
+
+    <string name="cd_toggle_inline_pinyin">인라인 병음 전환</string>
 
     <string name="cd_text_size">글자 크기</string>
 
@@ -1213,9 +1325,17 @@
 
     <string name="cd_edit_original">원문 편집</string>
 
-    <string name="cd_copy_original">원문 복사</string>
-
     <string name="cd_add_to_anki"><xliff:g id="brand_anki" example="Anki">Anki</xliff:g>에 추가</string>
+
+    <string name="cd_more_actions">작업 더보기</string>
+
+    <string name="header_action_furigana">후리가나</string>
+
+    <string name="header_action_pinyin">병음</string>
+
+    <string name="header_action_read_aloud">소리 내어 읽기</string>
+
+    <string name="header_action_edit">텍스트 편집</string>
 
     <string name="cd_toggle_original_visibility">원문 표시 전환</string>
 
@@ -1727,6 +1847,7 @@
     <string name="tts_voice_picker_title">음성</string>
 
     <string name="tts_voices_section_header"><xliff:g id="language" example="JAPANESE">%1$s</xliff:g> 음성</string>
+    <string name="tts_speed_title">속도</string>
 
     <string name="tts_no_engine_dialog_title">텍스트 음성 변환 없음</string>
 
@@ -1834,6 +1955,8 @@
     <string name="settings_debug_show_detection_log">감지 로그 표시</string>
     <string name="settings_debug_log_pinhole">실시간 모드 핀홀 지표 로깅</string>
     <string name="settings_debug_save_ocr_seed">OCR 캡처를 시드로 저장</string>
+    <string name="settings_debug_short_text_routing">짧은 텍스트 오프라인 라우팅</string>
+    <string name="settings_debug_force_mmap_weights">mmap 가중치 로딩 강제(온디바이스 LLM)</string>
     <string name="settings_debug_log_grouping">OCR 그룹화 결정 로깅</string>
     <string name="settings_debug_angle_gate">기존 각도 임계값(10°)</string>
     <string name="settings_debug_log_trace">번역 로그 트레이스 기록</string>
@@ -1903,6 +2026,9 @@
     <string name="pos_conjunction">접속사</string>
     <string name="pos_interjection">감탄사</string>
     <string name="pos_preposition">전치사</string>
+    <string name="pos_postposition">후치사</string>
+    <string name="pos_determiner">한정사</string>
+    <string name="pos_article">관사</string>
     <string name="pos_prefix">접두사</string>
     <string name="pos_suffix">접미사</string>
     <string name="pos_counter">분류사</string>

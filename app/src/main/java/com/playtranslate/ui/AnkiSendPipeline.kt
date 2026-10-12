@@ -1,15 +1,19 @@
 package com.playtranslate.ui
 
 import android.content.Context
+import android.util.Log
 import androidx.fragment.app.Fragment
+import com.google.gson.JsonArray
 import com.playtranslate.R
 import com.playtranslate.audio.Attribution
 import com.playtranslate.audio.AudioRequest
 import com.playtranslate.audio.AudioSelection
+import com.playtranslate.vocab.HiddenWordsStore
 import com.playtranslate.audio.AudioSelections
 import com.playtranslate.audio.ResolvedAudio
 import com.playtranslate.language.SourceLangId
 import com.playtranslate.model.FrequencyTag
+import com.playtranslate.yomitan.TermGlossary
 import java.io.File
 
 /**
@@ -44,7 +48,7 @@ fun sentenceIsJustTheWord(sentenceOriginal: String?, word: String): Boolean {
 }
 
 /** Inputs needed to send a sentence card. Mirrors the fields of
- *  [SentenceAnkiContentFragment.CardData] plus the audio-toggle state
+ *  [SentenceAnkiContentView.CardData] plus the audio-toggle state
  *  the sheet keeps separately. One-tap callers build this directly
  *  from their available context. */
 data class SentenceSendInput(
@@ -71,12 +75,11 @@ data class SentenceSendInput(
     val examplesHtml: String = "",
 )
 
-/** Inputs needed to send a word card. The sheet pre-renders rich,
- *  curation-aware definition HTML in both [defaultDefinitionHtml] (for
- *  the default PlayTranslate model's Definition field) and
- *  [inlineDefinitionHtml] (for the structured path). One-tap callers
- *  pass a flat fallback in both via
- *  [WordAnkiHtmlBuilder.wrapFlatDefinitionHtml]. */
+/** Inputs needed to send a word card. The Definition field arrives as
+ *  DATA ([definition]) — the pipeline fetches its structured-glossary
+ *  payload and renders both the default model's class-styled HTML and the
+ *  structured path's inline-styled HTML, so the sheet and one-tap cannot
+ *  drift (see [WordCardDefinition]). */
 data class WordSendInput(
     val word: String,
     val reading: String,
@@ -96,21 +99,20 @@ data class WordSendInput(
      *  [AudioSelection.Auto] (the default, and what one-tap sends) resolves
      *  the user's saved voice — see [SentenceSendInput.sentenceSelection]. */
     val wordSelection: AudioSelection = AudioSelection.Auto,
-    /** Definition body (senses only) for the default PlayTranslate
-     *  model's Definition field. Built with [classStyler] in the sheet
-     *  (the model CSS supplies the gl-* classes); one-tap passes the
-     *  inline-styled flat fallback (works either way — class refs
-     *  without matching CSS just don't bind, which is fine for the
-     *  flat case). */
-    val defaultDefinitionHtml: String,
+    /** What the Definition field renders: the resolved entry plus the
+     *  sheet's curation (one-tap: the bare entry). Rendered by
+     *  [sendWordCard] with [classStyler] for the default model and
+     *  [inlineStyler] for the structured path. */
+    val definition: WordCardDefinition,
     /** Tatoeba "More examples" block — WITH its localized gl-section
      *  header — for the default model's Examples field. Built with
      *  [classStyler] in the sheet; empty for one-tap. */
     val defaultExamplesHtml: String = "",
-    /** Definition body for the structured (mapped) path's DEFINITION
-     *  content source. Built with [inlineStyler] in the sheet; one-tap
-     *  passes the same flat-fallback HTML. */
-    val inlineDefinitionHtml: String,
+    /** The same "More examples" block, inline-styled, appended after the
+     *  definition panel in the structured path's DEFINITION content source
+     *  (that source carries the whole definition body). Empty for one-tap
+     *  (no Tatoeba lookup). */
+    val inlineMoreExamplesHtml: String = "",
     /** Tatoeba "more examples" block for the structured path's
      *  EXAMPLE_SENTENCES content source — headerless (the receiving
      *  field's template carries its own label). Empty for one-tap (no
@@ -125,10 +127,26 @@ data class WordSendInput(
  * via [AnkiSendResult] for the caller to handle.
  */
 suspend fun Context.sendSentenceCard(
-    input: SentenceSendInput,
+    raw: SentenceSendInput,
     deckId: Long,
+    /** Consent hook for an over-budget card (see
+     *  [Context.dispatchSendToAnki]): the review sheets pass an
+     *  [awaitOversizeConsent] alert; one-tap callers leave it null and
+     *  auto-consent to the simplified card. */
+    oversizePrompt: (suspend () -> Boolean)? = null,
 ): AnkiSendResult {
     val ctx = this
+    // Hidden words never reach a sentence card unless highlighted. This is
+    // the ONE place every sentence send passes through (review sheet,
+    // workspace editor page, the word card's sentence tab, one-tap), so the
+    // filter lives here and nowhere else: the sheets hand over ALL their
+    // words, including the minimized ones. A highlighted target is exempt —
+    // the user is making a card FOR it — and is un-hidden below once the
+    // send lands. Above the audio synthesis so no TTS is paid for a word
+    // that is about to be dropped, and above toCardData so the card front's
+    // tooltips and highlights (derived from the word list) drop too.
+    val hidden = HiddenWordsStore.loaded(ctx, raw.sourceLangId)
+    val input = raw.withoutHidden(hidden)
     // Pin the screenshot BEFORE the audio synthesis below: the capture
     // surfaces overwrite fixed cache filenames, and the seconds this
     // pipeline spends on audio + binder are exactly when a rapid re-capture
@@ -205,13 +223,40 @@ suspend fun Context.sendSentenceCard(
         )
         val structuredGlossaries = styledPayload?.structured.orEmpty()
         val cardDictStyles = styledPayload?.dictStyles.orEmpty()
+        // Simplified tier: re-flatten each sense's retained glossary to
+        // spaced plain text instead of dropping down to the sense's STORED
+        // flat text — that string was flattened at import time, possibly
+        // before TermGlossary's junction-spacing rule, and glues sibling
+        // tag chips together ("nounsuruintransitiveno-adj"). Encoded as a
+        // bare-strings glossary array so the structured render path emits
+        // tiny text-only markup; dictStyles stays empty, so no CSS.
+        // Senses whose JSON fails to re-flatten drop out of the map and
+        // keep the stored flat text. Lazy: only an over-budget send
+        // (probe's simplified pass, on Dispatchers.Default) computes it.
+        val simplifiedGlossaries: Map<Long, String> by lazy {
+            buildMap {
+                for (w in cardData.words) for (s in w.senses) {
+                    val rowid = s.scRowid ?: continue
+                    val json = structuredGlossaries[rowid] ?: continue
+                    simplifiedGlossaryJson(json, w.word, w.reading, cardData.sourceLangId)
+                        ?.let { put(rowid, it) }
+                }
+            }
+        }
         ctx.dispatchSendToAnki(
             deckId = deckId,
             mode = CardMode.SENTENCE,
             screenshotPath = pinnedScreenshotPath,
             audioPath = audioFile?.absolutePath,
             wordAudioPaths = wordAudioFiles.mapValues { it.value.absolutePath },
-            ptNote = { imageFilename, audioFilename, wordAudioFilenames ->
+            oversizePrompt = oversizePrompt,
+            // `simplified` (the dispatcher's over-budget fallback) drops the
+            // structured glossaries and their per-dictionary CSS from both
+            // shapes — the words table / definition body degrade to the
+            // flat sense text, which is what blows the binder budget on
+            // function-word-dense sentences (dozens of styled senses per
+            // word plus a ~100K-char stylesheet).
+            ptNote = { imageFilename, audioFilename, wordAudioFilenames, simplified ->
                 PtNoteBuilder.forSentence(
                     cardData = cardData,
                     annotation = annotation,
@@ -225,11 +270,12 @@ suspend fun Context.sendSentenceCard(
                     commonLabel = ctx.getString(R.string.word_detail_common),
                     localizePos = ctx::localizePos,
                     renderMisc = ctx::renderMiscText,
-                    structuredGlossaries = structuredGlossaries,
-                    dictStyles = cardDictStyles,
+                    structuredGlossaries =
+                        if (simplified) simplifiedGlossaries else structuredGlossaries,
+                    dictStyles = if (simplified) emptyMap() else cardDictStyles,
                 )
             },
-            structured = { imageFilename, audioFilename, wordAudioFilenames ->
+            structured = { imageFilename, audioFilename, wordAudioFilenames, simplified ->
                 AnkiCardOutputBuilder.forSentence(
                     cardData = cardData,
                     annotation = annotation,
@@ -242,8 +288,10 @@ suspend fun Context.sendSentenceCard(
                     commonLabel = ctx.getString(R.string.word_detail_common),
                     localizePos = ctx::localizePos,
                     renderMisc = ctx::renderMiscText,
-                    structuredGlossaries = structuredGlossaries,
-                    dictStyles = cardDictStyles,
+                    definitionsHeader = ctx.getString(R.string.anki_group_definitions),
+                    structuredGlossaries =
+                        if (simplified) simplifiedGlossaries else structuredGlossaries,
+                    dictStyles = if (simplified) emptyMap() else cardDictStyles,
                 )
             },
         )
@@ -262,6 +310,15 @@ suspend fun Context.sendSentenceCard(
     // blown budget) never reach it because we pass null audioPath in
     // that case. Fold them in here so callers can read a single
     // "audio requested but missing" flag.
+    // A highlighted word rode onto the card on purpose: it is not a hidden
+    // word any more. Only on a landed send — never when an editor opens, so
+    // cancelling one leaves the store alone. A failed un-hide is logged by
+    // the store; the card is already in Anki either way.
+    if (result is AnkiSendResult.Success) {
+        for (word in raw.selectedWords) {
+            if (word in hidden) HiddenWordsStore.unhideForCard(ctx, raw.sourceLangId, word)
+        }
+    }
     return result.foldInLocalAudioMisses(
         sentenceMissing = input.includeSentenceAudio && audioFile == null,
         wordAudioMissing = input.targetWordAudioWords.isNotEmpty() &&
@@ -269,13 +326,19 @@ suspend fun Context.sendSentenceCard(
     )
 }
 
+private const val WORD_SEND_TAG = "AnkiWordSend"
+
 /**
- * Word-card send pipeline. Synthesizes word audio, dispatches the
- * card, and cleans up the temp WAV in a finally.
+ * Word-card send pipeline. Renders the Definition field from
+ * [WordSendInput.definition] (structured-glossary fetch included),
+ * synthesizes word audio, dispatches the card, and cleans up the temp WAV
+ * in a finally.
  */
 suspend fun Context.sendWordCard(
     input: WordSendInput,
     deckId: Long,
+    /** Consent hook for an over-budget card — see [Context.sendSentenceCard]. */
+    oversizePrompt: (suspend () -> Boolean)? = null,
 ): AnkiSendResult {
     val ctx = this
     // Pin before synthesis — see sendSentenceCard.
@@ -294,19 +357,77 @@ suspend fun Context.sendWordCard(
     val audioCredit: String? =
         wordResolved?.attribution?.let { Attribution.creditBlock(listOf(it)) }
     val result = try {
+        // The Definition field renders HERE, for every caller: structured
+        // glossaries for the entry's imported groups (null = flat text
+        // throughout), then both stylers' HTML from one builder. Inside the
+        // try so a throw still releases the audio temp file and the pin.
+        val definition = input.definition
+        val styled = fetchYomitanStyledData(
+            ctx.applicationContext,
+            input.sourceLangId.yomitanConsumingLang(),
+            definition.importedGroups,
+        )
+        Log.i(
+            WORD_SEND_TAG,
+            "word card: groups=${definition.importedGroups.size} " +
+                "styled=${styled?.structured?.size ?: 0}",
+        )
+        val definitionsHeader = ctx.getString(R.string.anki_group_definitions)
+        val renderMisc: (List<String>) -> String? = ctx::renderMiscText
+        // Both stylers × both fidelity tiers, rendered lazily: the
+        // dispatcher's size probe may ask for the full build and (only
+        // when over budget) the simplified one, then the final build asks
+        // again — lazy caching keeps each variant rendered at most once.
+        // The simplified tier re-flattens each retained glossary to spaced
+        // plain text (see the sentence pipeline's simplifiedGlossaries
+        // comment — the stored flat text glues sibling tag chips) and
+        // ships no dictionary CSS; when nothing re-flattens, the null
+        // payload falls back to the stored flat sense text.
+        val simplifiedStyled: YomitanStyledData? by lazy {
+            styled?.let { s ->
+                val flat = buildMap {
+                    for ((rowid, json) in s.structured) {
+                        simplifiedGlossaryJson(json, input.word, input.reading, input.sourceLangId)
+                            ?.let { put(rowid, it) }
+                    }
+                }
+                if (flat.isEmpty()) null
+                else YomitanStyledData(
+                    structured = flat,
+                    dictStyles = emptyMap(),
+                    sourceLanguage = s.sourceLanguage,
+                )
+            }
+        }
+        val defaultDefinitionFull by lazy {
+            definition.panelHtml(classStyler, styled, definitionsHeader, renderMisc)
+        }
+        val defaultDefinitionSimplified by lazy {
+            definition.panelHtml(classStyler, simplifiedStyled, definitionsHeader, renderMisc)
+        }
+        val inlineDefinitionFull by lazy {
+            definition.panelHtml(inlineStyler, styled, definitionsHeader, renderMisc) +
+                input.inlineMoreExamplesHtml
+        }
+        val inlineDefinitionSimplified by lazy {
+            definition.panelHtml(inlineStyler, simplifiedStyled, definitionsHeader, renderMisc) +
+                input.inlineMoreExamplesHtml
+        }
         ctx.dispatchSendToAnki(
             deckId = deckId,
             mode = CardMode.WORD,
             screenshotPath = pinnedScreenshotPath,
             audioPath = audioFile?.absolutePath,
-            ptNote = { imageFilename, audioFilename, _ ->
+            oversizePrompt = oversizePrompt,
+            ptNote = { imageFilename, audioFilename, _, simplified ->
                 // Word cards have no per-target-word audio — drop the
                 // third arg.
                 PtNoteBuilder.forWord(
                     word = input.word,
                     reading = input.reading,
                     pos = input.pos,
-                    definitionHtml = input.defaultDefinitionHtml,
+                    definitionHtml =
+                        if (simplified) defaultDefinitionSimplified else defaultDefinitionFull,
                     examplesHtml = input.defaultExamplesHtml,
                     freqScore = input.freqScore,
                     pitch = input.pitch,
@@ -316,12 +437,13 @@ suspend fun Context.sendWordCard(
                     audioCredit = audioCredit,
                 )
             },
-            structured = { imageFilename, audioFilename, _ ->
+            structured = { imageFilename, audioFilename, _, simplified ->
                 AnkiCardOutputBuilder.forWord(
                     word = input.word,
                     reading = input.reading,
                     pos = input.pos,
-                    definitionHtml = input.inlineDefinitionHtml,
+                    definitionHtml =
+                        if (simplified) inlineDefinitionSimplified else inlineDefinitionFull,
                     freqScore = input.freqScore,
                     pitch = input.pitch,
                     frequencies = input.frequencies,
@@ -339,10 +461,48 @@ suspend fun Context.sendWordCard(
         if (wordResolved?.ephemeral != false) audioFile?.delete()
         AnkiScreenshotPin.release(ctx, pinnedScreenshotPath)
     }
+    // A word card landed for this word: not a hidden word any more (see the
+    // sentence funnel's note; same rule, same commit point).
+    if (result is AnkiSendResult.Success) {
+        HiddenWordsStore.unhideForCard(ctx, input.sourceLangId, input.word)
+    }
     return result.foldInLocalAudioMisses(
         sentenceMissing = input.includeWordAudio && audioFile == null,
         wordAudioMissing = false,
     )
+}
+
+/**
+ * Rebuilds one sense's retained glossary JSON as a bare-strings glossary
+ * array carrying today's flatten of the same content — the simplified
+ * tier's replacement for the sense's STORED flat text, which was
+ * flattened at import time (possibly before [TermGlossary]'s junction
+ * spacing) and fuses sibling tag chips ("nounsuruintransitiveno-adj").
+ * Routing the text back through the structured-glossary plumbing (rather
+ * than a new flat-text override channel) keeps the builders untouched:
+ * [YomitanContentHtml.glossaryHtml] renders a bare string as escaped
+ * text in a plain wrapper, and with dictStyles empty no CSS rides along.
+ *
+ * JA parity: import strips monolingual headword echoes
+ * ([TermGlossary.stripHeadwordEcho], JA-gated in resolveTermDefs), so the
+ * re-flatten does too — otherwise a simplified JA card would regrow the
+ * 「ねこ【猫】」 line its stored text lost. Null (unparseable JSON, or
+ * nothing left) means the caller keeps the stored flat text.
+ */
+internal fun simplifiedGlossaryJson(
+    glossaryJson: String,
+    term: String,
+    reading: String,
+    sourceLangId: SourceLangId,
+): String? {
+    val lines = TermGlossary.flattenRetainedGlossary(glossaryJson) ?: return null
+    val resolved = if (sourceLangId == SourceLangId.JA) {
+        lines.mapNotNull { TermGlossary.stripHeadwordEcho(it, term, reading) }
+    } else {
+        lines
+    }
+    if (resolved.isEmpty()) return null
+    return JsonArray().apply { resolved.forEach(::add) }.toString()
 }
 
 /**
@@ -367,9 +527,7 @@ private fun AnkiSendResult.foldInLocalAudioMisses(
  * and opens the field-mapping dialog when the dispatcher returns
  * [AnkiSendResult.NeedsMapping]. Sheet callers use this so a user
  * with an unmapped custom card type can still configure it without
- * leaving the review sheet — exactly the UX the
- * [Fragment.dispatchSendToAnki] wrapper preserves at the dispatcher
- * layer.
+ * leaving the review sheet.
  *
  * Overlay-context callers (PR 2's paths C and D) keep calling the
  * Context version directly and handle [NeedsMapping] their own way
@@ -379,8 +537,9 @@ private fun AnkiSendResult.foldInLocalAudioMisses(
 suspend fun Fragment.sendSentenceCard(
     input: SentenceSendInput,
     deckId: Long,
+    oversizePrompt: (suspend () -> Boolean)? = null,
 ): AnkiSendResult {
-    val result = requireContext().sendSentenceCard(input, deckId)
+    val result = requireContext().sendSentenceCard(input, deckId, oversizePrompt)
     if (result is AnkiSendResult.NeedsMapping) {
         showAnkiCardTypeMappingDialog(result.model, CardMode.SENTENCE) { _, _ -> }
     }
@@ -394,20 +553,40 @@ suspend fun Fragment.sendSentenceCard(
 suspend fun Fragment.sendWordCard(
     input: WordSendInput,
     deckId: Long,
+    oversizePrompt: (suspend () -> Boolean)? = null,
 ): AnkiSendResult {
-    val result = requireContext().sendWordCard(input, deckId)
+    val result = requireContext().sendWordCard(input, deckId, oversizePrompt)
     if (result is AnkiSendResult.NeedsMapping) {
         showAnkiCardTypeMappingDialog(result.model, CardMode.WORD) { _, _ -> }
     }
     return result
 }
 
-/** Reconstitutes a [SentenceAnkiContentFragment.CardData] from the
+/** Reconstitutes a [SentenceAnkiContentView.CardData] from the
  *  pipeline input so the structured builder
  *  ([AnkiCardOutputBuilder.forSentence]) — which still takes the
  *  CardData type — keeps working unchanged. */
-private fun SentenceSendInput.toCardData(): SentenceAnkiContentFragment.CardData =
-    SentenceAnkiContentFragment.CardData(
+/** The input with every word in [hidden] — except the highlighted targets in
+ *  [SentenceSendInput.selectedWords], which are the card's point — removed
+ *  from the word list, the word-audio set and the per-word audio selections.
+ *  Identity (the same instance) when nothing is dropped. Pure, so the
+ *  funnel's one rule is pinned by a plain JVM test. */
+internal fun SentenceSendInput.withoutHidden(hidden: Set<String>): SentenceSendInput {
+    if (hidden.isEmpty()) return this
+    val drop = hidden - selectedWords
+    if (drop.isEmpty()) return this
+    val touches = words.any { it.word in drop } ||
+        targetWordAudioWords.any { it in drop } || wordSelections.keys.any { it in drop }
+    if (!touches) return this
+    return copy(
+        words = words.filterNot { it.word in drop },
+        targetWordAudioWords = targetWordAudioWords - drop,
+        wordSelections = wordSelections.filterKeys { it !in drop },
+    )
+}
+
+private fun SentenceSendInput.toCardData(): SentenceAnkiContentView.CardData =
+    SentenceAnkiContentView.CardData(
         source = original,
         target = translation,
         words = words,

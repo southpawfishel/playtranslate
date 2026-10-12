@@ -13,6 +13,7 @@ import android.view.Choreographer
 import com.playtranslate.language.SourceLanguageProfiles
 import com.playtranslate.language.TextDirection
 import com.playtranslate.model.OcrProvenance
+import com.playtranslate.ui.GrowthLimits
 import com.playtranslate.ui.TextBox
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -68,6 +69,11 @@ class PinholeOverlayMode(
     private var cropTop = 0
     private var screenshotW = 0
     private var screenshotH = 0
+    /** The OCR crop's size: the region boxes may grow inside (see
+     *  [GrowthLimits]); set with the crop origin, kept current by every full
+     *  look after (a region can change size in place). */
+    private var cropWidth = 0
+    private var cropHeight = 0
     /** Most-recent OCR provenance for panel emissions ([sendFullStateToPanel]):
      *  refreshed on every full look whose runOcr returned a result. Removal-only
      *  and sweep emissions (runOcr null — no text found) reuse the last pass's
@@ -314,15 +320,16 @@ class PinholeOverlayMode(
     /** A live [Tombstone] plus its remaining lifespan in full looks. */
     private class AgedTombstone(val stone: Tombstone, var looksLeft: Int)
 
-    /** Vacancy memory for content-match relocations (see [Tombstone]):
-     *  minted by classification when a content match moves a box to a new
-     *  position, aged by full looks (cycles that actually classified — a
+    /** Inference memory, both kinds (see [Tombstone]): minted by
+     *  classification when a content match moves a box to a new position
+     *  (RELOCATION) or a fresh group stales a neighbour by adjacency
+     *  (STALE), aged by full looks (cycles that actually classified — a
      *  gate-skipped or no-pipeline cycle read nothing, so it proves
      *  nothing about the vacated rect), pruned after
      *  [PinholeCalibration.TOMBSTONE_LIFESPAN_LOOKS]. OCR-crop space, so
      *  every reset that voids that space must clear it alongside
      *  cachedBoxes. Naturally bounded: mints per look ≤ content matches
-     *  per look, lifespan 2 looks. */
+     *  plus staling groups per look, lifespan 2 looks. */
     private val tombstones = ArrayList<AgedTombstone>()
 
     // Removal hysteresis and the pinhole-side photometric fit were removed
@@ -509,17 +516,20 @@ class PinholeOverlayMode(
 
             val bitmapRects = coords.viewListToBitmap(rects)
 
-            // The floating icon is inside every raw frame this mode consumes
-            // (whole-display mirrors / a11y screenshots — never CLEAN
-            // streams). Its window rect is excluded from the outside gate
-            // below: the burn-in micro-orbit and idle dim repaint it, and
-            // self-chrome motion must never wake OCR. (The OCR-input
-            // blackout itself is central — runOcr keys it on the
-            // frameIncludesOwnOverlays fact passed at step 6.) Screen
-            // coords index the frame directly: this mode runs at identity
-            // scale only (guard above).
-            val iconRect =
-                CaptureBackendResolver.activeOverlayUi?.getFloatingIconRect(displayId)
+            // Our own chrome — the floating icon, the transient pill, the
+            // translation-error pills — is inside every raw frame this mode
+            // consumes (whole-display mirrors / a11y screenshots — never CLEAN
+            // streams). Its rects are excluded from the outside gate below
+            // (the icon's burn-in micro-orbit and idle dim repaint it, a pill
+            // appears; self-chrome motion must never wake OCR) and from the
+            // pinhole sampling (a pill or the icon over a box would read as
+            // the box's game content changing). (The OCR-input blackout
+            // itself is central — runOcr keys it on the
+            // frameIncludesOwnOverlays fact passed at step 6.) Screen coords
+            // index the frame directly: this mode runs at identity scale only
+            // (guard above).
+            val chromeRects =
+                CaptureBackendResolver.activeOverlayUi?.ownChromeRects(displayId).orEmpty()
 
             // ── A2: cheap change gate in front of OCR ──────────────────
             // Pixel evidence BEFORE the expensive stages: the pinhole check
@@ -561,7 +571,7 @@ class PinholeOverlayMode(
                 if (gateBoxes.any { it.translatedText.isEmpty() }) return@gate
 
                 val outcomes = Array(gateBoxes.size) { i ->
-                    checkPinholes(raw, gateRef, bitmapRects[i], gateBoxes[i])
+                    checkPinholes(raw, gateRef, bitmapRects[i], gateBoxes[i], chromeRects)
                 }
                 val allKeep = outcomes.all { it.result == PinholeResult.KEEP }
                 val crop = OverlayToolkit.computeOcrCrop(
@@ -590,7 +600,7 @@ class PinholeOverlayMode(
                         orientedW = f.drawnW * sx + 2 * inflate,
                         orientedH = f.drawnH * sy + 2 * inflate,
                     )
-                } + listOfNotNull(iconRect?.let { OutsideChangeGate.Exclusion(it) })
+                } + chromeRects.map { OutsideChangeGate.Exclusion(it) }
                 val outside =
                     OutsideChangeGate.check(raw, gateRef, crop, exclude, gateBuffers, outsideGrid)
                 reconcileCycle =
@@ -750,6 +760,10 @@ class PinholeOverlayMode(
                     return prefs.captureIntervalMs
                 }
             }
+            if (pipeline != null) {
+                cropWidth = pipeline.cropWidth
+                cropHeight = pipeline.cropHeight
+            }
 
             val boxes = cachedBoxes ?: emptyList()
 
@@ -791,10 +805,14 @@ class PinholeOverlayMode(
                 )
                 // Age BEFORE minting so a stone minted by THIS look doesn't
                 // lose a look to its own minting cycle — it must still be
-                // live when the vacated rect's re-read arrives next look.
+                // live when the re-read arrives next look (the vacated rect
+                // for a relocation stone, the staling group for a note).
                 tombstones.forEach { it.looksLeft-- }
                 tombstones.removeAll { it.looksLeft <= 0 }
                 classification.vacated.mapTo(tombstones) {
+                    AgedTombstone(it, PinholeCalibration.TOMBSTONE_LIFESPAN_LOOKS)
+                }
+                classification.staled.mapTo(tombstones) {
                     AgedTombstone(it, PinholeCalibration.TOMBSTONE_LIFESPAN_LOOKS)
                 }
             } else {
@@ -826,7 +844,7 @@ class PinholeOverlayMode(
                     // gate-time snapshot survives updateCleanRef), saves the
                     // second per-box region read.
                     val outcome = pinholePre?.getOrNull(idx)
-                        ?: checkPinholes(raw, cleanRef, bitmapRects[idx], box)
+                        ?: checkPinholes(raw, cleanRef, bitmapRects[idx], box, chromeRects)
                     if (outcome.result == PinholeResult.REMOVE) {
                         pinholeRemovals.add(idx)
                     }
@@ -945,6 +963,15 @@ class PinholeOverlayMode(
                 )
             }
 
+            // Limits for this look's commits (minimum text size): the crop,
+            // and the text of this look that no committed box covers, so
+            // growth never covers text that has no box yet.
+            val lookGroups = pipeline?.ocrResult?.groups ?: emptyList()
+            fun growthLimitsFor(committed: List<TextBox>) = GrowthLimits(
+                bounds = if (cropWidth > 0 && cropHeight > 0) Rect(0, 0, cropWidth, cropHeight) else null,
+                avoid = GrowthLimits.unboxedText(lookGroups.map { it.drawBounds }, committed),
+            )
+
             if (debug && (anyChanged || farOcrGroups.isNotEmpty())) {
                 DetectionLog.log(
                     "D$displayId c$cycleNum transitions: " +
@@ -954,7 +981,11 @@ class PinholeOverlayMode(
                         "stale=${staleOverlayIndices.toSortedSet()}) " +
                         "far=${placeGroups.size}(+${farOutcome.held} held) " +
                         "tomb=${classification.tombstoneBlocks}blk/" +
-                        "${classification.vacated.size}mint/${tombstones.size}live " +
+                        "${classification.vacated.size}mint/" +
+                        "${tombstones.count { it.stone.kind == Tombstone.Kind.RELOCATION }}live " +
+                        "note=${classification.staleNoteBlocks}blk/" +
+                        "${classification.staled.size}mint/" +
+                        "${tombstones.count { it.stone.kind == Tombstone.Kind.STALE }}live " +
                         "boxesIn=${boxes.size} boxesOut=${nextBoxes.size}"
                 )
                 // Why classification picked stale/contentMatch/far: dump
@@ -991,7 +1022,9 @@ class PinholeOverlayMode(
             if (anyChanged) {
                 anyRemoved = allRemovals.isNotEmpty()
                 if (nextBoxes.isNotEmpty()) {
-                    showOverlayAndCapture(nextBoxes, cropLeft, cropTop, screenshotW, screenshotH)
+                    showOverlayAndCapture(
+                        nextBoxes, cropLeft, cropTop, screenshotW, screenshotH, growthLimitsFor(nextBoxes),
+                    )
                 } else if (placeGroups.isEmpty()) {
                     // No surviving boxes AND no replacement coming — empty
                     // the main overlay so stale boxes don't linger.
@@ -1044,6 +1077,7 @@ class PinholeOverlayMode(
                 val placeholders = buildPlaceholderBoxes(
                     farTexts, farBounds, farLineCounts, raw, cropLeft, cropTop,
                     farOrientations, farAlignments, farSlants,
+                    drawBounds = placeGroups.map { it.drawBounds },
                 )
 
                 if (placeholders.isNotEmpty()) {
@@ -1060,7 +1094,9 @@ class PinholeOverlayMode(
 
                     val merged = (cachedBoxes ?: emptyList()) + partial
                     cachedBoxes = merged
-                    showOverlayAndCapture(merged, cropLeft, cropTop, screenshotW, screenshotH)
+                    showOverlayAndCapture(
+                        merged, cropLeft, cropTop, screenshotW, screenshotH, growthLimitsFor(merged),
+                    )
 
                     // Recording backend: cache-hits are shown right here and
                     // never reach translatePlaceholders — record them now.
@@ -1073,7 +1109,9 @@ class PinholeOverlayMode(
                         val existing = cachedBoxes?.dropLast(placeholders.size) ?: emptyList()
                         val mergedFinal = existing + translated
                         cachedBoxes = mergedFinal
-                        showOverlayAndCapture(mergedFinal, cropLeft, cropTop, screenshotW, screenshotH)
+                        showOverlayAndCapture(
+                            mergedFinal, cropLeft, cropTop, screenshotW, screenshotH, growthLimitsFor(mergedFinal),
+                        )
                         // Freshly translated boxes only — the cache-hits above
                         // already recorded (gate dedupe would absorb a double,
                         // but don't lean on it).
@@ -1159,9 +1197,14 @@ class PinholeOverlayMode(
      *  between flipping a mutable flag and [TranslationOverlayView.rebuildChildren]. */
     private suspend fun showOverlayAndCapture(
         boxes: List<TextBox>,
-        left: Int, top: Int, sw: Int, sh: Int
+        left: Int, top: Int, sw: Int, sh: Int,
+        /** Where the minimum text size may grow [boxes] (see [GrowthLimits]). */
+        growthLimits: GrowthLimits,
     ) {
-        service.showLiveOverlay(boxes, left, top, sw, sh, pinholeMode = true, displayId = displayId)
+        service.showLiveOverlay(
+            boxes, left, top, sw, sh, pinholeMode = true, displayId = displayId,
+            growthLimits = growthLimits,
+        )
         // Wait for children to be laid out before snapshotting. addOverlayWindow
         // is async; onSizeChanged posts rebuildChildren; rebuildChildren adds
         // children that themselves need a layout pass. Until that completes,
@@ -1369,9 +1412,23 @@ class PinholeOverlayMode(
      *     ratio results.
      *
      * None of this is done today. Identity scale only.
+     *
+     * ## Our own chrome over a box
+     *
+     * Pinholes inside [ownChrome] (the floating icon, the translation-error
+     * pills; screen coords, which index the frame at identity scale) are not
+     * sampled: there raw shows that window, not the blend the prediction
+     * models, so a pill resting over a box would read as its game content
+     * changing, REMOVE the box, and re-place it every cycle. Such a box is
+     * judged on the pinholes left uncovered. One with every pinhole under our
+     * chrome has no evidence left and is REMOVED rather than kept: a box we
+     * can no longer check must not stay up with a translation that may have
+     * gone stale (the text under it re-appears once the chrome moves off,
+     * and OCR can't read it while it's blacked out).
      */
     private fun checkPinholes(
-        raw: Bitmap, cleanRef: Bitmap, bitmapRect: Rect, box: TextBox
+        raw: Bitmap, cleanRef: Bitmap, bitmapRect: Rect, box: TextBox,
+        ownChrome: List<Rect>,
     ): PinholeOutcome {
         val keepZero = PinholeOutcome(PinholeResult.KEEP, 0f, 0, 0, 0)
         val overlay = overlayBitmap ?: return keepZero
@@ -1428,10 +1485,15 @@ class PinholeOverlayMode(
 
         var totalPinholes = 0
         var changedPinholes = 0
+        var chromeHidden = 0
         var maxDelta = 0
         for (py in 0 until regionH) {
             for (px in 0 until regionW) {
                 if (!isPinholePosition(left + px, top + py, spacing)) continue
+                if (ownChrome.isNotEmpty() && ownChrome.any { it.contains(left + px, top + py) }) {
+                    chromeHidden++
+                    continue
+                }
                 val i = py * regionW + px
                 val ovPx = ovPixels[i]
                 // A pixel the overlay never drew — a rotated chip's AABB
@@ -1468,7 +1530,12 @@ class PinholeOverlayMode(
                 }
             }
         }
-        if (totalPinholes == 0) return keepZero
+        if (totalPinholes == 0) {
+            // Every pinhole under our own chrome: no evidence, so don't keep
+            // what can't be checked (see "Our own chrome over a box" above).
+            return if (chromeHidden > 0) PinholeOutcome(PinholeResult.REMOVE, 1f, 0, 0, 0)
+            else keepZero
+        }
 
         val pct = changedPinholes.toFloat() / totalPinholes
         val result = if (pct >= PinholeCalibration.PINHOLE_CHANGE_PCT) {
@@ -1594,6 +1661,8 @@ class PinholeOverlayMode(
         alignments: List<com.playtranslate.language.TextAlignment> = emptyList(),
         /** Per-box (angleDeg, orientedWidth, orientedHeight); zeros when upright. */
         slants: List<Triple<Float, Float, Float>> = emptyList(),
+        /** Per-box drawn rect ([TextBox.drawBounds]); the matched rect when absent. */
+        drawBounds: List<Rect> = emptyList(),
     ): List<TextBox> {
         val colorScale = 4
         val colorRef = raw.scale(raw.width / colorScale, raw.height / colorScale, false)
@@ -1610,7 +1679,8 @@ class PinholeOverlayMode(
             val (ang, ow, oh) = slants.getOrElse(idx) { Triple(0f, 0f, 0f) }
             TextBox("", rect, bg, tc, lineCounts.getOrElse(idx) { 1 },
                 sourceText = texts.getOrElse(idx) { "" }, orientation = orient, alignment = align,
-                angleDeg = ang, orientedWidth = ow, orientedHeight = oh)
+                angleDeg = ang, orientedWidth = ow, orientedHeight = oh,
+                drawBounds = drawBounds.getOrElse(idx) { rect })
         }
     }
 

@@ -32,16 +32,22 @@ object BunproAddAction {
      * caller that disabled its pill for the duration has to be told when the
      * user backs out, or the control stays dead until the row is rebuilt.
      * Only a genuine attempt is toasted; cancelling says nothing.
+     *
+     * [present] shows the confirmation. The default suits activity-hosted
+     * surfaces; an over-game host (the workspace word page) passes its own
+     * in-window presenter, since a plain show() would defer indefinitely
+     * there.
      */
     fun confirmAddWord(
         ctx: Context,
         scope: CoroutineScope,
         word: String,
         status: BunproLookup.WordStatus,
+        present: (OverlayAlert.Builder) -> Unit = { it.show() },
         onResult: (Boolean) -> Unit = {},
     ) {
         confirm(
-            ctx, ctx.getString(R.string.word_bunpro_add_message, word),
+            ctx, ctx.getString(R.string.word_bunpro_add_message, word), present,
             onConfirm = {
                 scope.launch {
                     report(ctx, BunproLookup.addToReviews(ctx, word, status), onResult)
@@ -58,10 +64,11 @@ object BunproAddAction {
         scope: CoroutineScope,
         title: String,
         pointId: Long,
+        present: (OverlayAlert.Builder) -> Unit = { it.show() },
         onResult: (Boolean) -> Unit = {},
     ) {
         confirm(
-            ctx, ctx.getString(R.string.word_bunpro_add_grammar_message, title),
+            ctx, ctx.getString(R.string.word_bunpro_add_grammar_message, title), present,
             onConfirm = {
                 scope.launch {
                     report(ctx, BunproGrammarLookup.addToReviews(ctx, pointId), onResult)
@@ -74,10 +81,11 @@ object BunproAddAction {
     private fun confirm(
         ctx: Context,
         message: String,
+        present: (OverlayAlert.Builder) -> Unit,
         onConfirm: () -> Unit,
         onCancel: () -> Unit,
     ) {
-        OverlayAlert.Builder(ctx)
+        present(OverlayAlert.Builder(ctx)
             .setTitle(ctx.getString(R.string.word_bunpro_add_title))
             .setMessage(message)
             .addButton(
@@ -86,8 +94,7 @@ object BunproAddAction {
             ) { onConfirm() }
             // Fires on the cancel button, the scrim, back, and a lifecycle
             // pause — every way out that isn't the confirm button.
-            .addCancelButton(ctx.getString(R.string.word_bunpro_add_cancel)) { onCancel() }
-            .show()
+            .addCancelButton(ctx.getString(R.string.word_bunpro_add_cancel)) { onCancel() })
     }
 
     /** The toast is fired against the application context so it survives the

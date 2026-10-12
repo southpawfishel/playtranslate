@@ -133,7 +133,10 @@ object OverlayToolkit {
      *  across cycles (kept + fresh, cache hits + MT), so one label is only
      *  honest when every translated box names the same backend — any
      *  disagreement, or a translated box with unknown provenance (the
-     *  same-language OCR bypass), suppresses it. */
+     *  same-language OCR bypass), suppresses it. NOTE: short-text offline
+     *  routing makes mixed provenance the COMMON case on menu-heavy screens
+     *  (shorts by Bergamot/ML Kit, sentences by the online tier) — the label
+     *  going quiet there is accepted behavior, not a bug. */
     fun panelBackendLabel(boxes: List<TextBox>): String? =
         boxes.filter { it.translatedText.isNotEmpty() }
             .map { it.backendDisplayName }
@@ -616,8 +619,15 @@ object OverlayToolkit {
         val ocrResult: OcrManager.OcrResult,
         val dedupKey: String,
         val cropLeft: Int, val cropTop: Int,
-        val screenshotW: Int, val screenshotH: Int
-    )
+        val screenshotW: Int, val screenshotH: Int,
+        /** The OCR crop's size ([computeOcrCrop]), so an overlay can keep its
+         *  boxes' growth inside the region that was read. Appended after the
+         *  fields callers destructure positionally. */
+        val cropWidth: Int, val cropHeight: Int,
+    ) {
+        /** The capture region in the boxes' own (crop) coordinates. */
+        val cropBounds: android.graphics.Rect get() = android.graphics.Rect(0, 0, cropWidth, cropHeight)
+    }
 
     /**
      * Compute the OCR input crop bounds for a raw screenshot. Single source of
@@ -643,17 +653,19 @@ object OverlayToolkit {
      * Crop to active region, run OCR, filter source-lang chars. Returns null
      * if no text detected. Does NOT do dedup, translation, or display.
      *
-     * [blackoutIconRect], when non-null (screen coordinates), is filled
-     * black in the OCR input after the crop — the floating icon's window
-     * rect, resolved by the caller from the frame's stamped
-     * [com.playtranslate.capture.CapturedFrame.includesOwnOverlays] fact.
-     * Raw frames of contaminated sources contain the icon, and its compact
-     * chevron OCRs as a ‹-class glyph (observed producing overlay boxes,
-     * 2026-07-16). Frames that structurally cannot contain the icon (clean
-     * captures, CLEAN task mirrors) must pass null: filling their rect
-     * would eat real game text under the dock spot. Pixel fill rather than
-     * result-space exclusion so the glyph can never merge into an adjacent
-     * real text line and take it down with it.
+     * [blackoutRects] (screen coordinates) are filled black in the OCR
+     * input after the crop — this app's own chrome on the display (the
+     * floating icon, the transient pill, the translation-error pills:
+     * [OverlayUiController.ownChromeRects]), resolved by the caller from the
+     * frame's stamped [com.playtranslate.capture.CapturedFrame.includesOwnOverlays]
+     * fact. Raw frames of contaminated sources contain that chrome: the
+     * icon's compact chevron OCRs as a ‹-class glyph (observed producing
+     * overlay boxes, 2026-07-16), and a pill's message is real words. Frames
+     * that structurally cannot contain it (clean captures, CLEAN task
+     * mirrors) must pass an empty list: filling those rects would eat real
+     * game text under them. Pixel fill rather than result-space exclusion so
+     * the chrome can never merge into an adjacent real text line and take
+     * it down with it.
      *
      * [seedWriter], when non-null, is invoked after [OcrManager.recognise]
      * with the bitmap that was actually fed to OCR and the result (possibly
@@ -680,20 +692,20 @@ object OverlayToolkit {
         statusBarHeight: Int,
         seedWriter: ((Bitmap, OcrManager.OcrResult?) -> Unit)? = null,
         excludeRect: Rect? = null,
-        blackoutIconRect: Rect? = null,
+        blackoutRects: List<Rect> = emptyList(),
     ): OcrPipelineResult? {
         val crop = computeOcrCrop(raw.width, raw.height, activeRegion, statusBarHeight)
         val needsCrop = crop.top > 0 || crop.left > 0 || crop.bottom < raw.height || crop.right < raw.width
         var bitmap = if (needsCrop)
             Bitmap.createBitmap(raw, crop.left, crop.top, (crop.right - crop.left).coerceAtLeast(1), (crop.bottom - crop.top).coerceAtLeast(1))
         else raw
-        if (blackoutIconRect != null) {
+        if (blackoutRects.isNotEmpty()) {
             // In-place only into the pipeline-owned crop copy. When the crop
             // was a no-op, `bitmap` IS the caller-owned frame — reused after
             // this call as the untouched screen image — so the fill must land
             // on a copy no matter how mutable the frame is.
-            val blacked = blackoutFloatingIcon(
-                bitmap, crop.left, crop.top, blackoutIconRect,
+            val blacked = blackoutRects(
+                bitmap, crop.left, crop.top, blackoutRects,
                 allowInPlace = bitmap !== raw,
             )
             if (blacked !== bitmap) {
@@ -722,7 +734,10 @@ object OverlayToolkit {
         val dedupKey = ocrResult.fullText.filter { c -> OcrManager.isSourceLangChar(c, sourceLang) }
         if (dedupKey.isEmpty()) return null
 
-        return OcrPipelineResult(ocrResult, dedupKey, crop.left, crop.top, raw.width, raw.height)
+        return OcrPipelineResult(
+            ocrResult, dedupKey, crop.left, crop.top, raw.width, raw.height,
+            cropWidth = crop.width(), cropHeight = crop.height(),
+        )
     }
 
     /** Opaque fill for the floating icon's window rect in OCR input — a
@@ -766,6 +781,32 @@ object OverlayToolkit {
             left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat(),
             iconBlackoutPaint,
         )
+        return out
+    }
+
+    /**
+     * [blackoutFloatingIcon] for every rect in [rects], with the same
+     * ownership contract: [allowInPlace] declares the caller owns [bitmap]
+     * outright, and holds for the FIRST draw only; once the helper has
+     * copied, the copy is ours and later rects draw into it. Returns
+     * [bitmap] itself when no rect touches it. Never recycles anything.
+     */
+    fun blackoutRects(
+        bitmap: Bitmap,
+        cropLeft: Int,
+        cropTop: Int,
+        rects: List<Rect>,
+        allowInPlace: Boolean,
+    ): Bitmap {
+        var out = bitmap
+        var inPlace = allowInPlace
+        for (rect in rects) {
+            val next = blackoutFloatingIcon(out, cropLeft, cropTop, rect, allowInPlace = inPlace)
+            if (next !== out) {
+                out = next
+                inPlace = true
+            }
+        }
         return out
     }
 
@@ -827,6 +868,8 @@ object OverlayToolkit {
         confidences: List<Pair<Float, Float>> = emptyList(),
         /** Per-box (angleDeg, orientedWidth, orientedHeight); zeros when upright. */
         slants: List<Triple<Float, Float, Float>> = emptyList(),
+        /** Per-box drawn rect ([TextBox.drawBounds]); the matched rect when absent. */
+        drawBounds: List<Rect> = emptyList(),
     ): List<TextBox> {
         val colorScale = 4
         val colorRef = raw.scale(raw.width / colorScale, raw.height / colorScale, false)
@@ -845,7 +888,8 @@ object OverlayToolkit {
             TextBox("", rect, bg, tc, lineCounts.getOrElse(idx) { 1 },
                 sourceText = texts.getOrElse(idx) { "" }, orientation = orient, alignment = align,
                 angleDeg = ang, orientedWidth = ow, orientedHeight = oh,
-                sourceConfMin = cMin, sourceConfMean = cMean)
+                sourceConfMin = cMin, sourceConfMean = cMean,
+                drawBounds = drawBounds.getOrElse(idx) { rect })
         }
     }
 

@@ -9,6 +9,7 @@ import com.playtranslate.language.InflectedForm
 import com.playtranslate.language.SourceLanguageEngines
 import com.playtranslate.language.TokenSpan
 import com.playtranslate.model.FrequencyTag
+import com.playtranslate.model.ImportedSenseGroup
 import com.playtranslate.model.OcrProvenance
 import com.playtranslate.model.PendingTranslation
 import com.playtranslate.model.ReadingRow
@@ -16,8 +17,10 @@ import com.playtranslate.model.TextSegment
 import com.playtranslate.model.TextSegments
 import com.playtranslate.model.TranslationResult
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -36,9 +39,21 @@ import kotlinx.coroutines.withContext
  * Activities mutate state through this VM's methods; the fragment
  * is a renderer + event emitter (no public mutator methods of its
  * own). [TranslationResultActivity] also uses VM state to feed the
- * embedded [WordDetailBottomSheet] via [SentenceContextProvider].
+ * embedded [WordDetailBottomSheet] via [SentenceContextProvider], and the
+ * floating workspace's lookup page feeds its word page the same way
+ * ([sentenceContext]).
+ *
+ * Two owners: the Activities get theirs from a ViewModelStore (the no-arg
+ * constructor; cleared with the store), and a workspace page constructs its
+ * own with the page's scope, so the lookup pipeline dies with the page.
+ * Either way [viewModelScope] IS the scope handed to the platform
+ * constructor, and it is cancelled when that owner ends.
  */
-class TranslationResultViewModel : ViewModel() {
+class TranslationResultViewModel(scope: CoroutineScope) : ViewModel(scope) {
+
+    /** Store-owned: the platform default scope, so a factory-created VM
+     *  behaves exactly as before. */
+    constructor() : this(CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate))
 
     private val _result = MutableStateFlow<ResultState>(ResultState.Idle)
     val result: StateFlow<ResultState> = _result.asStateFlow()
@@ -377,12 +392,14 @@ class TranslationResultViewModel : ViewModel() {
         _wordLookups.value = WordLookupsState.Loading
         lookupJob = viewModelScope.launch {
             try {
-                val (data, annotation) = performLookups(appCtx, text)
+                val (data, annotation, phrases, styled) = performLookups(appCtx, text)
                 _wordLookups.value = WordLookupsState.Settled(
                     rows = data.rows,
                     tokenSpans = data.tokenSpans,
                     lookupToReading = data.lookupToReading,
                     annotation = annotation,
+                    phrases = phrases,
+                    styled = styled,
                 )
                 // Pair the settled lookup with its source text and (re)write the
                 // cache. If the translation has already landed (Ready, same text),
@@ -407,15 +424,49 @@ class TranslationResultViewModel : ViewModel() {
         }
     }
 
-    private suspend fun performLookups(
-        appCtx: Context,
-        text: String,
-    ): Pair<LookupData, com.playtranslate.language.SentenceAnnotation> {
+    /**
+     * The sentence context an embedded word surface hands its Anki card:
+     * every text field reads the VM first and [fallback] second, so a host
+     * whose result hasn't settled yet (the results activity before its
+     * pipeline lands, the lookup page before its Sentence tab was ever
+     * opened) still supplies the launch-time sentence. The settled rows are
+     * snapshotted ONCE so the legacy map, the surfaces and the enrichment
+     * come from the same emission (a second read could straddle a fresh
+     * emission, and the process-global cache rotates under live mode). A
+     * fallback has no surfaces: null lets the one-tap helper await the
+     * per-sentence cache, which is atomic. The pending rides the VM result
+     * only: it is meaningful solely beside its own result's text.
+     */
+    fun sentenceContext(fallback: SentenceContext?): SentenceContext {
+        val ready = _result.value as? ResultState.Ready
+        val settledRows = (_wordLookups.value as? WordLookupsState.Settled)?.rows
+        return SentenceContext(
+            original = ready?.result?.originalText ?: fallback?.original,
+            translation = ready?.result?.translatedText ?: fallback?.translation,
+            wordResults = settledRows?.toLegacyMap() ?: fallback?.wordResults,
+            surfaceForms = settledRows?.toSurfaceMap() ?: fallback?.surfaceForms,
+            wordEnrichment = settledRows?.toEnrichmentMap() ?: fallback?.wordEnrichment,
+            pending = ready?.result?.pendingTranslation,
+        )
+    }
+
+    /** What one lookup pass produces: the rows, the analysis they were
+     *  projected from, the phrase occurrences, and the Words card's styled
+     *  payload (see [WordLookupsState.Settled.styled]). */
+    private data class Lookups(
+        val data: LookupData,
+        val annotation: com.playtranslate.language.SentenceAnnotation,
+        val phrases: List<com.playtranslate.language.PhraseOccurrence>,
+        val styled: YomitanStyledData?,
+    )
+
+    private suspend fun performLookups(appCtx: Context, text: String): Lookups {
         // Snapshot source/target prefs ONCE, before analyzing, so the whole
         // lookup runs against one consistent language pair even if the user
         // changes settings mid-flight (see [WordLookupContext]).
         val prefs = Prefs(appCtx)
-        val engine = SourceLanguageEngines.get(appCtx, prefs.sourceLangId)
+        val sourceLang = prefs.sourceLangId
+        val engine = SourceLanguageEngines.get(appCtx, sourceLang)
         val context = WordLookupContext(engine, prefs.targetLang, prefs.targetChineseVariant)
         // ONE analysis: the same FULL-depth annotation the furigana display
         // renders — its spans project the per-occurrence tokens the shared
@@ -423,14 +474,32 @@ class TranslationResultViewModel : ViewModel() {
         // [resolveWordRows]); tokenSpans round-trips so the fragment can
         // derive word spans against the displayed text.
         val annotation = withContext(Dispatchers.IO) { engine.annotate(text) }
-        val allTokens = annotation.spans
-            .filter { it.lookupForm != null }
-            .map {
-                com.playtranslate.language.TokenSpan(
-                    it.surface, it.lookupForm!!, it.lookupHint, it.inflections,
-                )
-            }
-        return resolveWordRows(appCtx, context, allTokens) to annotation
+        // Phrase-aware row tokens come from the SHARED producer — the
+        // sentence cache's lookupWords builds from the same one, so the
+        // words panel and every Anki words payload agree on phrase policy
+        // by construction.
+        val t = phraseAwareRowTokens(engine, text, annotation)
+        val data = resolveWordRows(appCtx, context, t.rowTokens)
+        // The Words card's styled payload, fetched HERE beside the rows and
+        // under the same language snapshot: one query (the sentence sheet's
+        // shape, not the detail page's one-per-row), so the card binds
+        // styled-or-flat in a single pass and no view launches a fetch of
+        // its own. Covers only the rows the card can style — the first
+        // styledWordRowCap structured rows, the same cap its renderer pool
+        // is built with — so a long list never inflates glossaries for
+        // rows that bind flat. Free when styling is off or nothing is
+        // structured (no rowids, no query), skipped outright where the card
+        // can hold no renderer (a low-RAM device: cap 0); a datastore
+        // failure costs the styling, never the rows.
+        val styledCap = styledWordRowCap(appCtx)
+        val styled = if (styledCap == 0) null else fetchYomitanStyledData(
+            appCtx, sourceLang.yomitanConsumingLang(), styledCandidateGroups(data.rows, styledCap),
+        )
+        // Tap spans project from the word tokens; the phrase occurrences
+        // ride to the fragment so its span computation can add tap targets
+        // for single-letter phrase members ("a" in "a great deal") anchored
+        // by the PHRASE's displayed range (SourceWordLookup.computeTapSpans).
+        return Lookups(data.copy(tokenSpans = t.wordTokens), annotation, t.phrases, styled)
     }
 }
 
@@ -502,6 +571,17 @@ sealed class WordLookupsState {
         /** The analysis the rows were projected from; rides into hand-built
          *  one-tap WordsPayloads so isTrustedFor can prove freshness. */
         val annotation: com.playtranslate.language.SentenceAnnotation? = null,
+        /** Detected multi-word expression occurrences — the fragment's span
+         *  computation anchors single-letter phrase members' tap targets on
+         *  these ([SourceWordLookup.computeTapSpans]). */
+        val phrases: List<com.playtranslate.language.PhraseOccurrence> = emptyList(),
+        /** One styled payload (structured glossaries + dictionary CSS) for
+         *  every row's [RowState.importedGroups], fetched with the rows so
+         *  the Words card binds styled-or-flat in one pass and the cells own
+         *  no coroutines; each takes its share via
+         *  [YomitanStyledData.forGroups]. Null = the flat tier throughout
+         *  (styling off, nothing structured retained). In-process only. */
+        val styled: YomitanStyledData? = null,
     ) : WordLookupsState()
 }
 
@@ -516,6 +596,12 @@ data class RowState(
     /** Structured senses (pos + gloss) driving the word cell's numbered,
      *  POS-grouped definitions. */
     val senses: List<SenseDisplay>,
+    /** The imported Yomitan groups BEHIND this row's flattened imported
+     *  senses — the structured form the styled (WebView) renderer needs.
+     *  Carried so a host that renders styled cells doesn't have to re-look-up
+     *  the entry; the flat hosts ignore it. In-process only, like
+     *  [WordDefinitionData.importedGroups]. */
+    val importedGroups: List<ImportedSenseGroup> = emptyList(),
     val freqScore: Int,
     val isCommon: Boolean,
     val surface: String,
@@ -545,6 +631,14 @@ data class RowState(
  *  consume for Anki field building. */
 fun List<RowState>.toLegacyMap(): Map<String, Triple<String, String, Int>> =
     associate { it.displayWord to Triple(it.reading, it.meaning, it.freqScore) }
+
+/** A freshly rendered words list's order: visible words first, hidden words
+ *  after, each group in lookup order (stable sort). Applied only when a list
+ *  is rendered anew; a hide/show toggle re-stubs its cell in place and never
+ *  moves it. The same instance when nothing in the list is hidden. */
+fun List<RowState>.hiddenLast(hidden: Set<String>): List<RowState> =
+    if (hidden.isEmpty() || none { it.displayWord in hidden }) this
+    else sortedBy { it.displayWord in hidden }
 
 /** Surface-form map paired with [toLegacyMap]. Both extensions read
  *  the same in-memory [RowState] list, so callers that snapshot both

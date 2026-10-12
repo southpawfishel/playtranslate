@@ -10,6 +10,8 @@ most restrictive shared definition.
 
 from __future__ import annotations
 
+import re
+
 import json
 import logging
 import os
@@ -30,6 +32,11 @@ WIKT_EXCLUDED_POS: frozenset[str] = frozenset({
 # e.g. `volontari` as "masculine plural of volontario". Dropping these
 # forces lookup to fall through to stem-based resolution (which should
 # land on the real lemma).
+# Longest prose form-of target we will treat as a headword. Mirrors
+# build_latin_dict.MAX_HEADWORD_WORDS; kept here so the filter module stays
+# importable on its own.
+MAX_REDIRECT_TARGET_WORDS = 3
+
 WIKT_REDIRECT_KEYS: frozenset[str] = frozenset({
     "form_of",
     "altspell_of",
@@ -43,6 +50,15 @@ WIKT_REDIRECT_KEYS: frozenset[str] = frozenset({
 # strings kaikki emits in its `pos` field (verified against the full
 # English dataset on 2026-04-15). Excludes `name` (proper nouns — noise
 # without translation value for game text).
+#
+# `det` / `article` / `postp` were added 2026-08 after a coverage audit of
+# the shipped packs: excluding them silently deleted top-frequency function
+# words with no homograph under a kept POS — en "every" (det-only, zipf
+# 5.8) had NO entry; en "the"/"a" survived only via their adv/prep
+# homographs (the article senses were gone); fr possessives mon/ma/votre/
+# notre/cet and es lo/su/tus/aquellos were absent; hi postpositions को/से
+# (among the most common words in the language) were absent. A tap on any
+# of these resolved to nothing — or, worse, to a stem-fallback lookalike.
 CONTENT_POS: frozenset[str] = frozenset({
     "noun",
     "verb",
@@ -58,6 +74,9 @@ CONTENT_POS: frozenset[str] = frozenset({
     "num",
     "contraction",
     "abbrev",
+    "det",
+    "article",
+    "postp",
 })
 
 # Caps shared across pipelines to keep pack size bounded.
@@ -65,9 +84,71 @@ MAX_SENSES_PER_ENTRY: int = 8
 MAX_HEADWORD_WORDS: int = 3
 
 
+# wiktextract sense TAGS that mark a form-of sense. A page can carry these
+# without any of WIKT_REDIRECT_KEYS being populated — es `su` sense 1 is tagged
+# nothing at all while sense 0 is tagged ('abbreviation', 'alt-of', 'apocopic').
+WIKT_REDIRECT_TAGS: frozenset[str] = frozenset({"form-of", "alt-of"})
+
+# Form-of glosses that carry their target only in prose. The keyword must sit
+# directly before "of", after at most three qualifier words ("apocopic form of",
+# "past participle of", "masculine plural of", "Dated spelling of").
+#
+# A leading article is a hard NO: Wiktionary's form-of glosses never begin with
+# one, while ordinary noun definitions of the same shape do ("A form of address
+# used in…", "A case of beer"), and without this guard those read as redirects.
+# The target-length ceiling in redirect_target_from_gloss is the other half of
+# that guard.
+_FORM_OF_GLOSS_RE = re.compile(
+    r"^\s*(?:\([^)]*\)\s*)*"                       # optional "(before the noun)" label
+    r"(?!(?:an?|the)\s)"                            # never an ordinary definition
+    r"(?:[^\W\d_][\w'’-]*\s+){0,3}"             # up to 3 qualifier words
+    r"(?:form|spelling|version|contraction|abbreviation|clipping|misspelling|"
+    r"plural|participle|tense|singular|case)\s+of\s+"
+    r"(?P<target>\S.*)$",
+    re.IGNORECASE,
+)
+
+# The target ends at the first punctuation that cannot be part of a headword —
+# "past participle of készül:" and "Dated spelling of today." both carry one,
+# and "Alternative form of run-in (adjective)" carries a trailing gloss label.
+_GLOSS_TARGET_END_RE = re.compile(r"[(:,;.]")
+
+
+def redirect_target_from_gloss(gloss: str, max_words: int) -> str | None:
+    """The lemma a prose form-of gloss points at, or None when the gloss is not
+    a form-of gloss (or names something that cannot be a headword).
+
+    Returning None for an unusable target is deliberate and load-bearing: this
+    same function decides whether the sense COUNTS as a redirect, so a page can
+    never be dropped as a pointer we are then unable to follow. That hole is
+    exactly what strands en `oneself`, whose entry-level form_of names the prose
+    "the indefinite personal pronoun one"."""
+    m = _FORM_OF_GLOSS_RE.match(gloss or "")
+    if not m:
+        return None
+    target = _GLOSS_TARGET_END_RE.split(m.group("target"), 1)[0].strip()
+    if not target or len(target.split()) > max_words:
+        return None
+    return target
+
+
 def is_redirect_sense(sense: dict[str, Any]) -> bool:
-    """A single sense is a redirect if it carries any WIKT_REDIRECT_KEYS."""
-    return any(sense.get(k) for k in WIKT_REDIRECT_KEYS)
+    """A single sense is a redirect if it carries any WIKT_REDIRECT_KEYS, is
+    TAGGED as a form-of sense, or its first gloss names its target in prose.
+
+    The structured fields alone missed a class that matters now that det /
+    article / postp are content POS: es `su` is glossed "apocopic form of suyo"
+    on a sense with neither tags nor alias keys, so it survived as its own lemma
+    and — under the position-first ranking — shadowed `suyo`, which is where the
+    possessive glosses actually live."""
+    if any(sense.get(k) for k in WIKT_REDIRECT_KEYS):
+        return True
+    if set(sense.get("tags") or ()) & WIKT_REDIRECT_TAGS:
+        return True
+    glosses = sense.get("glosses") or ()
+    return bool(glosses) and redirect_target_from_gloss(
+        glosses[0], MAX_REDIRECT_TARGET_WORDS
+    ) is not None
 
 
 def is_redirect_entry(entry: dict[str, Any]) -> bool:
@@ -89,6 +170,19 @@ def is_redirect_entry(entry: dict[str, Any]) -> bool:
 def is_multi_word_ok(word: str) -> bool:
     """True if [word] is at most MAX_HEADWORD_WORDS whitespace-separated tokens."""
     return len(word.split()) <= MAX_HEADWORD_WORDS
+
+
+# TODO(next pack rebuild): drop multi-word entries whose EVERY sense is a
+# Wiktionary `&lit` cross-reference stub — glosses starting with "Used other
+# than figuratively or idiomatically" ("do you", "want to"; 179 in the en
+# pack). Wiktionary itself marks these non-idiomatic and the entry defines
+# nothing, yet it currently reaches both typed lookup and (but for the
+# runtime gate) tap-time phrase matching. The runtime already filters them at
+# phrase candidacy (WiktionaryDictionaryManager.phrasesExistQuery's
+# LIT_STUB_PREFIX EXISTS clause) — dropping them here additionally cleans
+# typed lookup and shrinks the packs; the runtime gate then filters nothing
+# and remains as a safety. Keep entries where a stub sits ALONGSIDE real
+# senses ("open the door") — only all-stub entries go.
 
 
 # ── Misc register-tag filter ────────────────────────────────────────────

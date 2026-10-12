@@ -417,3 +417,188 @@ from "None" — the row means *no restriction*, not *unset*, and not *the whole 
 **PASS after fix.** One ⚠️ from round 2, two 💬 from round 1. The ⚠️ was invisible to a
 string-by-string reading and only surfaced when the picker's rows were laid out in render
 order.
+
+## Delta review 2026-09-08 (7 keys: oversize-card guard + two debug rows)
+
+Mechanical layer verified programmatically across all 12 locales: all 7 delta names
+present, no extras, no duplicate `name=`; every `<xliff:g>` span byte-identical to EN
+(`id`, `example`, inner brand text); no `%n$s` in this delta; `<b>`, `\n`, `\{ \}`,
+`&lt;/&gt;/&amp;` counts match; no unescaped `'`/`"`; no em/en dashes. Analyzer reports
+`missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD SUCCESSFUL. No
+`<plurals>` in this delta. **No 🛑 build-breaking issues.**
+
+**Render code read before reviewing** (per the 2026-07-14 lesson): the prompt is an
+`OverlayAlert` capped at 280 dp with **full-width, vertically stacked** buttons
+(`OverlayAlert.kt` :306-341) and the debug rows are `settings_row_switch.xml` →
+`Text.PT.RowTitle`, 15 sp, **no `maxLines`, no `ellipsize`**. Nothing in this delta
+clips; long labels wrap. Accuracy was preferred over brevity throughout.
+
+**Source-side finding (EN, applies to all 12 locales) — ❌ fixed in this pass.** The
+comment on `anki_card_too_large_title` claimed the title serves "the oversize-card prompt
+AND the too-large failure alert". It does not: every failure path shows
+`anki_card_too_large_failed` either under `anki_send_failed_title` (`AnkiUiHelper.kt`
+:1060, `TranslationResultFragment.kt` :967, `WordDetailBinder.kt` :691) or with **no title
+at all** as a `LENGTH_LONG` Toast (`AnkiOneTapDispatch.kt` :162,
+`TranslationResultFragment.kt` :1082). The failure string therefore has to name its own
+subject, and was reviewed on that basis in every locale. The EN comment now says so.
+
+### Findings (delta)
+
+One ⚠️, applied.
+
+| name | severity | current (was) | applied | note |
+|---|---|---|---|---|
+| anki_card_too_large_failed | ⚠️ | 「定義を簡易版にしても」 | 「定義を簡略化しても」 | 簡易版 is a noun for the *card* ("the simplified version"), so 「定義を簡易版にする」 — making definitions into a version — is not something Japanese says. The operation on definitions is 簡略化, which is also what the toast already used, so the fix removes an awkward phrase and aligns the two strings that talk about simplifying *definitions*. The split now reads deliberately: 簡易版 = the card (prompt, button), 簡略化 = what is done to the definitions (failure, toast). |
+
+### Clean areas (delta) — checked, no findings
+
+**辞書定義 is the file's own compound**, not a fresh rendering: `anki_content_definition_desc`
+already writes 「強調表示した単語の辞書定義（HTML形式）」. プレーンテキスト likewise comes from
+`yomitan_styling_subtitle` 「常にプレーンテキストで表示します」.
+
+**The failure body reuses the sibling's verb.** 「AnkiDroidが受け付けられません」 is the potential
+form of `anki_send_failed_message`'s 「AnkiDroidがカードを受け付けませんでした」, and it closes with
+「お試しください」 exactly as that string does — so the two failures read as one voice whether
+the user meets them in the dialog or as a bare Toast.
+
+**単語 / 文** in the advice match `anki_mode_word` 「単語」 and `anki_mode_sentence` 「文」, so the
+suggestion names the same two units the card editor's own mode chips do.
+
+**Punctuation and register.** Full-width 。、（）？ throughout; digits and the Latin literals
+mmap / LLM stay half-width inside full-width parentheses, matching
+`settings_debug_angle_gate` 「従来の角度しきい値（10°）」. です/ます in both alert bodies, noun-form
+button 「簡易版を保存」, no あなた. 端末内 for on-device is taken from
+`llm_prompt_advisory_too_long` 「端末内のモデルでは」.
+
+**Debug rows.** 「…を強制」 matches `settings_debug_force_single_screen` 「シングル画面を強制」 and
+`settings_debug_force_crash_title` 「クラッシュを強制」. 振り分け was chosen for "routing" over a
+ルーティング loan because the surrounding rows are all native-vocabulary phrases.
+
+### Verdict
+
+**PASS after fix.** One ⚠️, corrected. No あなた, no calqued word order, no half-width
+punctuation inside Japanese runs.
+
+## Delta review 2026-09-23 (6 keys: the results headers' ⋯ overflow menu)
+
+Mechanical layer verified programmatically across all 12 locales: all 6 delta names
+present once, no extras; no `<xliff:g>`, placeholders, `<plurals>`, quotes or
+apostrophes, and no em/en dashes in this delta. The two orphans `cd_copy_original` /
+`cd_copy_translation` (the headers' copy buttons, removed with this change) are deleted.
+For this delta's keys the analyzer reports nothing missing and nothing orphaned; the
+remaining `missing=14 orphan=1` belong to other, not-yet-synced features (icon gestures,
+edge indicator, the Anki words helper). `:app:processDebugResources` BUILD SUCCESSFUL.
+**No 🛑 build-breaking issues.**
+
+**Render code read before reviewing.** The four `header_action_*` names, like the reused
+`cd_add_to_anki`, `cd_text_size` and `capture_show_on_screen`, are the rows of
+`ActionOverflowMenu`: 15 sp medium, `maxLines=1` + `ellipsize=end`, in a card 160 to 280
+dp wide less 72 dp of icon and padding, so up to about 208 dp of label. `cd_more_actions`
+is spoken only (the ⋯ button's description and the menu's pane title);
+`cd_toggle_inline_pinyin` is the furigana button's spoken name when the source is Chinese
+(it replaces a hardcoded English "Toggle inline pinyin").
+
+### Findings (delta)
+
+None.
+
+### Clean areas (delta) — checked, no findings
+
+**Siblings, one term swapped.** 「インラインピンインの切り替え」 is `cd_toggle_inline_furigana`
+「インラインふりがなの切り替え」 with ピンイン, `overlay_mode_option_pinyin`'s own word.
+
+**The ⋯ names what the parked sheet's hint names.** 「その他の操作」 is the phrase
+`capture_sliver_expand_hint` already uses (「タップしてその他の操作を表示」).
+
+**Row names.** 「ふりがな」「ピンイン」 are `overlay_mode_option_*` verbatim. 「読み上げ」 is the
+noun form (体言止め) of `cd_read_original_aloud` 「原文を読み上げる」; 「テキストを編集」 keeps the
+を-form of `cd_edit_original` 「原文を編集」. Longest row: 「テキストを編集」, 7 characters. No あなた.
+
+### Verdict
+
+**PASS.** Every delta string reuses the locale's own committed wording for its sibling
+(the furigana toggle, the read-aloud and edit descriptions, the parked sheet's "more"
+hint), so the menu reads in the same voice as the buttons it replaces.
+
+## Delta review 2026-09-29 (39 keys + 1 orphan: floating-icon gestures and the no-menu alert, "Change game language", the translation error pill and its discard confirm, the hold failure pill, the Overlay card rows, the Anki words helper)
+
+Mechanical layer verified programmatically across all 12 locales: all 39 delta names
+present once, the orphan `anki_words_helper` deleted (its replacement
+`anki_words_helper_hide` was translated afresh, as its commit asked), no duplicate `name=`;
+every `<xliff:g>` span byte-identical to EN (`id`, `example`, inner text); `%1$s`/`%2$s`
+parity; `<b>`, `\n`, `\{ \}`, `&lt;/&gt;/&amp;` counts match; no unescaped `'`/`"`; each file
+parses. Analyzer reports `missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD
+SUCCESSFUL. No `<plurals>` in this delta. `settings_filter_furigana_title` (already
+translated) was moved from its old Debug position to its English position between the new
+Overlay rows, text unchanged, so the file stays diffable against English. **No 🛑
+build-breaking issues.**
+
+**Render code read before reviewing.**
+- `icon_gesture_*` are bold 15 sp in the Settings cell's `TableLayout`; only the action
+  column shrinks (`shrinkColumns="2"`), so the longest gesture word sets the width left for
+  all three action titles. They are also the picker page's section headers
+  (`Text.PT.GroupHeader`, ALL CAPS, 11 sp). Action titles wrap freely in the cell and in the
+  picker's `settings_row_choice` rows (no `maxLines`).
+- `icon_action_translating_from` and `hold_translation_failed` are drawn by
+  `OverlayUiController.showNoTextPill` as ONE line of `Canvas.drawText` in a window sized to
+  the text: no wrapping, so both must stay short. `%1$s` is `SourceLangId.displayName()`,
+  the language name in the UI locale with its first letter capitalized.
+- The error pill (`TranslationErrorPills`) is a 14 sp TextView, `maxLines=2`, ellipsized,
+  spanning most of the display width; every message but the connection one leads with the
+  service name.
+- The no-menu alert and the discard confirm are `OverlayAlert`s with full-width stacked
+  buttons (the confirm in the danger colour, then `btn_cancel`).
+- `anki_words_helper_hide`'s `%1$s` becomes an ImageSpan of the eye glyph
+  (`inlineIconString`).
+- The Overlay card on screen: Overlay Mode, Minimum text size (title, subtitle, warning,
+  value + slider, example), Filter furigana (Japanese only), Widen vertical text, Edge
+  indicator.
+
+**Source-side observations (EN; reported, not changed):**
+1. `settings_overlay_min_text_warning` ends without a period after two sentences; every
+   locale mirrors that.
+2. The comments on `icon_action_translating_from` and `hold_translation_failed` do not say
+   the pill is a single canvas-drawn line that never wraps. A translator who writes a long
+   sentence there gets it drawn past the pill's edge.
+3. The error-pill banner asks every message to start with the service name. In an RTL
+   locale that makes the first strong character Latin, so the pill's TextView resolves an
+   LTR paragraph (see the ar report).
+4. `icon_gesture_*` asks for "short imperative verbs". Several locales label gestures with
+   an infinitive or a noun instead (see each report); the binding constraint is the width
+   one above.
+
+### Findings (delta, round 1)
+
+None.
+
+### Clean areas (delta) — checked, no findings
+
+**Established wording reused, not re-coined.** クイックメニュー is the removed tap hint's
+term (`overlay_icon_gesture_tap` 「タップでクイックメニューを開く」); ドラッグ / 長押し / タップ are
+that hint set's gesture words. `icon_action_change_game_language` is
+`cd_change_source_language` verbatim, `icon_action_capture_screen` is
+`hotkey_capture_screen_dialog_title`, `icon_action_toggle_auto_translate` is the hotkey's
+「自動翻訳を開始・停止」, `hold_translation_failed` is `anki_translation_error`. The pills take
+APIキーが無効です from `tr_service_status_invalid_key` and 利用枠 from
+`note_mlkit_quota_exhausted`; the warning opens with 試験運用版。 like
+`settings_ocr_use_manga_subtitle`; the confirm title uses 破棄 like `llm_prompt_discard_title`.
+
+**Cross-references.** The alert's 「クイックメニューを開く」 byte-matches the action title, and
+長押し / タップ are the section headers' own words. The discard body's 「設定を開くと」 and the
+button 「設定を開く」 name the same action.
+
+**Form.** No あなた. Full-width ： and （） in the pills with the HTTP code half-width;
+noun-final picker rows; です/ます in the alert and dialog bodies. Both one-line pills are
+short (「日本語から翻訳します」, 「翻訳できませんでした」).
+
+### Verdict (round 1)
+
+**PASS.** No changes.
+
+### Round 2 (2026-09-29), after applying round 1
+
+No round-1 changes in this locale. Mechanical layer re-run after the fixes: 0 problems; analyzer `missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD SUCCESSFUL. Every screen of the delta was re-read in full, not only the changed keys.
+
+No new findings.
+
+**Verdict (round 2):** **PASS.**

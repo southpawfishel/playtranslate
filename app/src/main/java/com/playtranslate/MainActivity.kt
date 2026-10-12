@@ -1,6 +1,7 @@
 package com.playtranslate
 
 import com.playtranslate.capture.CaptureBackendResolver
+import com.playtranslate.capture.DisplaySelectionSeed
 import com.playtranslate.capture.CaptureLifecycle
 
 import android.Manifest
@@ -22,7 +23,6 @@ import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
-import android.view.WindowManager
 import android.graphics.Typeface
 import android.text.Spannable
 import android.text.SpannableStringBuilder
@@ -65,16 +65,15 @@ import com.playtranslate.language.HintTextKind
 import com.playtranslate.language.PackKind
 import com.playtranslate.language.UpgradeMode
 import com.playtranslate.language.PackUpgradeOrchestrator
-import com.playtranslate.language.PreloadResult
 import com.playtranslate.language.SourceLanguageEngines
 import com.playtranslate.language.SourceLanguageProfiles
 import com.playtranslate.language.SourceLangId
 import com.playtranslate.language.StalePack
 import com.playtranslate.ocr.registry.OcrModelManager
-import com.playtranslate.model.TextSegments
 import com.playtranslate.model.TranslationResult
 import com.playtranslate.translation.OfflineModelReclaimer
 import com.playtranslate.ui.AppReadiness
+import com.playtranslate.ui.sentenceTranslationBackend
 import com.playtranslate.ui.HomeAction
 import com.playtranslate.ui.Tab
 import com.playtranslate.ui.decideHome
@@ -91,6 +90,7 @@ import com.playtranslate.ui.SettingsBottomSheet
 import com.playtranslate.ui.LastSentenceCache
 import com.playtranslate.ui.TranslationResultFragment
 import com.playtranslate.ui.WordDetailBottomSheet
+import com.playtranslate.overlay.OwnWindows
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -165,6 +165,17 @@ class MainActivity :
     /** Activity-scoped state for the result surface. The fragment
      *  observes this VM; this activity mutates it. */
     private val resultVm: com.playtranslate.ui.TranslationResultViewModel by viewModels()
+
+    /** The dual-screen drag sentence's translation: the shared deliberate-
+     *  sentence flow over [resultVm] (translate, History attach, the hidden-
+     *  section deferral and its completion). The service binding is read per
+     *  call — it comes and goes with this activity's lifecycle. */
+    private val dragSentenceFlow by lazy {
+        com.playtranslate.ui.SentenceTranslationFlow(
+            applicationContext, resultVm, lifecycleScope,
+            backend = { captureService?.sentenceTranslationBackend() },
+        )
+    }
 
     /** The onboarding readiness gate. Derives [AppReadiness] from setup + screen
      *  mode; this activity collects [OnboardingViewModel.state] and routes, and
@@ -242,13 +253,16 @@ class MainActivity :
     }
 
     /** Re-OCR target = engine/region/screenshot of whatever's on screen — a Ready
-     *  result or a "no text detected" status. Null when neither offers re-OCR. */
+     *  result or a "no text detected" status. Null when neither offers re-OCR, or
+     *  its frame can't be re-read ([com.playtranslate.model.OcrProvenance.canReRead]:
+     *  one that carries our own overlays, so the gear isn't offered for it). */
     private fun reOcrTarget(): Pair<com.playtranslate.model.OcrProvenance, String>? =
         when (val s = resultVm.result.value) {
             is com.playtranslate.ui.ResultState.Ready ->
-                (s.result.ocrProvenance ?: return null) to (s.result.screenshotPath ?: return null)
+                (s.result.ocrProvenance?.takeIf { it.canReRead } ?: return null) to
+                    (s.result.screenshotPath ?: return null)
             is com.playtranslate.ui.ResultState.Status ->
-                (s.ocrProvenance ?: return null) to (s.screenshotPath ?: return null)
+                (s.ocrProvenance?.takeIf { it.canReRead } ?: return null) to (s.screenshotPath ?: return null)
             else -> null
         }
 
@@ -321,7 +335,7 @@ class MainActivity :
             val displays = dm.displays
             val presentation = dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
             val winBounds = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
-                windowManager.currentWindowMetrics.bounds else android.graphics.Rect()
+                OwnWindows.managerOf(this).currentWindowMetrics.bounds else android.graphics.Rect()
             android.util.Log.i(TAG_DISPLAY_DUMP,
                 "[$reason] displays=${displays.size} presentation=${presentation.size} " +
                     "multiWindow=$isInMultiWindowMode " +
@@ -426,6 +440,14 @@ class MainActivity :
         val svc = captureService ?: return
         val ready = resultVm.result.value as? com.playtranslate.ui.ResultState.Ready ?: return
         val pending = ready.result.pendingTranslation ?: return
+        // Drag/sentence shape: single text + deliberate-row attach, owned by
+        // the shared flow (with its own in-flight dedup). Only the one-shot
+        // capture shape stays here — its batch translate, session-scoped
+        // History attach and skeleton-box refill are this page's.
+        if (!pending.isCapture) {
+            dragSentenceFlow.completeDeferred()
+            return
+        }
         if (deferredCompletionJob?.isActive == true) {
             if (deferredCompletionPending == pending) return
             deferredCompletionJob?.cancel()
@@ -433,36 +455,19 @@ class MainActivity :
         deferredCompletionPending = pending
         deferredCompletionJob = lifecycleScope.launch {
             try {
-                if (pending.isCapture) {
-                    // One-shot capture shape: batch translate + session-scoped
-                    // History attach in the service; refill the skeleton boxes
-                    // so a show-on-screen presentation swaps to translated chips.
-                    val perGroup = svc.completeDeferredTranslation(pending)
-                    val joined = perGroup.joinToString("\n\n") { it.text }
-                    val filledBoxes = ready.onScreenBoxes?.let { boxes ->
-                        fillOneShotOverlayData(boxes.data, perGroup.map { it.text })
-                            ?.let { com.playtranslate.ui.OnScreenBoxes(it, boxes.displayId) }
-                    }
-                    resultVm.applyDeferredTranslation(
-                        pending,
-                        if (joined.isBlank()) "—" else joined,
-                        perGroup.mapNotNull { it.note }.firstOrNull(),
-                        perGroup.mapNotNull { it.backendDisplayName }.firstOrNull(),
-                        filledBoxes,
-                    )
-                } else {
-                    // Drag/sentence shape: single text + deliberate-row attach.
-                    // The recorder gates every write per feature on the
-                    // pending's LOOKUP-time eligibility snapshot AND the
-                    // current pref — an opted-out lookup records/feeds
-                    // nothing even if a pref was enabled before the reveal.
-                    val gt = translateDragSentenceAttachingHistory(
-                        svc, pending.groupTexts.firstOrNull() ?: ready.result.originalText,
-                        historyEligible = pending.historyEligible,
-                        contextEligible = pending.contextEligible,
-                    )
-                    resultVm.applyDeferredTranslation(pending, gt.text.ifBlank { "—" }, gt.note, gt.backendDisplayName)
+                val perGroup = svc.completeDeferredTranslation(pending)
+                val joined = perGroup.joinToString("\n\n") { it.text }
+                val filledBoxes = ready.onScreenBoxes?.let { boxes ->
+                    fillOneShotOverlayData(boxes.data, perGroup.map { it.text })
+                        ?.let { com.playtranslate.ui.OnScreenBoxes(it, boxes.displayId) }
                 }
+                resultVm.applyDeferredTranslation(
+                    pending,
+                    if (joined.isBlank()) "—" else joined,
+                    perGroup.mapNotNull { it.note }.firstOrNull(),
+                    perGroup.mapNotNull { it.backendDisplayName }.firstOrNull(),
+                    filledBoxes,
+                )
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // Superseded (or the activity is going away) — the newer job
                 // owns the state now; never land "—" for a cancelled run.
@@ -580,6 +585,7 @@ class MainActivity :
         lastSeenCaptureDisplayIds = prefs.captureDisplayIds
         applyEdgeToEdge(this)
         super.onCreate(savedInstanceState)
+        android.util.Log.i(TAG_HOME_ROUTE, "onCreate saved=${savedInstanceState != null} instance=${System.identityHashCode(this)}")
         maybePromptForCrashShare()
         // Suppress the window transition that would otherwise flash when recreating for a theme change
         if (prefs.suppressNextTransition) {
@@ -614,17 +620,14 @@ class MainActivity :
                 .build()
         }
 
-        // Prevent PlayTranslate's own UI from appearing in screenshots
-        // (including the accessibility takeScreenshot path used by the
-        // capture loop). In Android multi-window mode both the game and
-        // this app share one display; without FLAG_SECURE the OCR would
-        // read the translated text we just rendered and try to translate
-        // it again, creating a feedback loop. SurfaceFlinger enforces
-        // FLAG_SECURE in all capture paths, so this is a complete fix.
-        // Cost: system screenshot tools can't capture PlayTranslate's own
-        // UI — users who want to share their translator UI would have to
-        // screenshot externally, which is acceptable for a translation tool.
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        // Deliberately NO FLAG_SECURE here, or on any activity. In
+        // multi-window the capture loop shares this display with the game
+        // and our own translated UI must stay out of OCR; that is done by
+        // com.playtranslate.capture.OwnWindowMask, which paints every
+        // started opaque activity's window bounds black into each served
+        // frame. The compositor flag used to do it, at the cost of blocking
+        // the user's screenshots and recordings of our UI and blinding the
+        // drag-lookup lens over our own pages.
 
         hideNavigationBar()
 
@@ -678,7 +681,7 @@ class MainActivity :
                 // just log a PackMissing and is pointless.
                 if (LanguagePackStore.isInstalled(applicationContext, prefs.sourceLangId)) {
                     lifecycleScope.launch(Dispatchers.IO) {
-                        preloadEngineAndRecover(prefs.sourceLangId)
+                        SourceLanguageEngines.preloadAndRecover(applicationContext, prefs.sourceLangId)
                     }
                 }
                 // One-shot migration: if the user already has a non-English target but
@@ -756,6 +759,7 @@ class MainActivity :
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        android.util.Log.i(TAG_HOME_ROUTE, "onNewIntent action=${intent.action}")
         when (intent.action) {
             ACTION_DRAG_SENTENCE -> handleDragSentence(intent)
             ACTION_DRAG_WORD -> handleDragWord(intent)
@@ -817,6 +821,7 @@ class MainActivity :
 
     override fun onResume() {
         super.onResume()
+        android.util.Log.i(TAG_HOME_ROUTE, "onResume tab=$selectedTab")
         // Appearance (theme mode / accent) is changed on the standalone
         // AppearanceSettingsActivity, which writes the prefs and recreates
         // itself. MainActivity, sitting behind it, re-applies on return: if
@@ -858,10 +863,22 @@ class MainActivity :
         // Opening the app is what summons the a11y floating icon: lift the
         // process-lifetime suppression (boot / "Hide for Now" — see
         // CaptureLifecycle.floatingIconSuppressed) before the reconcile
-        // below, which is the shared install path for every icon.
+        // below, which is the shared install path for every icon. This is a
+        // user summon (userSummoned): a fresh icon here may ask for the
+        // game-audio consent.
         CaptureLifecycle.setFloatingIconSuppressed(this, false)
-        CaptureBackendResolver.activeOverlayUi?.reconcileFloatingIcons()
+        CaptureBackendResolver.activeOverlayUi?.reconcileFloatingIcons(userSummoned = true)
         refreshReadiness()
+        // Give the first-launch display seed its chance AFTER the backend is
+        // re-resolved: a fresh install returning from the overlay-permission
+        // screen has no accessibility service connected, so until the
+        // refreshReadiness() above swapped to MediaProjection the resolver
+        // still sat on its pre-onboarding accessibility default and the seed
+        // would have been skipped — and a later seed under an enabled
+        // accessibility service would store the detected non-default display,
+        // the exact guess this seed gating exists to avoid (Codex review
+        // find). No-op once seeded (one key-presence check).
+        ensureConfigured()
         maybeCheckForUpdates()
         // Silent, debounced, launch-time Yomitan dictionary auto-update. Runs on
         // appScope (no UI), gates its apply on CaptureService.isCapturing.
@@ -893,6 +910,7 @@ class MainActivity :
         //  - a Ready result is stale if its full (source/target/variant) context drifted;
         //  - a "no text detected" status is stale if its SOURCE language drifted — it has no
         //    translation, so only the source (which its message names) matters.
+        android.util.Log.i(TAG_HOME_ROUTE, "onStart tab=$selectedTab instance=${System.identityHashCode(this)}")
         val stale = when (val state = resultVm.result.value) {
             is com.playtranslate.ui.ResultState.Ready ->
                 state.result.langContext != Prefs(this).langContext()
@@ -907,8 +925,14 @@ class MainActivity :
         super.onStart()
     }
 
+    override fun onPause() {
+        super.onPause()
+        android.util.Log.i(TAG_HOME_ROUTE, "onPause")
+    }
+
     override fun onStop() {
         super.onStop()
+        android.util.Log.i(TAG_HOME_ROUTE, "onStop")
         isInForeground = false
         // The on-screen boxes are this activity's presentation — leaving the
         // foreground (app switch, another activity, rotation teardown) ends
@@ -960,34 +984,6 @@ class MainActivity :
         if (isLiveMode && !isChangingConfigurations) captureService?.stopLive()
         if (serviceConnected) unbindService(serviceConnection)
         super.onDestroy()
-    }
-
-    /**
-     * Preload the engine for [id]. Recovery behavior is tiered so we
-     * don't punish transient failures with destructive pack deletion:
-     *  - [PreloadResult.PackMissing]: shouldn't happen (caller gated on
-     *    isInstalled). Log as anomaly.
-     *  - [PreloadResult.PackCorrupt]: confirmed on-disk integrity failure
-     *    (e.g. SQLite can't open). Uninstall the pack so the user's next
-     *    deliberate language interaction routes through download/recovery
-     *    rather than a silent crash loop.
-     *  - [PreloadResult.TokenizerInitFailed]: tokenizer library threw
-     *    during warm-up but the pack on disk looks fine. Likely OOM or
-     *    transient; log and let the next user action retry instead of
-     *    destroying a valid offline install.
-     */
-    private suspend fun preloadEngineAndRecover(id: com.playtranslate.language.SourceLangId) {
-        when (val r = SourceLanguageEngines.get(applicationContext, id).preload()) {
-            is PreloadResult.Success -> { /* nothing to do */ }
-            is PreloadResult.PackMissing ->
-                android.util.Log.w("MainActivity", "preload($id) reported PackMissing after isInstalled() passed")
-            is PreloadResult.PackCorrupt -> {
-                android.util.Log.w("MainActivity", "preload($id) reported PackCorrupt: ${r.reason} — uninstalling")
-                LanguagePackStore.uninstall(applicationContext, id)
-            }
-            is PreloadResult.TokenizerInitFailed ->
-                android.util.Log.w("MainActivity", "preload($id) tokenizer warm-up failed: ${r.reason} — keeping pack, next call retries")
-        }
     }
 
     // ── Setup ─────────────────────────────────────────────────────────────
@@ -1309,6 +1305,7 @@ class MainActivity :
      *  surfaces were hidden for onboarding ([setMainSurfacesVisible]) — a path
      *  selectTab's "only on change" guard would otherwise skip. */
     private fun applyTabVisibility(tab: Tab) {
+        android.util.Log.i(TAG_HOME_ROUTE, "applyTabVisibility $tab")
         resultsContainer.visibility = if (tab == Tab.TRANSLATE) View.VISIBLE else View.GONE
         settingsContainer.visibility = if (tab == Tab.SETTINGS) View.VISIBLE else View.GONE
         regionPickerContainer.visibility = if (tab == Tab.REGIONS) View.VISIBLE else View.GONE
@@ -1320,6 +1317,7 @@ class MainActivity :
      *  out of the layout entirely, not merely covered by an opaque overlay. On
      *  Ready they're restored, the containers following the selected tab. */
     private fun setMainSurfacesVisible(visible: Boolean) {
+        android.util.Log.i(TAG_HOME_ROUTE, "setMainSurfacesVisible visible=$visible tab=$selectedTab")
         bottomBar.isVisible = visible
         if (visible) {
             applyTabVisibility(selectedTab)
@@ -1331,6 +1329,8 @@ class MainActivity :
     }
 
     private fun selectTab(tab: Tab) {
+        android.util.Log.i(TAG_HOME_ROUTE, "selectTab $selectedTab -> $tab from " +
+            Throwable().stackTrace.drop(1).take(4).joinToString(" < ") { it.methodName })
         if (selectedTab != tab) {
             selectedTab = tab
 
@@ -1414,10 +1414,13 @@ class MainActivity :
      *  re-routes through the Settings tab preserves the live fragment (and its
      *  scroll/state) instead of rebuilding it via `replace()`. */
     private fun openSettingsInline() {
-        if (supportFragmentManager.findFragmentByTag(SettingsBottomSheet.TAG) != null) return
+        val existing = supportFragmentManager.findFragmentByTag(SettingsBottomSheet.TAG)
+        android.util.Log.i(TAG_HOME_ROUTE, "openSettingsInline existing=${existing != null}")
+        if (existing != null) return
         val sheet = SettingsBottomSheet.newInstance().apply {
             setShowsDialog(false)
             onSourceLangChanged = { onSourceLanguageChanged() }
+            onTargetLangChanged = { onTargetLanguageChanged() }
             onScreenModeChanged = {
                 refreshReadiness()
             }
@@ -1638,8 +1641,17 @@ class MainActivity :
         }
         svc.liveModeState.observe(this) { isLive -> onLiveModeChanged(isLive) }
         svc.activeRegionLiveData.observe(this) { _ ->
+            // Label refresh only, deliberately no picker dismissal: this
+            // LiveData is state, not an event. Writes that land while the
+            // activity is stopped (a capture-once installs an override)
+            // replay on the next foreground, and a replay-driven selectTab
+            // once stranded the single-screen forced-Settings home on the
+            // Translate tab with the bottom bar hidden. Every foreground
+            // flow that installs an override already owns its tab move
+            // (ACTION_REGION_CAPTURE, the picker's translate-once, the
+            // region dropdown), so a close here was redundant for them
+            // and wrong for replays.
             updateRegionButton()
-            if (svc.isOverrideForDisplay(svc.primaryGameDisplayId())) hideRegionPicker()
         }
 
         ensureConfigured()
@@ -1650,108 +1662,11 @@ class MainActivity :
     private fun handleDragSentence(intent: Intent) {
         val lineText = intent.getStringExtra(EXTRA_DRAG_LINE_TEXT) ?: return
         val screenshotPath = intent.getStringExtra(EXTRA_DRAG_SCREENSHOT_PATH)
-
         if (isLiveMode) pauseLiveMode()
-
-        val segments = TextSegments.ofText(lineText)
-        val timestamp = java.text.SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(java.util.Date())
-
-        // DEFERRED: with the translation section hidden there is no consumer
-        // for the backend call — land the Ready carrying a pending; revealing
-        // the section (or an Anki flow) completes it. The lookup row was
-        // already recorded translation-less at the drag release; the
-        // completion attaches to it. The free source==target bypass never
-        // defers.
-        val dragPendingPrefs = Prefs(applicationContext)
-        val pendingSrcId = dragPendingPrefs.sourceLangId
-        if (dragPendingPrefs.hideTranslationSection &&
-            com.playtranslate.language.SourceLanguageProfiles[pendingSrcId].translationCode !=
-                dragPendingPrefs.targetLang
-        ) {
-            resultVm.displayResult(
-                TranslationResult(
-                    originalText       = lineText,
-                    segments           = segments,
-                    translatedText     = "",
-                    timestamp          = timestamp,
-                    screenshotPath     = screenshotPath,
-                    pendingTranslation = com.playtranslate.model.PendingTranslation(
-                        groupTexts = listOf(lineText),
-                        sourceLangId = pendingSrcId,
-                        targetLang = dragPendingPrefs.targetLang,
-                        // Logging eligibility at LOOKUP time — the completion
-                        // honors this snapshot, not reveal-time prefs.
-                        historyEligible = dragPendingPrefs.translationHistoryEnabled,
-                        contextEligible = dragPendingPrefs.llmContextEnabled,
-                    ),
-                    langContext        = dragPendingPrefs.langContext(),
-                ),
-                applicationContext,
-            )
-            return
-        }
-
-        resultVm.showTranslatingPlaceholder(lineText, segments, applicationContext)
-
-        val svc = captureService
-        if (svc != null) {
-            // translateOnce is a translation-only path — doesn't need
-            // display/region (i.e. isConfigured) to be true. translate()
-            // self-heals language managers on first call.
-            lifecycleScope.launch {
-                try {
-                    val groupTranslation = translateDragSentenceAttachingHistory(svc, lineText)
-                    val result = TranslationResult(
-                        originalText       = lineText,
-                        segments           = segments,
-                        translatedText     = groupTranslation.text,
-                        timestamp          = timestamp,
-                        screenshotPath     = screenshotPath,
-                        note               = groupTranslation.note,
-                        backendDisplayName = groupTranslation.backendDisplayName,
-                        langContext        = Prefs(applicationContext).langContext(),
-                    )
-                    resultVm.displayResult(result, applicationContext)
-                } catch (e: Exception) {
-                    resultVm.updateTranslation("", appCtx = applicationContext)
-                }
-            }
-        } else {
-            resultVm.updateTranslation("", appCtx = applicationContext)
-        }
-    }
-
-    /** Translate a dragged/looked-up sentence under the current pair and
-     *  attach the outcome to its translation-less History row. Shared by the
-     *  visible drag flow (eligibility defaults: lookup and translation are
-     *  one moment) and the deferred-reveal completion (which passes the
-     *  pending's lookup-time eligibility snapshot). */
-    private suspend fun translateDragSentenceAttachingHistory(
-        svc: CaptureService,
-        lineText: String,
-        historyEligible: Boolean = true,
-        contextEligible: Boolean = true,
-    ): CaptureService.GroupTranslation {
-        // Recording pair captured BEFORE translateOnce — a
-        // mid-flight language change must not relabel.
-        val dragPrefs = Prefs(applicationContext)
-        val recordSrc = com.playtranslate.language
-            .SourceLanguageProfiles[dragPrefs.sourceLangId].translationCode
-        val recordTgt = dragPrefs.targetLang
-        val groupTranslation = svc.translateOnce(lineText)
-        // The lookup itself was recorded translation-less at the
-        // drag release; this attaches the translation to that
-        // entry (or records fresh if the row is unknown).
-        if (groupTranslation.text.isNotEmpty()) {
-            svc.translationLogRecorder.onDeliberateTranslation(
-                lineText, groupTranslation.text, recordSrc, recordTgt,
-                com.playtranslate.translationlog.TranslationHistoryStore.PROVENANCE_LOOKUP,
-                groupTranslation.backendDisplayName,
-                historyEligible = historyEligible,
-                contextEligible = contextEligible,
-            )
-        }
-        return groupTranslation
+        // The lookup row was already recorded translation-less at the drag
+        // release; the flow attaches the translation to it (see
+        // SentenceTranslationFlow for the deferral + failure rules).
+        dragSentenceFlow.show(lineText, screenshotPath)
     }
 
     /**
@@ -1838,30 +1753,72 @@ class MainActivity :
         }
     }
 
+    /** Push the saved display selection to the service on first bind, and
+     *  run the first-launch auto-detect seed the first time it can run under
+     *  a backend that will actually capture. Cheap when there is nothing to
+     *  do (one key-presence check), so every caller about to capture, plus
+     *  onResume, goes through it. */
     private fun ensureConfigured() {
         val svc = captureService ?: return
-        if (!svc.isConfigured) {
-            // First-launch auto-detect: seed the selection set with the
-            // detected game display. The hasDisplaySelection guard is
-            // load-bearing — `isConfigured` is per-process state (false on
-            // every cold-start), so without it this branch would clobber
-            // the user's persisted multi-display selection on every restart.
-            // The legacy single-display path is safe because
-            // [Prefs.migrateLegacyPrefs] (called from onCreate) writes
-            // KEY_DISPLAY_IDS from the legacy KEY_DISPLAY_ID before this
-            // gate ever runs.
-            if (!prefs.hasDisplaySelection) {
-                // Seed the saved selection: the auto-detected game display if
-                // this backend can capture it, else the backend's fallback
-                // (MediaProjection only mirrors the default, so any other
-                // detection is stale from the start). Routes through the
-                // shared backend shim so seeding behaves like every other
-                // call site that turns a selection into the working set.
-                prefs.captureDisplayIds = CaptureBackendResolver.active()
-                    .capturableTargets(setOf(findGameDisplayId()))
-            }
+        if (seedDisplaySelectionIfReady()) {
+            // ONE post-seed path, whether or not the service was already
+            // configured: push the seeded set, re-place the floating icons,
+            // restart live if it is running — the same path a Settings
+            // picker change takes. Every consumer that holds the selection
+            // as state is covered by that one call, so no branch can skip
+            // one. The icons in particular may already be placed from the
+            // getter's default-display fallback: on a cold start with the
+            // accessibility service already enabled, the service's
+            // connect-time reconcile and onResume both run before the
+            // CaptureService bind that brings the first seed here, and a
+            // configure-only branch left the icon on the wrong screen until
+            // the next resume (Codex review find).
+            reconfigureForDisplayChange()
+        } else if (!svc.isConfigured) {
             configureService()
         }
+    }
+
+    /**
+     * First-launch auto-detect: seed the saved selection with the detected
+     * game display, once per install. Returns true when it wrote.
+     *
+     * The hasDisplaySelection guard is load-bearing — without it every cold
+     * start would clobber the user's persisted selection. The legacy
+     * single-display path is safe because [Prefs.migrateLegacyPrefs] (called
+     * from onCreate) writes KEY_DISPLAY_IDS from the legacy KEY_DISPLAY_ID
+     * before this gate ever runs.
+     *
+     * The seed waits for a permission-backed backend
+     * ([DisplaySelectionSeed.isBackendPermissionBacked]). It used to run on
+     * the first service bind, before onboarding granted anything, when the
+     * resolver still sat on its accessibility default whose shim is identity,
+     * so on a dual-screen device it stored the screen the app did NOT launch
+     * on and treated that guess as a choice. MediaProjection collapsed it to
+     * the default display at read time for as long as that backend ran, and
+     * the guess resurfaced the moment the accessibility service was enabled:
+     * on the Thor the icon and the display picker jumped to Screen-2, the
+     * screen the app itself had since been parked on (2026-09-02). Seeding
+     * under the backend that will run captures stores the default display
+     * for a MediaProjection user, which is what they see, and a later switch
+     * to accessibility keeps it until they change it. Nothing rewrites the
+     * selection on a backend swap: an OEM switching the accessibility service
+     * off arrives as the same swap and must not touch a display the user
+     * picked (a write-at-swap variant was built and pulled for that reason).
+     *
+     * Before the seed runs, [Prefs.captureDisplayIds] already reads as the
+     * default display, so an unseeded MediaProjection session behaves
+     * identically to a seeded one; only the accessibility-first path can
+     * observe the delay, as the icon moving to the seeded screen.
+     */
+    private fun seedDisplaySelectionIfReady(): Boolean {
+        if (prefs.hasDisplaySelection) return false
+        val backend = CaptureBackendResolver.active()
+        if (!DisplaySelectionSeed.isBackendPermissionBacked(this, backend)) return false
+        prefs.captureDisplayIds = DisplaySelectionSeed.seedFor(backend, findGameDisplayId())
+        // Keep onResume's picker-change diff from re-applying the seed.
+        lastSeenCaptureDisplayIds = prefs.captureDisplayIds
+        return true
     }
 
     /** Applies display + region to the capture service. Language managers
@@ -1875,13 +1832,29 @@ class MainActivity :
         svc.configureSaved(displayIds = prefs.captureDisplayIds)
     }
 
+    /** The game language was picked in Settings. What a new game language
+     *  does to the session (a Furigana overlay mode dropped on a language
+     *  without readings, a running auto-translate restarted in it, its
+     *  engine warmed) is CaptureService's, for every change of it wherever
+     *  made ([CaptureService.onSourceLanguageChanged]); Settings adds
+     *  [onLanguagePicked]'s reset. */
     private fun onSourceLanguageChanged() {
+        onLanguagePicked()
+    }
+
+    /** The translate-to language was picked in Settings: [onLanguagePicked]'s
+     *  reset, and a running auto-translate restarts in the new pair. */
+    private fun onTargetLanguageChanged() {
         val wasLive = captureService?.isLive == true
-        // Reset overlay mode if new language has no hint text
-        if (SourceLanguageProfiles[prefs.sourceLangId].hintTextKind == HintTextKind.NONE
-            && prefs.overlayMode == OverlayMode.FURIGANA) {
-            prefs.overlayMode = OverlayMode.TRANSLATION
+        onLanguagePicked()
+        if (wasLive) {
+            captureService?.stopLive()
+            withAccessibility { doStartLive() }
         }
+    }
+
+    /** A language picked in Settings resets the capture state. */
+    private fun onLanguagePicked() {
         // Language managers self-heal in translate(), but configureSaved()
         // also clears any temporary override region and refreshes the saved
         // region — both of which should reset on a deliberate language
@@ -1890,15 +1863,6 @@ class MainActivity :
         configureService()
         updateRegionButton()
         CaptureBackendResolver.activeOverlayUi?.reconcileFloatingIcons()
-        if (LanguagePackStore.isInstalled(applicationContext, prefs.sourceLangId)) {
-            lifecycleScope.launch(Dispatchers.IO) {
-                preloadEngineAndRecover(prefs.sourceLangId)
-            }
-        }
-        if (wasLive) {
-            captureService?.stopLive()
-            withAccessibility { doStartLive() }
-        }
     }
 
     private fun showAccessibilityDialog() {
@@ -2189,6 +2153,7 @@ class MainActivity :
      *  dismissal nuance (the step itself doesn't encode screen mode); the Ready
      *  home comes from [current] directly. */
     private fun route(prev: AppReadiness?, current: AppReadiness) {
+        android.util.Log.i(TAG_HOME_ROUTE, "route prev=$prev current=$current tab=$selectedTab")
         when (current) {
             is AppReadiness.Onboarding -> {
                 setMainSurfacesVisible(false)
@@ -2224,6 +2189,7 @@ class MainActivity :
         singleScreen: Boolean,
         existingSheet: SettingsBottomSheet?,
     ) {
+        android.util.Log.i(TAG_HOME_ROUTE, "showOnboardingStep step=$step single=$singleScreen sheet=${existingSheet != null}")
         when (step) {
             AppReadiness.Step.LANGUAGE -> {
                 // Welcome + language setup comes first: tap a language pair
@@ -2263,6 +2229,8 @@ class MainActivity :
             restoredTab = restoredTab,
             requiresA11y = CaptureBackendResolver.active().requiresAccessibilityService,
         )
+        android.util.Log.i(TAG_HOME_ROUTE, "showReadyHome home=$home action=${decision.action.javaClass.simpleName} " +
+            "decisionTab=${(decision.action as? HomeAction.ShowTab)?.tab} restoredTab=${decision.restoredTab} tab=$selectedTab")
         restoredTab = decision.restoredTab
         onboardingContainer.isGone = true
         when (val action = decision.action) {
@@ -2533,7 +2501,7 @@ class MainActivity :
             display?.displayId ?: Display.DEFAULT_DISPLAY
         } else {
             @Suppress("DEPRECATION")
-            windowManager.defaultDisplay.displayId
+            OwnWindows.managerOf(this).defaultDisplay.displayId
         }
 
         val displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -2669,6 +2637,7 @@ class MainActivity :
         dismissDropdown()
         val currentMode = prefs.overlayMode
         val modes = listOf(OverlayMode.TRANSLATION, OverlayMode.FURIGANA)
+        val hintKind = SourceLanguageProfiles[prefs.sourceLangId].hintTextKind
 
         // Current mode at bottom, others above
         val ordered = modes.filter { it != currentMode } + currentMode
@@ -2683,7 +2652,7 @@ class MainActivity :
         }
         val rows = mutableListOf<View>()
         ordered.forEach { mode ->
-            val row = buildDropdownRow(getString(mode.displayNameRes), mode == currentMode)
+            val row = buildDropdownRow(getString(mode.labelRes(hintKind)), mode == currentMode)
             container.addView(row)
             rows.add(row)
         }
@@ -2932,6 +2901,13 @@ class MainActivity :
             }
             sheet.onDismissed = { refreshRegionPicker() }
             sheet.onTranslateOnce = { region ->
+                // Land on the surface the capture renders on, like the
+                // region picker's translate-once: the activeRegionLiveData
+                // observer no longer navigates, so this flow owns its own
+                // tab move. Only reachable foregrounded on dual (the
+                // single-screen route goes to the over-game editor), so
+                // Translate is always a legal destination here.
+                selectTab(Tab.TRANSLATE)
                 // The dropdown's drag overlay rendered on [targetDisplayId],
                 // so the user drew this region against THAT screen — apply
                 // the override and capture against the same display rather
@@ -3028,6 +3004,12 @@ class MainActivity :
 
     companion object {
         private const val TAG_DISPLAY_DUMP = "DisplayDump"
+        /** Diagnostic trace of the home-routing state machine (route /
+         *  decideHome / selectTab / surface visibility). Greps cleanly:
+         *  `adb logcat -s HomeRoute`. Added while chasing a user report of
+         *  the single-screen home landing on the Translate tab with no
+         *  bottom bar after a capture. */
+        const val TAG_HOME_ROUTE = "HomeRoute"
 
         const val ACTION_DRAG_SENTENCE = "com.playtranslate.ACTION_DRAG_SENTENCE"
         const val EXTRA_DRAG_LINE_TEXT = "extra_drag_line_text"

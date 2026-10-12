@@ -14,8 +14,10 @@ import com.playtranslate.overlay.OverlayHost
 import com.playtranslate.ui.DragLookupController
 import com.playtranslate.ui.MagnifierLens
 import com.playtranslate.ui.TtsAlertTarget
+import com.playtranslate.ui.WorkspaceRoute
 import com.playtranslate.ui.WordLookupPopup
 import com.playtranslate.ui.showAnkiNotInstalledDialog
+import com.playtranslate.overlay.OwnWindows
 import kotlin.math.abs
 
 /**
@@ -73,10 +75,10 @@ class CameraWordLookup(
     private val viewTransform: () -> android.graphics.Matrix? = { null },
 ) {
     private val magnifier = MagnifierLens(
-        activity, activity.windowManager, Display.DEFAULT_DISPLAY,
+        activity, OwnWindows.managerOf(activity), Display.DEFAULT_DISPLAY,
         overlayHost = null,
     )
-    private val popup = WordLookupPopup(activity, activity.windowManager)
+    private val popup = WordLookupPopup(activity, OwnWindows.managerOf(activity))
     private val controller = DragLookupController(
         activity, Display.DEFAULT_DISPLAY, popup, magnifier,
         // Dead in this configuration: every consumer that would touch it
@@ -86,6 +88,7 @@ class CameraWordLookup(
         overlayHost = OverlayHost(activity, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY),
         ttsAlertTarget = TtsAlertTarget.InActivity(activity),
         showAnkiNotInstalled = { showAnkiNotInstalledDialog(activity) },
+        route = WorkspaceRoute.None,
     )
 
     private val handler = Handler(Looper.getMainLooper())

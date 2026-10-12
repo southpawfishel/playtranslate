@@ -18,11 +18,11 @@ import android.view.View
 import android.view.WindowManager
 import com.playtranslate.capture.CaptureBackendResolver
 import com.playtranslate.capture.CaptureLifecycle
+import com.playtranslate.capture.GameAudioGate
 import com.playtranslate.language.HintTextKind
+import com.playtranslate.language.LanguagePackStore
 import com.playtranslate.language.SourceLangId
 import com.playtranslate.language.SourceLanguageProfiles
-import com.playtranslate.language.stackableTargetScript
-import com.playtranslate.language.targetSupportsVerticalText
 import com.playtranslate.ocr.mangaocr.MangaOcrProvisioning
 import com.playtranslate.ocr.registry.OcrModelManager
 import com.playtranslate.ocr.registry.ocrLabel
@@ -32,15 +32,26 @@ import com.playtranslate.ui.CaptureOverlaySettingsActivity
 import com.playtranslate.ui.DimController
 import com.playtranslate.ui.DragLookupController
 import com.playtranslate.ui.FloatingIconMenu
+import com.playtranslate.ui.GrowthLimits
 import com.playtranslate.ui.LanguageSetupActivity
 import com.playtranslate.ui.OcrPicker
 import com.playtranslate.ui.FloatingOverlayIcon
 import com.playtranslate.ui.MagnifierLens
 import com.playtranslate.ui.OverlayAlert
+import com.playtranslate.ui.OverlayRenderConfig
+import com.playtranslate.ui.OverlayWorkspace
+import com.playtranslate.ui.SourceListPage
+import com.playtranslate.ui.WorkspaceHost
+import com.playtranslate.ui.WorkspacePage
 import com.playtranslate.ui.SonarPingIntroView
 import com.playtranslate.ui.TextBox
+import com.playtranslate.ui.TranslationErrorPills
 import com.playtranslate.ui.TranslationOverlayView
+import com.playtranslate.ui.TranslationServicesActivity
 import com.playtranslate.ui.WordLookupPopup
+import com.playtranslate.overlay.OwnWindows
+import com.playtranslate.translation.TranslationError
+import com.playtranslate.translation.TranslationErrorKey
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -122,8 +133,18 @@ class OverlayUiController(
     private data class PendingReshow(
         val displayId: Int,
         val result: com.playtranslate.model.TranslationResult,
+        /** The region the result was captured with, so the re-shown panel
+         *  outlines the same region. */
+        val region: RegionEntry,
         val stashedAtMs: Long,
     )
+
+    /** The floating workspace while showing (single-screen). Single instance —
+     *  a new open replaces it. Geometry tracked like the capture panel's, so a
+     *  display reconfiguration dismisses it ([dismissWorkspaceIfReconfigured]). */
+    private var workspace: OverlayWorkspace? = null
+    private var workspaceDisplayId = -1
+    private var workspaceGeometry: DisplayGeometry? = null
 
     /** Listens for display changes (rotation, hot-plug, foldable state) so
      *  icons can be repositioned against the new dimensions and the icon
@@ -171,6 +192,8 @@ class OverlayUiController(
             // spurious / cross-display event can't cancel a just-tapped capture — that was the
             // rotate-then-tap no-op. 180° flips change rotation, so a stale panel still drops.
             dismissCaptureResultPanelIfReconfigured(displayId)
+            // Same stale-layout rule for the floating workspace.
+            dismissWorkspaceIfReconfigured(displayId)
             // A rotation / resize invalidates a per-box translation overlay
             // group — its cached displayW/displayH drive the OCR→screen
             // mapping. Drop it on a size change; the next capture cycle
@@ -184,6 +207,7 @@ class OverlayUiController(
             repositionIconForDisplay(displayId)
             repositionSonarIntroForDisplay(displayId)
             repositionFloatingMenuForDisplay(displayId)
+            errorPills.onDisplayChanged(displayId)
         }
     }
 
@@ -225,6 +249,16 @@ class OverlayUiController(
         val wm: WindowManager,
         val dragController: DragLookupController,
         val clearLivePauseFlag: () -> Unit,
+        /** Builds a fresh, fully wired icon VIEW for this display — closes
+         *  over the display's collaborators (drag controller, session state)
+         *  inside [installFloatingIconForDisplay], so install and the
+         *  z-order re-raise share one wiring and cannot drift. The re-raise
+         *  REPLACES the icon view with a fresh one instead of re-adding the
+         *  same view, because a same-view re-add forces the gate to destroy
+         *  the old surface synchronously beside the new add
+         *  ([com.playtranslate.overlay.WindowChurnGate.flushPendingFor]) —
+         *  the release-adjacent-to-create shape the gate exists to prevent. */
+        val makeIcon: () -> FloatingOverlayIcon,
     )
 
     private val iconHandles: MutableMap<Int, FloatingIconHandle> = mutableMapOf()
@@ -236,8 +270,8 @@ class OverlayUiController(
     // capture activation, the QS tile flipping showOverlayIcon on, a new
     // display being added, etc. Does NOT fire for rotation
     // (repositionIconForDisplay updates the existing icon's params in place)
-    // or for z-order re-raises (bringFloatingIconsToFront removes-and-re-
-    // adds the same icon view without going through install).
+    // or for z-order re-raises (bringFloatingIconsToFront swaps in a fresh
+    // icon view via the handle's makeIcon, without going through install).
     //
     // Keyed by displayId so simultaneous intros on multi-display setups don't
     // overwrite each other's overlay-window references and leave one
@@ -258,6 +292,10 @@ class OverlayUiController(
 
     fun setIconsLiveMode(liveMode: Boolean) {
         iconHandles.values.forEach { it.icon.liveMode = liveMode }
+    }
+
+    fun setIconsGlyph(glyph: FloatingOverlayIcon.Glyph) {
+        iconHandles.values.forEach { it.icon.glyph = glyph }
     }
 
     fun anyIconInDragMode(): Boolean = iconHandles.values.any { it.icon.inDragMode }
@@ -392,7 +430,24 @@ class OverlayUiController(
     private var floatingMenuDisplayId: Int? = null
 
     private var pillView: View? = null
+    /** Display, window params and window manager of the no-text pill, so it
+     *  can move to stay below the translation-error pills while they
+     *  change on its display ([keepNoTextPillBelowErrorPills]). */
+    private var pillDisplayId: Int? = null
+    private var pillParams: WindowManager.LayoutParams? = null
+    private var pillWm: WindowManager? = null
     private val pillHandler = Handler(Looper.getMainLooper())
+
+    /** The translation-error pills. See [showTranslationErrorPill]. */
+    private val errorPills = TranslationErrorPills(overlayHost).also {
+        it.onStackMoved = ::keepNoTextPillBelowErrorPills
+        it.onWithdrawn = com.playtranslate.translation.TranslationErrors::onPillsWithdrawn
+        it.onSettings = ::onPillSettingsTapped
+    }
+
+    /** The gear's "Discard card?" confirm while it is up
+     *  ([onPillSettingsTapped]). */
+    private var discardCardConfirm: OverlayAlert? = null
 
     // ── Region overlays (delegated to RegionOverlayController) ───────────
 
@@ -438,7 +493,7 @@ class OverlayUiController(
         hideNoTextPill()
 
         val ctx = context.createDisplayContext(display)
-        val wm = ctx.getSystemService(WindowManager::class.java) ?: return
+        val wm = OwnWindows.manager(ctx) ?: return
         val dp = ctx.resources.displayMetrics.density
         val icon = ctx.packageManager.getApplicationIcon(ctx.applicationInfo)
 
@@ -491,9 +546,15 @@ class OverlayUiController(
             gravity = android.view.Gravity.TOP or android.view.Gravity.CENTER_HORIZONTAL
             y = (40 * dp).toInt()
         }
+        // Under the translation-error pills when they're up on this display,
+        // not on top of them; kept there as they change.
+        errorPills.placeBelow(display.displayId, params)
 
         overlayHost.addOverlayWindow(view, wm, params, display.displayId)
         pillView = view
+        pillDisplayId = display.displayId
+        pillParams = params
+        pillWm = wm
 
         // Brief display, then fade out
         pillHandler.postDelayed({
@@ -513,6 +574,177 @@ class OverlayUiController(
             overlayHost.removeOverlayWindow(view)
         }
         pillView = null
+        pillDisplayId = null
+        pillParams = null
+        pillWm = null
+    }
+
+    /** The translation-error pills on [displayId] were laid out anew or
+     *  moved: move the no-text pill, if it's up there, to just below them.
+     *  Called for their first layout too, which may come after the no-text
+     *  pill was placed (an error and a failed capture land in the same
+     *  frame), so the two never overlap whatever order they came in. When
+     *  the pills go away it stays put; it's gone within two seconds. */
+    private fun keepNoTextPillBelowErrorPills(displayId: Int) {
+        if (pillDisplayId != displayId) return
+        val view = pillView ?: return
+        val params = pillParams ?: return
+        if (!errorPills.placeBelow(displayId, params)) return
+        try {
+            pillWm?.updateViewLayout(view, params)
+        } catch (_: IllegalArgumentException) {
+            // Its window is already gone (a sweep, or the churn gate's
+            // deferred removal); hideNoTextPill clears the rest.
+        }
+    }
+
+    // ── Translation-error pills ──────────────────────────────────────────
+
+    /**
+     * Put [error]'s pill up; true when it is on screen afterwards (the
+     * tracker counts the error as shown only then). A pill shows whenever
+     * there's an error, whatever is in front, and × closes it (Gilad,
+     * 2026-09-27). It goes to the display the stack is already on, else the
+     * primary game display (the one the user last interacted with), else
+     * the first configured capture display. A display that leaves the
+     * capture set takes its pills with it ([reconcileFloatingIcons]).
+     */
+    fun showTranslationErrorPill(error: TranslationError): Boolean {
+        val displayId = errorPills.displayId
+            ?: CaptureService.instance?.primaryGameDisplayId()
+            ?: CaptureBackendResolver.active().capturableTargets(Prefs(context).captureDisplayIds).firstOrNull()
+            ?: Display.DEFAULT_DISPLAY
+        val display = (context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
+            .getDisplay(displayId) ?: return false
+        return errorPills.show(context.createDisplayContext(display), displayId, error)
+    }
+
+    /** Make the pill of [error]'s owner say [error] if it has one up; see
+     *  [com.playtranslate.translation.TranslationErrorPresenter.update]. */
+    fun updateTranslationErrorPill(error: TranslationError) {
+        errorPills.update(error)
+    }
+
+    /** Take down the pills of [keys]' owners (their service works again). */
+    fun hideTranslationErrorPills(keys: Collection<TranslationErrorKey>) {
+        errorPills.hide(keys.map { it.owner }.distinct())
+    }
+
+    /**
+     * The gear on [owner]'s pill on [displayId]. With an Anki card editor
+     * open in the workspace, going to the settings closes it, and its card
+     * with it (the workspace keeps no drafts), so the gear asks first, over
+     * the editor (Gilad, 2026-09-28): "Go to settings" goes on, and Cancel
+     * leaves everything as it was, the pill included. A tap while the
+     * confirm is up adds no second one.
+     */
+    private fun onPillSettingsTapped(owner: String, displayId: Int) {
+        val ws = workspace
+        if (ws == null || !ws.holdsCardEditor) {
+            openTranslationServicesFromPill(owner, displayId)
+            return
+        }
+        if (discardCardConfirm?.isShowing == true) return
+        discardCardConfirm = ws.showAlert { themed ->
+            setTitle(themed.getString(R.string.translation_error_discard_card_title))
+            setMessage(themed.getString(R.string.translation_error_discard_card_message))
+            // The app's destructive confirm style (the prompt editor's
+            // Discard, History's Clear).
+            addButton(
+                themed.getString(R.string.translation_error_discard_card_confirm),
+                themed.themeColor(R.attr.ptDanger),
+                themed.themeColor(R.attr.ptAccentOn),
+            ) {
+                discardCardConfirm = null
+                openTranslationServicesFromPill(owner, displayId)
+            }
+            addCancelButton(themed.getString(R.string.btn_cancel)) { discardCardConfirm = null }
+        }
+    }
+
+    /**
+     * Go on from the gear on [owner]'s pill on [displayId] (Gilad,
+     * 2026-09-28): take the pill down, stop auto-translate, have the tracker
+     * show the owner's next failure again, and open the Translation services
+     * page, where the user can fix the service or switch to another.
+     * Auto-translate stops, as the app's own pauseLiveMode stops it, rather
+     * than pausing to resume by itself: the user starts it again back in the
+     * game, and that start is the next try. It stops first, here and now,
+     * whatever is in front (Codex adversarial 2026-09-28): the tracker's
+     * cutoff must fall after the stop, and a start still pending (the
+     * consent dialog, the stream probe) must not begin later, which only
+     * [CaptureService.stopLive] prevents. The icon's gestures and the quick
+     * menu route their stops through the app when it is in front on another
+     * screen; that stop is this same call, a message later, and the app
+     * ignores it while a start is still pending. A session the word lens
+     * paused for its lookup is stopped too:
+     * the lens restarts it when it closes, so the gear cancels that restart
+     * before it closes the lens below (Codex adversarial 2026-09-28). The
+     * lens can be open under the pill (a pill that goes up while the lens is
+     * open sits above it, and a tap on the pill never reaches the lens); a
+     * lens above the pill takes the tap itself, since its window catches
+     * every tap off its card, so the gear runs only once that lens is gone.
+     *
+     * The page opens where our app is in front, else on the pill's display,
+     * as the quick menu's links to an activity do ([launchOnOverlayDisplay]),
+     * and SINGLE_TOP: a pill shows over our own screens too, and a tap while
+     * the page is already on top opens no second copy. Our full-screen
+     * surfaces over the game go first: an overlay window sits above every
+     * activity, so one left up would cover the page. The quick menu's, the
+     * capture panel's and the workspace's own links to an activity close
+     * them the same way.
+     */
+    private fun openTranslationServicesFromPill(owner: String, displayId: Int) {
+        errorPills.hide(listOf(owner))
+        CaptureService.instance?.let { svc ->
+            if (svc.isLive || svc.isLiveStartPending) svc.stopLive()
+        }
+        cancelLensResumes()
+        com.playtranslate.translation.TranslationErrors.onPillSettingsOpened(owner)
+        dismissFloatingMenu()
+        dismissCaptureResultOverlay()
+        dismissWorkspace()
+        if (regionController.isRegionEditorActive) regionController.hideRegionEditor()
+        dismissAllDragLookupPopups()
+        launchOnOverlayDisplay(
+            Intent(context.applicationContext, TranslationServicesActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            displayId,
+        )
+    }
+
+    /** Capture ended here (Turn Off, MediaProjection not turned on, or this
+     *  backend torn down: [hideFloatingIcon] with endsCapture): the pills
+     *  come down, and the errors they showed are forgotten, so the next
+     *  session shows any that still hold once (Gilad, 2026-09-26).
+     *  Idempotent. */
+    private fun endErrorPillSession() {
+        errorPills.removeAll()
+        com.playtranslate.translation.TranslationErrors.onCaptureSessionEnded()
+    }
+
+    /**
+     * Screen rects of this app's own chrome on [displayId] that a raw frame
+     * of that display can contain: the floating icon, the transient pill
+     * ([showNoTextPill]: no text, a failure, "Translating from …") and the
+     * translation-error pills. The OCR sites black these out of frames
+     * stamped `includesOwnOverlays`, and the pinhole mode leaves them out of
+     * its change gate and its pinhole sampling. Read live, main thread.
+     */
+    fun ownChromeRects(displayId: Int): List<Rect> =
+        listOfNotNull(getFloatingIconRect(displayId), noTextPillRect(displayId)) +
+            errorPills.screenRects(displayId)
+
+    /** The transient pill's rect on [displayId] while it is up there and laid
+     *  out. "Translating from …" goes up as the restarted session takes its
+     *  first frames, and a pill's message is real words. */
+    private fun noTextPillRect(displayId: Int): Rect? {
+        if (pillDisplayId != displayId) return null
+        val view = pillView ?: return null
+        if (!view.isLaidOut || view.width <= 0 || view.height <= 0) return null
+        val loc = IntArray(2)
+        view.getLocationOnScreen(loc)
+        return Rect(loc[0], loc[1], loc[0] + view.width, loc[1] + view.height)
     }
 
     // ── Translation overlay ──────────────────────────────────────────────
@@ -555,10 +787,9 @@ class OverlayUiController(
         screenshotW: Int, screenshotH: Int,
         pinholeMode: Boolean = false,
         oneShot: Boolean = false,
-        verticalTextTarget: Boolean = false,
-        verticalTextStackable: Boolean = false,
-        verticalGrowEnabled: Boolean = false,
+        renderConfig: OverlayRenderConfig = OverlayRenderConfig.DEFAULT,
         authoritativeBounds: Boolean = false,
+        growthLimits: GrowthLimits = GrowthLimits.NONE,
     ) {
         // Overlay is appearing — dismiss the loading spinner across all icons.
         // Through the service rather than straight at the icons: the service
@@ -570,27 +801,26 @@ class OverlayUiController(
 
         val displayId = display.displayId
         // Reuse the existing view only if its pinhole mode, oneShot flag, AND
-        // verticalTextTarget all match. The first two differing means the
-        // window flags (FLAG_NOT_TOUCHABLE), params.alpha, mask alpha, or
+        // render config all match. The first two differing means the window
+        // flags (FLAG_NOT_TOUCHABLE), params.alpha, mask alpha, or
         // tap-to-dismiss listener would need to change — those are fixed at
-        // construction and at addOverlayWindow time. verticalTextTarget is also
-        // a constructor val (it selects the per-box render path) and derives
-        // from the user-mutable target-language pref, so a mid-session target
-        // switch must force a fresh view rather than silently reuse the stale
-        // render mode. The same applies to verticalTextStackable (target script)
-        // and verticalGrowEnabled (grow pref) — both are ctor vals that select the
-        // render path. In the current call flow none of these transitions hit this
-        // reuse path (beginHoldPreview/endHoldPreview teardown ensures a fresh
-        // create, and the grow toggle restarts live mode), but the guard prevents a
+        // construction and at addOverlayWindow time. The render config is also
+        // a constructor val (it selects the per-box render path and layout)
+        // and derives from user-mutable prefs (target language, grow, minimum
+        // text size), so a mid-session change must force a fresh view rather
+        // than silently reuse the stale layout; comparing it whole means a
+        // setting added to it is guarded without touching this line. In the
+        // current call flow none of these transitions hit this reuse path
+        // (beginHoldPreview/endHoldPreview teardown ensures a fresh create,
+        // and the settings rows stop live mode), but the guard prevents a
         // future caller from silently inheriting a stale view.
         val existing = translationOverlayHandles[displayId]
         if (existing != null && existing.pinholeMode == pinholeMode && existing.oneShot == oneShot &&
-            existing.verticalTextTarget == verticalTextTarget &&
-            existing.verticalTextStackable == verticalTextStackable &&
-            existing.verticalGrowEnabled == verticalGrowEnabled
+            existing.renderConfig == renderConfig
         ) {
             existing.setBoxes(
                 boxes, cropLeft, cropTop, screenshotW, screenshotH, authoritativeBounds,
+                growthLimits = growthLimits,
             )
             return
         }
@@ -598,7 +828,7 @@ class OverlayUiController(
 
         val displayCtx = context.createDisplayContext(display)
         val themedCtx = android.view.ContextThemeWrapper(displayCtx, android.R.style.Theme_DeviceDefault)
-        val wm = displayCtx.getSystemService(WindowManager::class.java) ?: return
+        val wm = OwnWindows.manager(displayCtx) ?: return
 
         val isMediaProjection = overlayHost.windowType ==
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -659,14 +889,12 @@ class OverlayUiController(
             maskAlpha = mainMaskAlpha,
             oneShot = oneShot,
             boostContrast = mainBoostContrast,
-            verticalTextTarget = verticalTextTarget,
-            verticalTextStackable = verticalTextStackable,
-            verticalGrowEnabled = verticalGrowEnabled,
+            renderConfig = renderConfig,
             onDismiss = if (mainTouchable) {
                 { CaptureService.instance?.dismissLiveOverlay(displayId) }
             } else null,
         ).apply {
-            setBoxes(boxes, cropLeft, cropTop, screenshotW, screenshotH)
+            setBoxes(boxes, cropLeft, cropTop, screenshotW, screenshotH, growthLimits = growthLimits)
         }
         val mainParams = buildOverlayLayoutParams(
             touchable = mainTouchable,
@@ -792,17 +1020,17 @@ class OverlayUiController(
         val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         val display = dm.getDisplay(displayId) ?: return false
         val displayCtx = context.createDisplayContext(display)
-        val wm = displayCtx.getSystemService(WindowManager::class.java) ?: return false
-        val prefs = Prefs(context)
+        val wm = OwnWindows.manager(displayCtx) ?: return false
         val view = TranslationOverlayView(
             android.view.ContextThemeWrapper(displayCtx, android.R.style.Theme_DeviceDefault),
             oneShot = true,
-            verticalTextTarget = targetSupportsVerticalText(prefs.targetLang),
-            verticalTextStackable = stackableTargetScript(prefs.targetLang),
-            verticalGrowEnabled = prefs.verticalTextGrow,
+            renderConfig = OverlayRenderConfig.from(Prefs(context)),
             onDismiss = { hideAppBoxes() },
         ).apply {
-            setBoxes(data.boxes, data.cropLeft, data.cropTop, data.screenshotW, data.screenshotH)
+            setBoxes(
+                data.boxes, data.cropLeft, data.cropTop, data.screenshotW, data.screenshotH,
+                growthLimits = data.growthLimits,
+            )
         }
         // Backstop notification for removal paths that bypass hideAppBoxes
         // (the overlayHost.removeAll sweep, display death): if this view still
@@ -836,12 +1064,31 @@ class OverlayUiController(
         return true
     }
 
-    /** Swap the app boxes in place — the skeleton → translated promotion when
-     *  a Done lands while they're up. No-op when they aren't. */
+    /** Swap the app boxes in place: the skeleton → translated promotion when
+     *  a Done lands while they're up. No-op when they aren't. The view's
+     *  render config is fixed at construction, so a render setting changed
+     *  since they went up replaces the window through [showAppBoxes]. The old
+     *  one is disowned silently first (not [hideAppBoxes], whose onDismissed
+     *  would flip the caller's toggle off for boxes that stay up); the
+     *  callback carries over, and fires only if the new window can't show. */
     fun updateAppBoxes(data: OneShotOverlayData) {
-        appBoxesView?.setBoxes(
-            data.boxes, data.cropLeft, data.cropTop, data.screenshotW, data.screenshotH,
-        )
+        val view = appBoxesView ?: return
+        if (view.renderConfig == OverlayRenderConfig.from(Prefs(context))) {
+            view.setBoxes(
+                data.boxes, data.cropLeft, data.cropTop, data.screenshotW, data.screenshotH,
+                growthLimits = data.growthLimits,
+            )
+            return
+        }
+        val displayId = appBoxesDisplayId
+        val onDismissed = appBoxesOnDismissed ?: {}
+        // Nulled before the removal, so the old view's detach backstop (its
+        // identity guard) stays silent.
+        appBoxesView = null
+        appBoxesDisplayId = -1
+        appBoxesOnDismissed = null
+        overlayHost.removeOverlayWindow(view)
+        if (!showAppBoxes(displayId, data, onDismissed)) onDismissed()
     }
 
     /** Tear the app boxes down. Idempotent. Disowns the window and fires its
@@ -890,14 +1137,29 @@ class OverlayUiController(
      * icons whose display is no longer selected or has been disconnected, and
      * install icons for newly-selected, currently-connected displays.
      *
-     * [showIntro] is false only for the projection-loss reinstall
+     * [freshAppearance] is false only for the projection-loss reinstall
      * ([com.playtranslate.capture.MediaProjectionController.onProjectionLost]):
      * there the icon window was just swept by hideAll and comes straight back,
-     * so to the user it never left — replaying the sonar intro reads as a
-     * spurious flash (field report 2026-07-11). Every genuinely fresh
-     * appearance (Turn On, backend swap, display added) keeps the intro.
+     * so to the user it never left. Two things key on it: the sonar intro
+     * (replaying it there reads as a spurious flash, field report 2026-07-11)
+     * and the game-audio consent prompt ([promptGameAudioConsentIfMissing] —
+     * that path is how a status-bar-chip stop lands, and re-asking there would
+     * nag right after a deliberate no). Every genuinely fresh appearance (app
+     * open after boot, Turn On, backend swap, display added, Hide for Now and
+     * back) gets the intro.
+     *
+     * [userSummoned] is true only from the two places a USER brings the icon
+     * up — MainActivity.onResume (app open) and
+     * [CaptureLifecycle.activateAccessibility] (Settings' Turn On, the Quick
+     * Settings tile), the same two sites that lift
+     * [CaptureLifecycle.floatingIconSuppressed] — and it is what lets a fresh
+     * placement ask for the game-audio consent: a summon is a user interaction
+     * the platform credits for the service start and the dialog launch, where
+     * a passive reinstall (service reconnect, display hot-plug, backend swap,
+     * language change) is not, and would also drop a system dialog over live
+     * gameplay. Passive paths leave the outlined arrow as the signal.
      */
-    fun reconcileFloatingIcons(showIntro: Boolean = true) {
+    fun reconcileFloatingIcons(freshAppearance: Boolean = true, userSummoned: Boolean = false) {
         val prefs = Prefs(context)
         // The "show the floating icon" preference gates the icon only on the
         // accessibility backend. MediaProjection has no in-app toggle for it
@@ -908,7 +1170,7 @@ class OverlayUiController(
         val isMediaProjection =
             !CaptureBackendResolver.active().requiresAccessibilityService
         if (!isMediaProjection && !prefs.showOverlayIcon) {
-            hideFloatingIcon("pref_disabled")
+            hideFloatingIcon("pref_disabled", endsCapture = true)
             return
         }
         if (!isMediaProjection && CaptureLifecycle.floatingIconSuppressed) {
@@ -918,7 +1180,7 @@ class OverlayUiController(
             // resurrect path (service reconnect, display hot-plug, backend
             // reresolve) lands here, so the icon genuinely stays away until
             // MainActivity's onResume lifts the suppression.
-            hideFloatingIcon("suppressed_until_app_open")
+            hideFloatingIcon("suppressed_until_app_open", endsCapture = false)
             return
         }
         if (!canShowControls()) {
@@ -926,7 +1188,7 @@ class OverlayUiController(
             // deliberately the activation flag, not consent: a revoked
             // projection keeps the controls up — the next capture-requiring
             // action re-prompts (see onProjectionLost).
-            hideFloatingIcon("controls_gated")
+            hideFloatingIcon("controls_gated", endsCapture = true)
             return
         }
         val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -947,19 +1209,107 @@ class OverlayUiController(
         // If the user has nothing selected OR every selected display is
         // unreachable, fall back to the legacy single-display heuristic so the
         // app always has at least one icon while it's "configured."
+        var installedAny = false
         if (target.none { dm.getDisplay(it) != null }) {
             val display = findIconDisplay(prefs) ?: return
             if (display.displayId !in iconHandles) {
-                installFloatingIconForDisplay(display, prefs, showIntro)
+                installedAny = installFloatingIconForDisplay(display, prefs, freshAppearance)
             }
+        } else {
+            for (id in target) {
+                if (id in iconHandles) continue
+                val display = dm.getDisplay(id) ?: continue
+                if (installFloatingIconForDisplay(display, prefs, freshAppearance)) installedAny = true
+            }
+        }
+        // The translation-error pills live on a captured display: one that
+        // left the capture set (deselected, or gone) takes them with it, and
+        // each shows again at its next failure where capture is.
+        errorPills.displayId?.let { id ->
+            if ((id !in target && id !in iconHandles) || dm.getDisplay(id) == null) {
+                errorPills.withdrawFrom(id)
+            }
+        }
+        // Once per reconcile, not per display, and only when an icon actually
+        // landed as a fresh appearance the user asked for.
+        if (installedAny && freshAppearance && userSummoned && !isMediaProjection) onFreshAccessibilityPlacement()
+    }
+
+    /**
+     * User-summoned fresh accessibility-backend placement: arm or fire the
+     * game-audio consent prompt. The prompt needs the capture service alive —
+     * it asks through the SERVICE's own coroutine scope, never by starting
+     * one: a cold app open installs this icon before the bind that creates
+     * the service lands, and the tile summon cold-starts the service itself
+     * ([CaptureLifecycle.activateAccessibility]) with the icon landing before
+     * onCreate; a service start from HERE would be a second, uncredited one —
+     * the API 31+ ForegroundServiceStartNotAllowedException crash class
+     * (Codex adversarial finding 2026-09-05; the 2026-07-15 field crash in
+     * CaptureService.updateForegroundState was the same class). With no
+     * service the prompt is parked in [placementPromptPending] and fired by
+     * [CaptureService]'s onCreate through [firePendingPlacementPrompt].
+     */
+    private fun onFreshAccessibilityPlacement() {
+        val svc = CaptureService.instance
+        if (svc == null) {
+            placementPromptPending = true
             return
         }
+        promptGameAudioConsentIfMissing(svc)
+    }
 
-        for (id in target) {
-            if (id in iconHandles) continue
-            val display = dm.getDisplay(id) ?: continue
-            installFloatingIconForDisplay(display, prefs, showIntro)
-        }
+    /** Armed by a fresh placement that found no service; consumed once by
+     *  [firePendingPlacementPrompt], dropped when the last icon goes away
+     *  (a parked prompt must not outlive the appearance that armed it). */
+    private var placementPromptPending = false
+
+    /** Called by [CaptureService] once it exists (onCreate, accessibility
+     *  backend): fires the prompt a fresh placement parked, if any. */
+    fun firePendingPlacementPrompt(svc: CaptureService) {
+        if (!placementPromptPending) return
+        placementPromptPending = false
+        promptGameAudioConsentIfMissing(svc)
+    }
+
+    /**
+     * Placement prompt: a floating icon has just made a fresh appearance on
+     * the accessibility backend and the Anki game-audio feature is on, but
+     * the MediaProjection consent the recorder rides on is not held — ask for
+     * it now. The recorder never prompts
+     * ([com.playtranslate.capture.GameAudioRecorder]), and on this backend
+     * nothing else asks until a live-mode start borrows the stream, so before
+     * this the user had to find the menu's "Record audio" bar or Settings'
+     * repair row to get the audio they had switched on. Predicate:
+     * [GameAudioGate.wouldRunGivenConsent] — the bar's own predicate plus
+     * session-active, which an installed accessibility icon already implies.
+     * The mic gate is part of it, because an overlay cannot walk a
+     * runtime-permission flow — a missing mic leaves the icon's outlined
+     * arrow as the signal and Settings as the repair.
+     *
+     * Launch context: only user summons reach here ([reconcileFloatingIcons]'s
+     * userSummoned — app open after boot, Hide for Now and back, Settings'
+     * Turn On, the Quick Settings tile). The dialog is then an activity
+     * started from the service on the heels of that interaction, the same
+     * shape as the MediaProjection tile path (ACTION_MP_ACTIVATE →
+     * activateMediaProjection → ensureConsent) and the live-start borrow, and
+     * it rides the same background-activity-start allowances (a visible
+     * activity for the app-open case; SYSTEM_ALERT_WINDOW or the bound
+     * accessibility service for the tile). Passive reinstalls (service
+     * reconnect, display hot-plug, backend swap) never ask — no credited
+     * interaction, and a system dialog over live gameplay — and leave the
+     * outlined arrow as the signal and the menu's "Record audio" bar as the
+     * tap-to-fix. (A first cut gated on a resumed PlayTranslate activity
+     * instead; that skipped the tile summon, field report 2026-09-05.) A
+     * decline is not remembered; the next summoned fresh appearance asks
+     * again, matching the live-start borrow's 2026-07-07 decision. Runs once
+     * per reconcile (the controller's consent gate would dedupe concurrent
+     * requests anyway) and never on the projection-loss reinstall — see
+     * [reconcileFloatingIcons].
+     */
+    private fun promptGameAudioConsentIfMissing(svc: CaptureService) {
+        if (!GameAudioGate.wouldRunGivenConsent(context, svc.mediaProjectionControllerIfInitialized)) return
+        Log.i(TAG, "summoned icon placement with game audio unarmed: requesting screen-record consent")
+        svc.requestAudioCaptureConsent()
     }
 
     /** Reposition an icon after its display changed (e.g. rotation). */
@@ -971,46 +1321,19 @@ class OverlayUiController(
         try { handle.wm.updateViewLayout(handle.icon, p) } catch (_: Exception) {}
     }
 
+    /** Returns whether the icon window was actually added. */
     private fun installFloatingIconForDisplay(
         display: Display,
         prefs: Prefs,
-        showIntro: Boolean = true,
-    ) {
+        freshAppearance: Boolean = true,
+    ): Boolean {
         val displayId = display.displayId
         // Idempotent: if an icon was already there for this display, tear it
         // down first so the closures and registry stay coherent.
         hideFloatingIconForDisplay(displayId, "recreating")
 
         val displayCtx = context.createDisplayContext(display)
-        val wm = displayCtx.getSystemService(WindowManager::class.java) ?: return
-
-        val icon = FloatingOverlayIcon(displayCtx).apply {
-            this.wm = wm
-            this.displayId = displayId
-            this.overlayHost = this@OverlayUiController.overlayHost
-        }
-
-        val params = WindowManager.LayoutParams(
-            icon.viewSizePx, icon.viewSizePx,
-            overlayHost.windowType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = android.view.Gravity.TOP or android.view.Gravity.START
-        }
-
-        icon.params = params
-
-        // Drag-end persists the icon's snap position to this display's slot.
-        icon.onPositionChanged = { edge, fraction ->
-            prefs.setIconPositionForDisplay(displayId, IconPosition(edge, fraction))
-        }
-        icon.onTap = {
-            showFloatingMenu(display, icon)
-        }
+        val wm = OwnWindows.manager(displayCtx) ?: return false
 
         // Drag-to-lookup: independent controller per display so the popup +
         // magnifier render against the correct display context.
@@ -1046,29 +1369,164 @@ class OverlayUiController(
             restoreRegionOverlay()
             resumeLiveMode()
         }
-        icon.onDragStart = {
-            // Hide region preview so the user can see game text while dragging
-            if (regionController.hideIndicatorForDrag()) {
-                overlayHiddenForDrag = true
+
+        // One builder for every icon VIEW this display ever shows — the
+        // install below and bringFloatingIconsToFront's replace both use it,
+        // so the wiring cannot drift between them. Fresh view + fresh params
+        // per call: a view attaches only once, and the z-order re-raise
+        // replaces the window instead of re-adding it (see
+        // [FloatingIconHandle.makeIcon] for why). The session state the
+        // callbacks mutate (liveWasPausedForPopup, overlayHiddenForDrag) and
+        // the controller are captured from THIS install scope, shared by
+        // every icon generation, so controller.onSettled always reads the
+        // same flags the current icon's onDragStart wrote.
+        val makeWiredIcon: () -> FloatingOverlayIcon = {
+            val icon = FloatingOverlayIcon(displayCtx).apply {
+                this.wm = wm
+                this.displayId = displayId
+                this.overlayHost = this@OverlayUiController.overlayHost
             }
-            // Pause live mode while dragging for definitions
-            if (CaptureService.instance?.isLive == true) {
-                liveWasPausedForPopup = true
-                stopLiveRouted()
+            val params = WindowManager.LayoutParams(
+                icon.viewSizePx, icon.viewSizePx,
+                overlayHost.windowType,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = android.view.Gravity.TOP or android.view.Gravity.START
             }
-            controller.onDragStart()
+            icon.params = params
+
+            // Drag-end persists the icon's snap position to this display's slot.
+            icon.onPositionChanged = { edge, fraction ->
+                prefs.setIconPositionForDisplay(displayId, IconPosition(edge, fraction))
+            }
+            // Gesture → action, from the "On the floating icon" bindings
+            // (IconGestureBindings.kt). Read at each gesture rather than at
+            // install, so a change on the picker page, or of the source
+            // language (a swap binding acts as its gesture's default on a
+            // language without a reading hint), applies to the next touch of
+            // this same icon; each `when` is exhaustive over its gesture's
+            // candidates, so a new one cannot compile until it is wired here.
+            icon.onTap = {
+                when (prefs.iconTapAction) {
+                    TapAction.OPEN_QUICK_MENU -> showFloatingMenu(display, icon)
+                    // The quick menu's Capture button without the menu: a
+                    // fresh one-shot every tap, replacing any showing result.
+                    TapAction.CAPTURE_SCREEN -> captureCurrentRegionForDisplay(displayId)
+                    TapAction.TOGGLE_AUTO_TRANSLATE -> toggleLiveFromOverlay()
+                    TapAction.SWAP_OVERLAY_MODE -> swapOverlayModeOrStartLive()
+                    TapAction.CHANGE_GAME_LANGUAGE -> changeGameLanguage(display)
+                }
+            }
+            // True from a hold whose toggle stopped auto-translate until that
+            // gesture ends: at the lift (onHoldEnd), or at the drag a slide
+            // turns it into (onDragStart, right after onHoldCancel in the same
+            // move). That drag leaves live mode alone. With the app in front
+            // on the other screen the stop is a message to MainActivity, so
+            // the drag can still find the session running; pausing it would
+            // resume it when the lens closes, undoing the stop.
+            var holdStoppedLive = false
+            icon.onDragStart = {
+                when (prefs.iconDragAction) {
+                    DragAction.LOOKUP_WORDS -> {
+                        // Hide region preview so the user can see game text while dragging
+                        if (regionController.hideIndicatorForDrag()) {
+                            overlayHiddenForDrag = true
+                        }
+                        // Pause live mode while dragging for definitions,
+                        // unless this drag's hold just stopped it.
+                        val stoppedByHold = holdStoppedLive
+                        holdStoppedLive = false
+                        if (!stoppedByHold && CaptureService.instance?.isLive == true) {
+                            liveWasPausedForPopup = true
+                            stopLiveRouted()
+                        }
+                        controller.onDragStart()
+                    }
+                }
+            }
+            // The move / end / cancel legs route to the lens unconditionally:
+            // it is the only drag candidate (see DragAction).
+            icon.onDragMove = { rawX, rawY -> controller.onDragMove(rawX, rawY) }
+            icon.onDragEnd = { controller.onDragEnd() }
+            icon.onDragCancel = { controller.cancelDrag() }
+            // A hold's action is latched at its start so the end and cancel
+            // legs unwind the action that actually began, whatever the pref
+            // says by then (dual-screen: the picker page can be open on the
+            // other display). A lift that arrives with no start latched (the
+            // hold runnable starved by a busy main thread; see
+            // FloatingOverlayIcon.onTouchEvent) reads the current binding, as
+            // the pre-binding wiring always ended a hold on lift.
+            var heldAction: HoldAction? = null
+            // True from a hold whose game-language change opened the picker
+            // in the workspace until that gesture ends; a slide into a drag
+            // closes it, as it closes the quick menu.
+            var holdOpenedPicker = false
+            icon.onHoldStart = {
+                val action = prefs.iconHoldAction
+                heldAction = action
+                when (action) {
+                    HoldAction.SHOW_TRANSLATIONS -> CaptureService.instance?.holdStart(displayId)
+                    HoldAction.OPEN_QUICK_MENU -> showFloatingMenu(display, icon)
+                    HoldAction.TOGGLE_AUTO_TRANSLATE -> holdStoppedLive = toggleLiveFromOverlay()
+                    HoldAction.SWAP_OVERLAY_MODE -> swapOverlayModeOrStartLive()
+                    HoldAction.CHANGE_GAME_LANGUAGE -> holdOpenedPicker = changeGameLanguage(display)
+                }
+            }
+            icon.onHoldEnd = {
+                when (heldAction ?: prefs.iconHoldAction) {
+                    HoldAction.SHOW_TRANSLATIONS -> CaptureService.instance?.holdEnd()
+                    // The menu opened at the hold threshold and stays up; the
+                    // lift ends the gesture, not the menu. Likewise the
+                    // toggle, the swap and the game-language change (its
+                    // switch, or its picker) happened at the threshold. A
+                    // lift with no start latched (the starved hold above)
+                    // therefore does none of them.
+                    HoldAction.OPEN_QUICK_MENU, HoldAction.TOGGLE_AUTO_TRANSLATE,
+                    HoldAction.SWAP_OVERLAY_MODE, HoldAction.CHANGE_GAME_LANGUAGE -> Unit
+                }
+                heldAction = null
+                holdStoppedLive = false
+                holdOpenedPicker = false
+            }
+            icon.onHoldCancel = {
+                when (heldAction ?: prefs.iconHoldAction) {
+                    HoldAction.SHOW_TRANSLATIONS -> CaptureService.instance?.holdCancel()
+                    // The finger slid past the drag threshold with the menu up:
+                    // the drag lens is about to open, and the menu's full-screen
+                    // window would stay up alongside it (the icon owns this
+                    // touch stream, so the menu's tap-outside dismissal never
+                    // saw it). Close the menu first.
+                    HoldAction.OPEN_QUICK_MENU -> dismissFloatingMenu()
+                    // The toggle and the swap stand: the drag that follows
+                    // pauses a running auto-translate and resumes it
+                    // afterwards, in the mode the swap left, as any drag does,
+                    // and leaves a stopped one stopped, including one the
+                    // toggle's stop hasn't reached yet (holdStoppedLive).
+                    HoldAction.TOGGLE_AUTO_TRANSLATE, HoldAction.SWAP_OVERLAY_MODE -> Unit
+                    // A switch of the game language stands, as the swap does.
+                    // A picker this hold opened over the game closes, as the
+                    // menu does: its full-screen window would stay up under
+                    // the lens.
+                    HoldAction.CHANGE_GAME_LANGUAGE -> if (holdOpenedPicker) dismissWorkspace()
+                }
+                heldAction = null
+                holdOpenedPicker = false
+            }
+            icon.onAnyTouch   = {
+                CaptureService.instance?.lastInteractedDisplayId = displayId
+                DimController.notifyInteraction()
+            }
+            icon
         }
-        icon.onDragMove = { rawX, rawY -> controller.onDragMove(rawX, rawY) }
-        icon.onDragEnd = { controller.onDragEnd() }
-        icon.onDragCancel = { controller.cancelDrag() }
-        icon.onHoldCancel = { CaptureService.instance?.holdCancel() }
-        icon.onHoldStart  = { CaptureService.instance?.holdStart(displayId) }
-        icon.onHoldEnd    = { CaptureService.instance?.holdEnd() }
-        icon.onAnyTouch   = {
-            CaptureService.instance?.lastInteractedDisplayId = displayId
-            DimController.notifyInteraction()
-        }
-        if (overlayHost.addOverlayWindow(icon, wm, params, displayId)) {
+
+        val icon = makeWiredIcon()
+        val params = icon.params ?: return false
+        val added = overlayHost.addOverlayWindow(icon, wm, params, displayId)
+        if (added) {
             // Set position after addView from this display's saved slot.
             val pos = prefs.iconPositionForDisplay(displayId)
             icon.setPosition(pos.edge, pos.fraction)
@@ -1078,22 +1536,27 @@ class OverlayUiController(
                 wm = wm,
                 dragController = controller,
                 clearLivePauseFlag = clearLivePauseFlag,
+                makeIcon = makeWiredIcon,
             )
+            // The error pills keep priority over the icon (Gilad, 2026-09-27).
+            errorPills.raise(displayId)
             // Fresh icon → sonar-ping intro. This is the only "icon added to
-            // a window" path (rotation reuses the existing icon's params;
-            // bring-to-front re-stacks without going through install), so
+            // a window" path that means a fresh APPEARANCE (rotation reuses
+            // the existing icon's params; bring-to-front swaps views for
+            // z-order without going through install), so
             // gating the intro here gives us exactly the firing model the
             // design asked for: every fresh appearance, never a routine
             // re-layout. The one non-appearance that reaches this path is the
             // projection-loss sweep-and-reinstall, which passes
-            // showIntro=false (see reconcileFloatingIcons).
-            if (showIntro) showSonarIntro(icon, displayId, displayCtx, pos)
+            // freshAppearance=false (see reconcileFloatingIcons).
+            if (freshAppearance) showSonarIntro(icon, displayId, displayCtx, pos)
         } else {
             controller.destroy()
         }
 
         CaptureService.instance?.updateForegroundState()
         CaptureService.instance?.syncIconState()
+        return added
     }
 
     /** Install the sonar-ping intro overlay on top of the just-added
@@ -1135,9 +1598,14 @@ class OverlayUiController(
 
         val intro = SonarPingIntroView(displayCtx, edge, icon)
         // Touchable (no FLAG_NOT_TOUCHABLE): a touch on the intro resolves
-        // the animation early and the gesture is forwarded to the icon —
-        // a tap opens the floating menu, a hold or drag starts the
-        // magnifying search. See SonarPingIntroView.onTouchEvent.
+        // the animation early, and a touch on the carrier itself forwards
+        // its gesture to the icon — a tap opens the floating menu, a hold
+        // or drag starts the magnifying search. The window is far bigger
+        // than that target (it holds the rings); the view hit-tests the
+        // carrier rather than treating the whole ring field as a button,
+        // and it stays touchable because a pass-through overlay is
+        // opacity-capped on the MediaProjection backend. See
+        // SonarPingIntroView.onTouchEvent.
         val params = WindowManager.LayoutParams(
             windowWidth, windowHeight,
             overlayHost.windowType,
@@ -1249,25 +1717,74 @@ class OverlayUiController(
     }
 
     /**
-     * Remove and re-add floating icons so they draw above newly added
-     * overlays. Pass [displayId] = null to bring every icon forward.
+     * Raise floating icons above newly added overlays by REPLACING each with
+     * a freshly built view ([FloatingIconHandle.makeIcon]) rather than
+     * removing and re-adding the same view. A same-view re-add would force
+     * [com.playtranslate.overlay.WindowChurnGate.flushPendingFor] to destroy
+     * the old surface synchronously beside this call site's adds — the
+     * release-adjacent-to-create shape behind the Thor firmware
+     * system_server crash. With a fresh view the old window retires through
+     * the gate's quiet gap like every other removal, and the no-release-
+     * near-create invariant holds with no exceptions.
+     *
+     * Replacement is REST-STATE only — guaranteed by the gesture guard
+     * below — so the carry-over is exactly: persisted snap position (written
+     * at every drag end) plus the four status flags. Session state
+     * (drag/live pause bookkeeping) lives in the install scope shared by
+     * every icon generation, not on the view.
+     *
+     * Pass [displayId] = null to bring every icon forward.
      */
     fun bringFloatingIconsToFront(displayId: Int? = null) {
-        val targets: List<Map.Entry<Int, FloatingIconHandle>> = if (displayId != null) {
-            listOfNotNull(iconHandles.entries.firstOrNull { it.key == displayId })
+        val targets: List<Pair<Int, FloatingIconHandle>> = if (displayId != null) {
+            listOfNotNull(iconHandles[displayId]?.let { displayId to it })
         } else {
-            iconHandles.entries.toList()
+            iconHandles.map { it.key to it.value }
         }
         for ((id, handle) in targets) {
-            // Never remove+re-add an icon the user is currently touching:
-            // destroying its window mid-gesture drops the touch stream, so the
+            // Never replace an icon the user is currently touching: killing
+            // its window mid-gesture drops the touch stream, so the
             // finger-lift never fires onHoldEnd/onDragEnd and the held overlay
             // is never torn down. The re-raise resumes on the next overlay
             // update once the gesture ends.
             if (handle.icon.hasActiveGesture) continue
-            val params = handle.icon.params ?: continue
-            overlayHost.removeOverlayWindow(handle.icon)
-            overlayHost.addOverlayWindow(handle.icon, handle.wm, params, id)
+            val old = handle.icon
+            // A blanked icon (window alpha 0) belongs to an in-flight clean
+            // capture. Skip it: the icon stays one layer low until the next
+            // overlay show re-raises it. (This skip predates OverlayHost
+            // adding a window mid-capture blanked and restoring it with the
+            // capture, which would now make a replacement safe; it is kept
+            // as it was.)
+            val oldParams = old.params
+            if (oldParams == null || oldParams.alpha == 0f) continue
+            val fresh = handle.makeIcon()
+            val params = fresh.params ?: continue
+            // On add failure keep the old icon: still functional, just below
+            // the new overlay — matching the old path's failure behavior.
+            if (!overlayHost.addOverlayWindow(fresh, handle.wm, params, id)) continue
+            val pos = Prefs(context).iconPositionForDisplay(id)
+            fresh.setPosition(pos.edge, pos.fraction)
+            try { handle.wm.updateViewLayout(fresh, params) } catch (_: Exception) {}
+            fresh.showLoading = old.showLoading
+            fresh.degraded = old.degraded
+            fresh.liveMode = old.liveMode
+            fresh.glyph = old.glyph
+            iconHandles[id] = handle.copy(icon = fresh)
+            // The spinner is a SEPARATE window the old icon owns and tears
+            // down on its own removal path — which the gate now defers. Clear
+            // the flag (after the copy above) so the setter retires the old
+            // spinner window through the gate NOW (defused, instantly
+            // invisible) instead of a stale twin lingering beside the fresh
+            // icon's spinner until the old icon's deferred detach.
+            old.showLoading = false
+            // Add-then-remove: worst case is one frame of two identical icons
+            // at the same spot; remove-first would flash a frame of none. The
+            // gate defuses the old window in this same call (invisible,
+            // untouchable), so the ghost can't eat the fresh icon's taps.
+            old.destroy()
+            overlayHost.removeOverlayWindow(old)
+            // The error pills keep priority over the icon (Gilad, 2026-09-27).
+            errorPills.raise(id)
         }
     }
 
@@ -1281,13 +1798,21 @@ class OverlayUiController(
         handle.dragController.destroy()
         handle.icon.destroy()
         overlayHost.removeOverlayWindow(handle.icon)
+        // A parked placement prompt belongs to the appearance that armed it.
+        if (iconHandles.isEmpty()) placementPromptPending = false
 
         CaptureService.instance?.updateForegroundState()
         CaptureService.instance?.syncIconState()
     }
 
-    /** Tear down every floating icon. */
-    fun hideFloatingIcon(reason: String = "unspecified") {
+    /** Tear down every floating icon. [endsCapture] says whether capture
+     *  itself is ending (Turn Off, MediaProjection not turned on, this
+     *  backend's teardown), which ends the translation-error pills' session
+     *  too, icons or not. The icons also go while capture carries on (Hide
+     *  for Now, a reconcile while they're suppressed, the task swiped away),
+     *  and then the pills stay (Gilad, 2026-09-27). */
+    fun hideFloatingIcon(reason: String, endsCapture: Boolean) {
+        if (endsCapture) endErrorPillSession()
         if (iconHandles.isEmpty()) return
         Log.i(TAG, "hideFloatingIcon (all): $reason")
         val ids = iconHandles.keys.toList()
@@ -1301,23 +1826,29 @@ class OverlayUiController(
      *  transient teardown for every other reason. */
     private fun hideFloatingIconUntilAppOpen(reason: String) {
         CaptureLifecycle.setFloatingIconSuppressed(context, true)
-        hideFloatingIcon(reason)
+        hideFloatingIcon(reason, endsCapture = false)
     }
 
     /** Called by DragLookupController.openSentenceInApp before dismissing the
      *  magnifier so the dismiss-chain's resumeLiveMode is a no-op when the
      *  detail view will cover the live-mode surface. */
     fun cancelLivePauseObligation() {
-        if (effectivelySingleScreen()) {
-            iconHandles.values.forEach { it.clearLivePauseFlag.invoke() }
-        }
+        if (effectivelySingleScreen()) cancelLensResumes()
+    }
+
+    /** Every word lens that paused auto-translate for its lookup forgets to
+     *  restart it when it closes. */
+    private fun cancelLensResumes() {
+        iconHandles.values.forEach { it.clearLivePauseFlag.invoke() }
     }
 
     /**
      * Returns the floating icon's bounding rect in screen coordinates for
-     * [displayId], or null if no icon is showing on that display.
+     * [displayId], or null if no icon is showing on that display. Private:
+     * frame consumers read [ownChromeRects], which also carries the error
+     * pills, so none of them can handle the icon and forget the pills.
      */
-    fun getFloatingIconRect(displayId: Int): android.graphics.Rect? {
+    private fun getFloatingIconRect(displayId: Int): android.graphics.Rect? {
         val icon = iconHandles[displayId]?.icon ?: return null
         val p = icon.params ?: return null
         return android.graphics.Rect(p.x, p.y, p.x + icon.viewSizePx, p.y + icon.viewSizePx)
@@ -1335,7 +1866,7 @@ class OverlayUiController(
 
     private fun showFloatingMenu(display: Display, icon: FloatingOverlayIcon) {
         dismissFloatingMenu()
-        val wm = context.createDisplayContext(display).getSystemService(WindowManager::class.java) ?: return
+        val wm = OwnWindows.manager(context.createDisplayContext(display)) ?: return
         val screenSize = getDisplaySize(display)
         val themeRes = baseActivityTheme(context)
         val themedCtx = android.view.ContextThemeWrapper(context.createDisplayContext(display), themeRes)
@@ -1365,14 +1896,8 @@ class OverlayUiController(
         val overlayValue = if (hintKind != HintTextKind.NONE)
             overlayModeLabel(prefs.overlayMode, hintKind) else null
         menu.onSelectLanguage = {
-            // Mirror CaptureResultOverlay.changeLanguage(true): open the source picker.
             dismissFloatingMenu()
-            LanguageSetupActivity.selectionDelegate = null
-            launchOnOverlayDisplay(
-                Intent(context.applicationContext, LanguageSetupActivity::class.java)
-                    .putExtra(LanguageSetupActivity.EXTRA_MODE, LanguageSetupActivity.MODE_SOURCE),
-                display.displayId,
-            )
+            openGameLanguagePicker(display.displayId)
         }
         menu.onSelectOcr = {
             // Show the picker over the still-open menu so its holdActive keeps
@@ -1399,9 +1924,18 @@ class OverlayUiController(
             menu.setMangaOcrValue(mangaOcrStateLabel(on))
         }
         menu.onCycleOverlayMode = {
-            val modes = availableOverlayModes(prefs.sourceLangId)
-            val next = modes[(modes.indexOf(prefs.overlayMode) + 1) % modes.size]
-            prefs.overlayMode = next
+            val next = nextOverlayMode(prefs)
+            // A running session switches with the row, as it does for the
+            // icon's swap and the tap hotkeys, so the saved mode is always the
+            // one on screen: those decide from it. The rebuild happens while
+            // the menu keeps live mode paused, so nothing captures until the
+            // menu closes, whichever way it closes.
+            val svc = CaptureService.instance
+            if (svc?.isLive == true) {
+                switchLiveOverlayMode(svc, next, "menu_overlays_row")
+            } else {
+                prefs.overlayMode = next
+            }
             menu.setOverlayModeValue(overlayModeLabel(next, hintKind))
             // Keep the auto-translate button's hint label in sync (Auto Furigana
             // / Auto Pinyin / Auto Translate); it's hidden while the panel is
@@ -1413,9 +1947,11 @@ class OverlayUiController(
             sendMainActivityIntent(MainActivity.ACTION_OPEN_SETTINGS)
         }
         menu.setPanelData(languageName, ocrName, overlayValue, mangaOcrValue)
-        menu.degradedWarningKind =
+        menu.setDegradedWarning(
             CaptureService.instance?.degradationState?.value
-                ?: com.playtranslate.ui.DegradedWarningKind.None
+                ?: com.playtranslate.ui.DegradedWarningKind.None,
+            CaptureService.instance?.currentDegradedCooldown(),
+        )
         menu.onHideIcon = {
             dismissFloatingMenu()
             PlayTranslateAccessibilityService.disable(context, "menu_turn_off")
@@ -1436,18 +1972,8 @@ class OverlayUiController(
             }
         }
         menu.onToggleLive = {
-            // Auto-translate becomes the most-recently-used primary.
-            captureIsPreferredPrimary = false
             dismissFloatingMenu()
-            if (CaptureService.instance?.isLive == true) {
-                stopLiveRouted()
-            } else {
-                if (Prefs.shouldUseInAppOnlyMode(context)) {
-                    sendMainActivityIntent(MainActivity.ACTION_START_LIVE)
-                } else {
-                    startLiveRouted()
-                }
-            }
+            toggleLiveFromOverlay()
         }
         menu.activeRegion = CaptureService.instance?.activeRegionForDisplay(display.displayId)
         menu.onRegionSelected = { region ->
@@ -1486,21 +2012,15 @@ class OverlayUiController(
         // "Record audio" — the in-game twin of Settings' audio repair row:
         // shown only when game-audio recording is enabled but the
         // MediaProjection consent it rides on is not held (the recorder never
-        // prompts itself). IfInitialized: an unrealized controller holds no
-        // consent; don't force-init it just to render a button. The
-        // RECORD_AUDIO gate is part of the predicate, not the action: an
-        // overlay can't walk the user through a runtime-permission grant, so
-        // when the mic is the missing piece this surface offers nothing and
-        // the Settings row (which CAN run that flow) is the recovery path —
-        // a surface must not offer a verb it can't perform.
-        menu.showRecordAudio = prefs.recordGameAudio &&
-            CaptureService.instance?.mediaProjectionControllerIfInitialized?.hasConsent != true &&
-            androidx.core.content.ContextCompat.checkSelfPermission(
-                context, android.Manifest.permission.RECORD_AUDIO
-            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        // prompts itself) and the mic is granted — the one repair an overlay
+        // can perform ([GameAudioGate.consentMissingButFixable] carries the
+        // why: the mic gate is part of the predicate, not the action).
+        menu.showRecordAudio = GameAudioGate.consentMissingButFixable(
+            context, CaptureService.instance?.mediaProjectionControllerIfInitialized,
+        )
         menu.onRecordAudio = {
             dismissFloatingMenu()
-            startAudioCaptureConsent()
+            CaptureService.launchAudioCaptureConsent(context)
         }
 
         val params = WindowManager.LayoutParams(
@@ -1533,15 +2053,18 @@ class OverlayUiController(
             listOf(OverlayMode.TRANSLATION)
         else listOf(OverlayMode.TRANSLATION, OverlayMode.FURIGANA)
 
-    /** User-facing name for an overlay [mode]; the reading-hint mode reads
-     *  "Pinyin" for Pinyin languages and "Furigana" otherwise. */
-    private fun overlayModeLabel(mode: OverlayMode, hintKind: HintTextKind): String = when (mode) {
-        OverlayMode.TRANSLATION -> context.getString(R.string.overlay_mode_option_translation)
-        OverlayMode.FURIGANA -> context.getString(
-            if (hintKind == HintTextKind.PINYIN) R.string.overlay_mode_option_pinyin
-            else R.string.overlay_mode_option_furigana
-        )
+    /** The overlay mode after [prefs]'s current one among those its source
+     *  language offers: the other one on a language with a reading hint,
+     *  Translation again on one without. The floating menu's Overlays row
+     *  and the icon's swap both switch to it. */
+    private fun nextOverlayMode(prefs: Prefs): OverlayMode {
+        val modes = availableOverlayModes(prefs.sourceLangId)
+        return modes[(modes.indexOf(prefs.overlayMode) + 1) % modes.size]
     }
+
+    /** User-facing name for an overlay [mode]. */
+    private fun overlayModeLabel(mode: OverlayMode, hintKind: HintTextKind): String =
+        context.getString(mode.labelRes(hintKind))
 
     /** Reading-hint label for the auto-translate button ("Auto Furigana" /
      *  "Auto Pinyin") while the hint overlay mode is active; null otherwise (the
@@ -1559,7 +2082,7 @@ class OverlayUiController(
      *  leaves the menu open underneath. */
     private fun showOcrPicker(display: Display, id: SourceLangId) {
         val displayCtx = context.createDisplayContext(display)
-        val wm = displayCtx.getSystemService(WindowManager::class.java) ?: return
+        val wm = OwnWindows.manager(displayCtx) ?: return
         val themed = overlayThemedContext(displayCtx)
         OcrPicker.populate(
             OverlayAlert.Builder(themed, overlayHost, wm, display.displayId),
@@ -1582,7 +2105,7 @@ class OverlayUiController(
     /** Launch [intent] as a NEW_TASK activity on the foreground display (else
      *  [fallbackDisplayId]) — mirrors the result overlay's language/OCR deep-links. */
     private fun launchOnOverlayDisplay(intent: Intent, fallbackDisplayId: Int) {
-        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val target = PlayTranslateApplication.foregroundDisplayId() ?: fallbackDisplayId
         val opts = android.app.ActivityOptions.makeBasic().setLaunchDisplayId(target).toBundle()
         context.applicationContext.startActivity(intent, opts)
@@ -1597,9 +2120,12 @@ class OverlayUiController(
      *  wake a live-mode cycle between frames. */
     fun dismissFloatingMenu(clearHoldActive: Boolean = true) {
         val wasShowing = floatingMenu != null
-        // Remove the menu's surface synchronously: a capture started right after
-        // (e.g. live mode's first clean frame on "auto translate") must not catch
-        // the menu's lingering dim/"Drag finger" hint in the shot.
+        // A capture started right after (e.g. live mode's first clean frame on
+        // "auto translate") must not catch the menu's lingering dim/"Drag
+        // finger" hint in the shot. Guaranteed structurally: the removal's
+        // WindowChurnGate ghost arms OverlayState.uncompositedGhost until its
+        // alpha-0 composites, so that capture waits instead of fast-pathing.
+        // (immediate is vestigial — kept for the paper trail.)
         floatingMenu?.let { overlayHost.removeOverlayWindow(it, immediate = true) }
         floatingMenu = null
         floatingMenuDisplayId = null
@@ -1618,22 +2144,9 @@ class OverlayUiController(
      *  backend, service not yet started) — activateMediaProjection degrades
      *  to exactly ensureConsent + reconcile there, and the intent brings the
      *  service up first. */
-    private fun startAudioCaptureConsent() {
-        val svc = CaptureService.instance
-        if (svc != null) {
-            svc.serviceScope.launch { svc.mediaProjectionController.ensureConsent() }
-        } else {
-            androidx.core.content.ContextCompat.startForegroundService(
-                context.applicationContext,
-                Intent(context.applicationContext, CaptureService::class.java)
-                    .setAction(CaptureService.ACTION_MP_ACTIVATE),
-            )
-        }
-    }
-
     private fun showHideConfirmAlert(display: Display) {
         val displayCtx = context.createDisplayContext(display)
-        val overlayWm = displayCtx.getSystemService(WindowManager::class.java) ?: return
+        val overlayWm = OwnWindows.manager(displayCtx) ?: return
         val themed = overlayThemedContext(displayCtx)
         val accentColor = themed.themeColor(R.attr.ptAccent)
         val dividerColor = themed.themeColor(R.attr.ptDivider)
@@ -1730,10 +2243,9 @@ class OverlayUiController(
      *    keeping the session running;
      *  - not live → start the session in [mode].
      *
-     * Start/stop reuse [onToggleLive]'s exact single- vs dual-screen /
-     * InAppOnly routing. The in-place switch sets [Prefs.overlayMode] and
-     * reconciles: [CaptureService.setLiveDisplays]'s flavor-mismatch detector
-     * rebuilds each per-display mode instance for the new overlay flavor.
+     * Start/stop reuse [toggleLiveFromOverlay]'s exact single- vs dual-screen /
+     * InAppOnly routing ([startLiveFromOverlay], [stopLiveRouted]); the
+     * in-place switch is [switchLiveOverlayMode].
      */
     fun toggleAutoMode(mode: OverlayMode) {
         val prefs = Prefs(context)
@@ -1745,31 +2257,185 @@ class OverlayUiController(
             if (prefs.overlayMode == mode) {
                 stopLiveRouted()
             } else {
-                prefs.overlayMode = mode
-                if (svc.isInAppOnly) {
-                    // In-App Only has no game-screen overlay to swap, and its
-                    // result panel renders the same regardless of overlay mode,
-                    // so reconcileLiveModes (which rebuilds only on a flavor
-                    // change) deliberately no-ops for it. The mode still governs
-                    // hold one-shots and any later game-overlay surface, so the
-                    // pref write above is the real switch; refresh the running
-                    // poll cycle so it isn't left sitting on a stale result.
-                    svc.refreshLiveOverlay()
-                } else {
-                    // Game-overlay surface: rebuild the per-display mode instance
-                    // for the new flavor (Furigana ⇄ Translation).
-                    svc.reconcileLiveModes("hotkey_mode_switch")
-                }
+                switchLiveOverlayMode(svc, mode, "hotkey_mode_switch")
             }
         } else {
             // Start in this hotkey's mode. The pref write is committed before
             // start/route reads it (same-process, synchronous read-after-write).
             prefs.overlayMode = mode
-            if (Prefs.shouldUseInAppOnlyMode(context)) {
-                sendMainActivityIntent(MainActivity.ACTION_START_LIVE)
-            } else {
-                startLiveRouted()
-            }
+            startLiveFromOverlay()
+        }
+    }
+
+    /**
+     * Start auto-translate if it's off, stop it if it runs: the floating
+     * menu's Auto button, and the icon's toggle gesture
+     * ([HoldAction.TOGGLE_AUTO_TRANSLATE], [TapAction.TOGGLE_AUTO_TRANSLATE]),
+     * which is that button without the menu. A start is in the overlay mode
+     * already selected ([startLiveFromOverlay]). Returns true when it
+     * stopped auto-translate, or asked MainActivity to.
+     */
+    private fun toggleLiveFromOverlay(): Boolean {
+        // Auto-translate becomes the most-recently-used primary.
+        captureIsPreferredPrimary = false
+        return if (CaptureService.instance?.isLive == true) {
+            stopLiveRouted()
+            true
+        } else {
+            startLiveFromOverlay()
+            false
+        }
+    }
+
+    /**
+     * The icon's swap gesture ([HoldAction.SWAP_OVERLAY_MODE],
+     * [TapAction.SWAP_OVERLAY_MODE]): with auto-translate running, switch it
+     * in place to the other overlay mode (Translation ⇄ Furigana / Pinyin),
+     * as a tap hotkey for that mode does; with it off, start it in the mode
+     * already selected. Bound only on a source language with a reading hint
+     * (elsewhere the gesture acts as its default, [IconGestureBindings.resolve]),
+     * so there is another mode to switch to.
+     */
+    private fun swapOverlayModeOrStartLive() {
+        // Auto-translate becomes the most-recently-used primary, mirroring the
+        // floating menu's Auto button.
+        captureIsPreferredPrimary = false
+        val svc = CaptureService.instance
+        if (svc?.isLive == true) {
+            switchLiveOverlayMode(svc, nextOverlayMode(Prefs(context)), "icon_swap")
+        } else {
+            startLiveFromOverlay()
+        }
+    }
+
+    /**
+     * The icon's "Change game language" gesture
+     * ([HoldAction.CHANGE_GAME_LANGUAGE], [TapAction.CHANGE_GAME_LANGUAGE]),
+     * and the hotkey of that name ([changeGameLanguageForDisplay]).
+     * With exactly two languages downloaded, the current one among them,
+     * switch to the other and say so in the transient pill on [display];
+     * otherwise (one, three or more, or two without the current one) open
+     * the picker, as the quick menu's Language row does (Gilad, 2026-09-28).
+     * The downloaded languages are the picker's Suggested rows
+     * ([OcrModelManager.fullyInstalledSources]), so a Chinese download
+     * counts as two and switches between Simplified and Traditional.
+     *
+     * The picker opens too when the other language's pack needs a forced
+     * upgrade (a Japanese pack from before Sudachi, which the user may put
+     * off while it isn't the game language): it is on disk, so it counts,
+     * but it can't run, and picking it in the picker re-downloads it (Codex
+     * adversarial, 2026-09-28). A pack that is on disk but won't open is
+     * not checked here: installs are hash-verified and swapped in whole,
+     * and the load after the switch removes such a pack, as the launch
+     * does for the game language's own.
+     *
+     * The switch is the pref write: what a change of the game language
+     * does to the rest of the app, a running auto-translate restarted in it
+     * included, is CaptureService's, as for every change made anywhere
+     * ([CaptureService.onSourceLanguageChanged]). Returns true when the
+     * picker opened in the floating workspace, which a hold's slide into a
+     * drag closes.
+     */
+    private fun changeGameLanguage(display: Display): Boolean {
+        val prefs = Prefs(context)
+        val current = prefs.sourceLangId
+        val downloaded = OcrModelManager.fullyInstalledSources(context)
+        if (downloaded.size != 2 || current !in downloaded) {
+            return openGameLanguagePicker(display.displayId)
+        }
+        val other = downloaded.first { it != current }
+        if (LanguagePackStore.isForcedUpgrade(context, other)) {
+            return openGameLanguagePicker(display.displayId)
+        }
+        prefs.sourceLang = other.code
+        showNoTextPill(
+            display,
+            context.getString(R.string.icon_action_translating_from, other.displayName()),
+        )
+        return false
+    }
+
+    /**
+     * The "Change game language" hotkey: the icon's gesture
+     * ([changeGameLanguage]) on [displayId], the primary game display. Called
+     * on the main thread via the active overlay UI, as
+     * [toggleCaptureScreenForDisplay] is. A hotkey has no hold to slide into a
+     * drag, so whether its picker opened in the workspace doesn't matter.
+     *
+     * Unlike the gesture, a hotkey can fire with the quick menu open (the
+     * menu covers the icon), so the menu closes first, as it does for its own
+     * Language row: left open, it would sit under the picker showing the old
+     * language and keep live capture paused ([CaptureService.holdActive]).
+     */
+    fun changeGameLanguageForDisplay(displayId: Int) {
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        val display = dm.getDisplay(displayId) ?: return
+        dismissFloatingMenu()
+        changeGameLanguage(display)
+    }
+
+    /**
+     * Open the game-language picker for [displayId]: in the floating
+     * workspace over the game where available, else the Activity
+     * (dual-screen with the app in front, where full pages are the right
+     * presentation on the app's display), as the capture panel's language
+     * header does. The quick menu's Language row and "Change game language"
+     * (the icon's gesture and the hotkey) open it. Returns true when it
+     * opened in the workspace.
+     */
+    private fun openGameLanguagePicker(displayId: Int): Boolean {
+        if (openWorkspace(displayId) { SourceListPage() }) return true
+        LanguageSetupActivity.selectionDelegate = null
+        launchOnOverlayDisplay(
+            Intent(context.applicationContext, LanguageSetupActivity::class.java)
+                .putExtra(LanguageSetupActivity.EXTRA_MODE, LanguageSetupActivity.MODE_SOURCE),
+            displayId,
+        )
+        return false
+    }
+
+    /**
+     * Switch the running auto-translate session to overlay [mode] in place,
+     * for the overlay controls that change the mode mid-session (the floating
+     * menu's Overlays row, the tap hotkeys, the icon's swap), so the saved
+     * mode stays the one running; in the app, the long-press menu restarts
+     * the session, and the Capture and overlay page stops it. (A change of
+     * the game language, made anywhere, restarts it too:
+     * [CaptureService.onSourceLanguageChanged].) The session goes on here:
+     * no stop and start, so its History live card and LLM context carry
+     * over, which a restart would replace. The pref write is the switch;
+     * [CaptureService.reconcileLiveModes] then rebuilds each per-display mode
+     * instance through [CaptureService.setLiveDisplays]'s flavor-mismatch
+     * detector. [reason] tags the reconcile's log line.
+     */
+    private fun switchLiveOverlayMode(svc: CaptureService, mode: OverlayMode, reason: String) {
+        Prefs(context).overlayMode = mode
+        if (svc.isInAppOnly) {
+            // In-App Only has no game-screen overlay to swap, and its
+            // result panel renders the same regardless of overlay mode,
+            // so reconcileLiveModes (which rebuilds only on a flavor
+            // change) deliberately no-ops for it. The mode still governs
+            // hold one-shots and any later game-overlay surface, so the
+            // pref write above is the real switch; refresh the running
+            // poll cycle so it isn't left sitting on a stale result.
+            svc.refreshLiveOverlay()
+        } else {
+            // Game-overlay surface: rebuild the per-display mode instance
+            // for the new flavor (Furigana ⇄ Translation).
+            svc.reconcileLiveModes(reason)
+        }
+    }
+
+    /** Start auto-translate from an overlay control (the floating menu's
+     *  Auto button, a tap hotkey, the icon's toggle and swap) in the overlay
+     *  mode already selected. In-App Only shows its results in the app, so that
+     *  start is MainActivity's ([MainActivity.ACTION_START_LIVE]); any other
+     *  goes through [startLiveRouted]. */
+    private fun startLiveFromOverlay() {
+        if (Prefs.shouldUseInAppOnlyMode(context)) {
+            sendMainActivityIntent(MainActivity.ACTION_START_LIVE)
+        } else {
+            startLiveRouted()
         }
     }
 
@@ -1899,7 +2565,7 @@ class OverlayUiController(
             return
         }
         val displayCtx = context.createDisplayContext(display)
-        val wm = displayCtx.getSystemService(WindowManager::class.java) ?: run {
+        val wm = OwnWindows.manager(displayCtx) ?: run {
             launchResultActivity(displayId, region)
             return
         }
@@ -1933,9 +2599,10 @@ class OverlayUiController(
             captureGeometry = launchGeometry
             val overlay = com.playtranslate.ui.CaptureResultOverlay(displayCtx, wm, displayId, overlayHost)
             overlay.onDismiss = { if (captureResultOverlay === overlay) captureResultOverlay = null }
-            overlay.onNavigateToDetail = { result -> stashCaptureOverlayForReshow(displayId, result) }
+            overlay.onNavigateToDetail = { result -> stashCaptureOverlayForReshow(displayId, result, region) }
             // Over-game sheet: B/dpad/stick drive it while a controller is attached.
             overlay.controllerNavEnabled = true
+            overlay.captureRegion = region
             captureResultOverlay = overlay
             // Pass the clean shot for the frosted backdrop — show() downscales it
             // synchronously here, before processScreenshot (below) recycles it.
@@ -2046,9 +2713,13 @@ class OverlayUiController(
     /** Stash the overlay's current result and tear the live panel down when its
      *  word lens opens the in-app detail screen, so a user-initiated back from that
      *  screen ([onCaptureDetailBackPressed]) can re-show the panel. */
-    fun stashCaptureOverlayForReshow(displayId: Int, result: com.playtranslate.model.TranslationResult) {
+    fun stashCaptureOverlayForReshow(
+        displayId: Int,
+        result: com.playtranslate.model.TranslationResult,
+        region: RegionEntry,
+    ) {
         dismissCaptureResultOverlay()
-        pendingReshow = PendingReshow(displayId, result, android.os.SystemClock.elapsedRealtime())
+        pendingReshow = PendingReshow(displayId, result, region, android.os.SystemClock.elapsedRealtime())
     }
 
     /** Called by [com.playtranslate.ui.TranslationResultActivity] when the user backs
@@ -2060,27 +2731,116 @@ class OverlayUiController(
         pendingReshow = null
         if (pending.displayId != displayId) return
         if (android.os.SystemClock.elapsedRealtime() - pending.stashedAtMs > reshowStalenessMs) return
-        reshowCaptureOverlay(displayId, pending.result)
+        reshowCaptureOverlay(displayId, pending.result, pending.region)
     }
 
     /** Re-create the over-game panel and bind a stashed result (no re-capture). */
-    private fun reshowCaptureOverlay(displayId: Int, result: com.playtranslate.model.TranslationResult) {
+    private fun reshowCaptureOverlay(
+        displayId: Int,
+        result: com.playtranslate.model.TranslationResult,
+        region: RegionEntry,
+    ) {
         dismissCaptureResultOverlay()
         val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         val display = dm.getDisplay(displayId) ?: return
         val displayCtx = context.createDisplayContext(display)
-        val wm = displayCtx.getSystemService(WindowManager::class.java) ?: return
+        val wm = OwnWindows.manager(displayCtx) ?: return
         val size = getDisplaySize(display)
         captureDisplayId = displayId
         captureGeometry = DisplayGeometry(size.x, size.y, display.rotation)
         val overlay = com.playtranslate.ui.CaptureResultOverlay(displayCtx, wm, displayId, overlayHost)
         overlay.onDismiss = { if (captureResultOverlay === overlay) captureResultOverlay = null }
-        overlay.onNavigateToDetail = { r -> stashCaptureOverlayForReshow(displayId, r) }
+        overlay.onNavigateToDetail = { r -> stashCaptureOverlayForReshow(displayId, r, region) }
         // Same controller-nav opt-in as the fresh-capture path, or the sheet
         // would come back keyless after a detail round-trip.
         overlay.controllerNavEnabled = true
+        overlay.captureRegion = region
         captureResultOverlay = overlay
-        overlay.showWithResult(size.x, size.y, result)
+        // The frosted backdrop is rebuilt from the result's clean capture
+        // (the same image the fresh path blurred): decoded here, blurred by
+        // show into its small copy, recycled immediately after.
+        val backdrop = result.screenshotPath?.let {
+            runCatching { android.graphics.BitmapFactory.decodeFile(it) }.getOrNull()
+        }
+        overlay.showWithResult(size.x, size.y, result, backdrop)
+        backdrop?.recycle()
+    }
+
+    /**
+     * Open the floating workspace ([OverlayWorkspace]) on [displayId] with
+     * [page] as its root page. The over-game funnel for flows that otherwise
+     * escape to full-screen Activities: returns false — and does NOTHING —
+     * when the workspace presentation isn't the right route, so the caller
+     * runs its existing Activity launch unchanged.
+     *
+     * Gated on [effectivelySingleScreen] — the SAME routing rule as the
+     * over-game capture sheet, NOT bare [Prefs.isSingleScreen]: a dual-screen
+     * handheld (the Thor) reports 2+ capturable displays and is never
+     * "single-screen", yet the game still owns the screen whenever
+     * MainActivity is backgrounded — exactly when over-game presentation is
+     * wanted. Only the true coordinator posture (dual-screen AND the app
+     * foregrounded on its own viewport) falls back to the Activity routes.
+     *
+     * A USER dismissal of the workspace re-shows a stashed capture sheet via
+     * [onCaptureDetailBackPressed] (a no-op unless the opening flow stashed
+     * one). Programmatic teardown ([dismissWorkspace]) never re-shows: it
+     * clears the tracking field first, so the workspace's dismiss callback
+     * sees a mismatch and stands down.
+     */
+    fun openWorkspace(
+        displayId: Int,
+        /** Launch screenshot for the card's frosted ground; null (a flow with
+         *  no capture, e.g. the icon menu's language picker) keeps flat ptBg. */
+        screenshotPath: String? = null,
+        page: (WorkspaceHost) -> WorkspacePage,
+    ): Boolean {
+        if (!effectivelySingleScreen()) return false
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return false
+        val display = dm.getDisplay(displayId) ?: return false
+        val displayCtx = context.createDisplayContext(display)
+        val wm = OwnWindows.manager(displayCtx) ?: return false
+        dismissWorkspace()
+        val size = getDisplaySize(display)
+        val ws = OverlayWorkspace(displayCtx, wm, displayId, overlayHost)
+        ws.onDismiss = {
+            if (workspace === ws) {
+                workspace = null
+                workspaceDisplayId = -1
+                workspaceGeometry = null
+                onCaptureDetailBackPressed(displayId)
+            }
+        }
+        workspace = ws
+        workspaceDisplayId = displayId
+        workspaceGeometry = DisplayGeometry(size.x, size.y, display.rotation)
+        ws.show(size.x, size.y, screenshotPath, page)
+        return true
+    }
+
+    /** Programmatic workspace teardown (hideAll, display reconfiguration).
+     *  Clears the tracking field BEFORE dismissing so the workspace's
+     *  onDismiss sees a mismatch — no capture-sheet re-show fires from a
+     *  teardown the user didn't perform. Idempotent. */
+    fun dismissWorkspace() {
+        val ws = workspace ?: return
+        workspace = null
+        workspaceDisplayId = -1
+        workspaceGeometry = null
+        ws.dismiss()
+    }
+
+    /** Dismiss a showing workspace when its own display's geometry (size or
+     *  rotation) changed — its window is pinned to explicit pixels and its
+     *  pages were laid out against that geometry. Mirrors
+     *  [dismissCaptureResultPanelIfReconfigured]. */
+    private fun dismissWorkspaceIfReconfigured(changedDisplayId: Int) {
+        if (workspace == null) return
+        if (changedDisplayId != workspaceDisplayId) return
+        val built = workspaceGeometry ?: return
+        val now = displayGeometry(changedDisplayId) ?: return
+        if (now != built) {
+            dismissWorkspace()
+        }
     }
 
     /** Saves a pre-captured screenshot to the cache for TranslationResultActivity. */
@@ -2133,11 +2893,12 @@ class OverlayUiController(
      *  hadn't reached yet. */
     fun hideAll() {
         dismissCaptureResultOverlay()
+        dismissWorkspace()
         hideTranslationOverlay()
         hideAppBoxes()
         regionController.hideAll()
         dismissFloatingMenu()
-        hideFloatingIcon("hideAll")
+        hideFloatingIcon("hideAll", endsCapture = true)
         overlayHost.removeAll()
         Log.i(TAG, "hideAll: structured teardown + overlayHost.removeAll() sweep done")
     }

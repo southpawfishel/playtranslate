@@ -36,7 +36,7 @@ data class QuotaStatus(
 
 /**
  * Backends with a queryable quota / rate limit. Today only DeepL
- * implements this; ML Kit (offline) and Google's gtx endpoint
+ * implements this; ML Kit (offline) and Google's keyless endpoint
  * have no quota concept exposed to clients.
  */
 interface QuotaAware {
@@ -75,6 +75,13 @@ interface Cooldownable {
      *  null when [unavailableUntil] is null. */
     fun unavailableDescription(): String?
 
+    /** Typed cause of the current cooldown, for user-facing message
+     *  selection (the description above is hardcoded English and must
+     *  never reach localized UI). Null when [unavailableUntil] is null
+     *  or the implementation predates cause tracking; consumers treat
+     *  null as the transient class. */
+    fun unavailableCause(): CooldownCause? = null
+
     /** Called by [TranslationBackendRegistry] when this backend wins
      *  the waterfall. [attemptStartedAtMs] is the epoch-ms time at
      *  which the registry began the winning translate call. The
@@ -84,6 +91,26 @@ interface Cooldownable {
      *  cooldown recorded by a later failure. Idempotent for the
      *  already-clean case. */
     fun recordSuccess(attemptStartedAtMs: Long)
+
+    /** The device regained a network (fanned out by
+     *  [TranslationBackendRegistry.onConnectivityRestored] from
+     *  [com.playtranslate.net.NetworkConnectivity]). A connection failure
+     *  describes the device, not the provider, so the implementation drops
+     *  an active [CooldownCause.CONNECTION_FAILED] cooldown together with
+     *  the network ladder's rung and the forgiven-first-failure tracker,
+     *  and leaves rate-limit / server-error / quota / billing cooldowns
+     *  alone. Returns true when an active cooldown was cleared (the
+     *  registry names the backend in its forensics log). Called off the
+     *  main thread, from the ConnectivityManager callback. */
+    fun onConnectivityRestored(): Boolean
+
+    /** Clean slate on a user gesture that means "try it again now": the
+     *  services-page toggle, a credentials change, deletion. Drops the
+     *  active cooldown whatever its cause and resets both ladders. A
+     *  quota / billing cooldown reset this way costs one re-probe that
+     *  records the same state again, which is the price of honouring
+     *  the gesture. */
+    fun resetCooldown()
 }
 
 /**
@@ -122,24 +149,44 @@ interface BatchTranslator {
  * could not be parsed in the expected shape, when the returned list
  * length does not match the request, or when a structural input
  * constraint is violated (e.g. DeepL's 50-string cap). The registry
- * catches this and falls through to the next backend.
+ * catches this and retries the texts one at a time on the same backend
+ * ([TranslationBackendRegistry.translateBatch]), so it is not a failure of
+ * the pass by itself; classified as [BackendFailureKind.BAD_RESPONSE] in
+ * case one ever ends a call. [serverAnswered] is false only for a refusal
+ * before anything was sent (DeepL's cap); every other throw follows a
+ * reply, which proves the service's server was reached
+ * ([OnlineAttempt.reachedServer]).
  */
-class BatchParseException(message: String, cause: Throwable? = null) : java.io.IOException(message, cause)
+class BatchParseException(
+    message: String,
+    cause: Throwable? = null,
+    val serverAnswered: Boolean = true,
+) : java.io.IOException(message, cause), ClassifiedFailure {
+    override val failure = BackendFailure(BackendFailureKind.BAD_RESPONSE)
+}
 
 /**
  * Thrown by translation backends when a response is deliberately
  * rejected for a non-transport reason — HTTP 4xx the user has to fix
- * (bad model id, malformed request), a structurally empty response
- * body, or a missing required field. The cooldown layer's outer
- * IOException catch keys off the type to skip recordNetworkFailure
- * for these throws; only OkHttp-originated connection failures
- * advance the network ladder.
+ * (bad model id, malformed request), a 5xx, a structurally empty
+ * response body, or a missing required field. The cooldown layer's
+ * outer IOException catch keys off the type to skip recordNetworkFailure
+ * for these throws; only OkHttp-originated connection failures advance
+ * the network ladder.
+ *
+ * [failure] is required, not defaulted: every throw site states what went
+ * wrong, because the translation-error pill words it for the user and a
+ * default would silently mislabel any site that forgot.
  *
  * Subclass of [java.io.IOException] so the registry's existing
  * fall-through-to-next-backend behaviour still applies — the
  * registry doesn't need to know the difference.
  */
-class StructuralFailureException(message: String, cause: Throwable? = null) : java.io.IOException(message, cause)
+class StructuralFailureException(
+    message: String,
+    override val failure: BackendFailure,
+    cause: Throwable? = null,
+) : java.io.IOException(message, cause), ClassifiedFailure
 
 /**
  * Backends that can return the list of models the configured API key

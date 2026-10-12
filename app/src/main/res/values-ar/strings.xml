@@ -275,6 +275,9 @@
     <string name="note_mlkit_no_internet">⚠ لا يوجد اتصال بالإنترنت — يتم عرض الترجمة دون اتصال (جودة أقل).</string>
 
     <string name="note_mlkit_service_unavailable">⚠ خدمة الترجمة غير متاحة — يتم عرض الترجمة دون اتصال (جودة أقل).</string>
+    <string name="note_mlkit_service_cooldown">⚠ خدمة الترجمة غير متاحة مؤقتًا. يتم عرض الترجمة دون اتصال (جودة أقل) حتى <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>.</string>
+    <string name="note_mlkit_quota_exhausted">⚠ تم استهلاك حصة الترجمة. يتم عرض الترجمة دون اتصال (جودة أقل) حتى <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>.</string>
+    <string name="note_mlkit_account_issue">⚠ مشكلة في حساب خدمة الترجمة (الفوترة أو الرصيد). يتم عرض الترجمة دون اتصال (جودة أقل). يرجى مراجعة الخدمة في الإعدادات.</string>
 
     <string name="note_low_memory_fallback">⚠ ذاكرة منخفضة — يتم عرض الترجمة دون اتصال (جودة أقل).</string>
 
@@ -381,6 +384,7 @@
     <string name="audio_recording_row_start">بدء تسجيل الصوت</string>
 
     <string name="audio_recording_row_active">جارٍ تسجيل الصوت</string>
+    <string name="audio_recording_row_failed">فشل تسجيل الصوت</string>
 
     <!-- ═══ MEDIAPROJECTION OVERLAY-PERMISSION DIALOG ═══ -->
 
@@ -390,13 +394,37 @@
 
     <string name="mp_overlay_permission_button">فتح الإعدادات</string>
 
-    <!-- ═══ FLOATING-ICON GESTURE HINTS ═══ -->
+    <!-- ═══ FLOATING-ICON GESTURES ═══ -->
 
-    <string name="overlay_icon_gesture_drag"><b>اسحب</b> فوق الكلمات للحصول على تعريفات سريعة</string>
+    <string name="icon_gesture_drag">السحب</string>
 
-    <string name="overlay_icon_gesture_hold"><b>اضغط مطولاً</b> لمعاينة الترجمات</string>
+    <string name="icon_gesture_hold">الضغط المطوّل</string>
 
-    <string name="overlay_icon_gesture_tap"><b>اضغط</b> لفتح القائمة السريعة</string>
+    <string name="icon_gesture_tap">الضغط</string>
+
+    <string name="icon_action_lookup_words">عرض تعريف الكلمة عند المرور فوقها</string>
+
+    <string name="icon_action_show_translations">عرض الترجمات على الشاشة</string>
+
+    <string name="icon_action_open_quick_menu">فتح القائمة السريعة</string>
+
+    <string name="icon_action_capture_screen">التقاط الشاشة</string>
+
+    <string name="icon_action_toggle_auto_translate">بدء/إيقاف الترجمة التلقائية</string>
+
+    <string name="icon_action_swap_furigana">التبديل بين الترجمة والفوريغانا</string>
+
+    <string name="icon_action_swap_pinyin">التبديل بين الترجمة والبينيين</string>
+
+    <string name="icon_action_change_game_language">تغيير لغة اللعبة</string>
+
+    <string name="icon_action_translating_from">الترجمة الآن من <xliff:g id="language" example="Japanese">%1$s</xliff:g></string>
+
+    <string name="icon_gestures_no_menu_title">لا توجد إيماءة تفتح القائمة السريعة</string>
+
+    <string name="icon_gestures_no_menu_message">لن تتمكن من فتح القائمة السريعة من الأيقونة العائمة. عيّن «فتح القائمة السريعة» لإيماءة «الضغط المطوّل» أو «الضغط» لإبقائها متاحة.</string>
+
+    <string name="icon_gestures_no_menu_confirm">فهمت</string>
 
     <string name="overlay_icon_a11y_required_title">إمكانية الوصول مطلوبة</string>
 
@@ -434,6 +462,7 @@
     <string name="anki_deck_picker_empty">لم يتم العثور على أي مجموعات</string>
 
     <string name="anki_deck_picker_loading">جارٍ تحميل المجموعات…</string>
+    <string name="anki_deck_picker_title">اختيار مجموعة Anki</string>
 
     <string name="anki_card_type_picker_loading">جارٍ تحميل أنواع البطاقات…</string>
 
@@ -469,6 +498,16 @@
 
     <string name="anki_send_failed_message">لم يقبل <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> البطاقة. تأكد من أن <xliff:g id="brand_ankidroid2" example="AnkiDroid">AnkiDroid</xliff:g> قيد التشغيل، ثم حاول مرة أخرى.</string>
 
+    <string name="anki_card_too_large_title">البطاقة كبيرة جدًا</string>
+
+    <string name="anki_card_too_large_prompt">تعريفات القاموس في هذه البطاقة أكبر من أن تُرسَل إلى <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>. حفظ بطاقة مبسّطة تعريفاتها بالنص العادي؟</string>
+
+    <string name="anki_card_too_large_simplify">حفظ بطاقة مبسّطة</string>
+
+    <string name="anki_card_too_large_failed">هذه البطاقة أكبر من أن يقبلها <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>، حتى بتعريفات مبسّطة. جرّب إزالة بعض الكلمات أو اختصار الجملة.</string>
+
+    <string name="anki_added_simplified">تمت الإضافة إلى <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> (تم تبسيط التعريفات لتناسب الحجم)</string>
+
     <string name="anki_mode_sentence">جملة</string>
 
     <string name="anki_mode_word">كلمة</string>
@@ -495,17 +534,22 @@
 
     <string name="anki_group_screenshot">لقطة الشاشة</string>
 
-    <string name="anki_words_helper">ستُضمَّن هذه الكلمات في بطاقة <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>. اضغط على كلمة لتمييزها في البطاقة. اضغط على × لإزالتها من البطاقة.</string>
+    <string name="anki_words_helper_hide">ستُضمَّن هذه الكلمات في بطاقة <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>. اضغط على كلمة لتمييزها. اضغط على <xliff:g id="hide_icon" example="👁">%1$s</xliff:g> لاستبعادها من البطاقة.</string>
 
     <string name="anki_translation_error">تعذّرت الترجمة</string>
 
     <string name="anki_word_remove_content_description">إزالة من البطاقة</string>
+    <string name="hidden_word_hide_content_description">إخفاء الكلمة</string>
+    <string name="hidden_word_show_content_description">إظهار الكلمة</string>
+    <string name="hidden_word_save_failed">تعذّر الحفظ. حاول مرة أخرى</string>
 
     <string name="anki_screenshot_remove_content_description">إزالة لقطة الشاشة</string>
 
     <string name="anki_group_audio">الصوت</string>
 
     <string name="anki_audio_preview_content_description">معاينة الصوت</string>
+
+    <string name="anki_word_audio_row_title">تضمين الصوت</string>
 
     <!-- ═══ GAME-AUDIO RECORDING (Settings → Anki → Audio; trim editor) ═══ -->
 
@@ -702,6 +746,7 @@
     <string name="llm_backend_invalid_key_alert_title">تعذّر التحقق من مفتاح API</string>
 
     <string name="llm_backend_invalid_key_alert_message_fmt">رفض <xliff:g id="backend_name" example="OpenAI">%1$s</xliff:g> المفتاح الذي أدخلته. تحقق منه مجددًا على <xliff:g id="dev_console_url" example="platform.openai.com">%2$s</xliff:g> وحاول مرة أخرى.</string>
+    <string name="llm_backend_key_needs_workspace_scope">هذا المفتاح غير مرتبط بمساحة عمل، لذا لا يمكن استخدامه هنا. في Claude Console، أنشئ مفتاحًا داخل مساحة عمل محددة وأدخل ذلك المفتاح بدلًا منه.</string>
 
     <string name="llm_backend_invalid_key_alert_button">موافق</string>
 
@@ -933,6 +978,18 @@
 
     <!-- ── Tencent Hunyuan-MT 1.5 1.8B ── -->
 
+    <string name="hymt2_status_not_downloaded">يتطلب <xliff:g id="ram" example="4 GB">%1$s</xliff:g> ذاكرة، <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g> مساحة تخزين</string>
+    <string name="hymt2_status_downloaded_disabled">تم التنزيل لكنه معطّل (<xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g> مساحة تخزين)</string>
+    <string name="hymt2_status_ready">يتطلب <xliff:g id="ram" example="4 GB">%1$s</xliff:g> ذاكرة، <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g> مساحة تخزين</string>
+    <string name="hymt2_status_downloading">جارٍ التنزيل… <xliff:g id="bytes_so_far" example="120 MB">%1$s</xliff:g> من <xliff:g id="bytes_total" example="1.5 GB">%2$s</xliff:g></string>
+    <string name="hymt2_status_verifying">جارٍ التحقق من التنزيل…</string>
+    <string name="hymt2_disable_title">تعطيل <xliff:g id="brand_hymt2" example="Hy-MT2">Hy-MT2</xliff:g>؟</string>
+    <string name="hymt2_disable_message">النموذج بحجم <xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g> مثبَّت. يمكنك الاحتفاظ به لوقت لاحق أو حذفه لتحرير مساحة.</string>
+    <string name="hymt2_download_failed">فشل التنزيل: <xliff:g id="error_message" example="Network unreachable">%1$s</xliff:g></string>
+    <string name="hymt2_metered_warning_title">التنزيل عبر شبكة محدودة الاستخدام؟</string>
+    <string name="hymt2_metered_warning_message">حجم <xliff:g id="brand_hymt2" example="Hy-MT2">Hy-MT2</xliff:g> هو <xliff:g id="download_size" example="1.5 GB">%1$s</xliff:g>. هذه الشبكة مصنَّفة كشبكة محدودة الاستخدام. هل تريد المتابعة؟</string>
+    <string name="hymt2_disable_keep">التعطيل فقط</string>
+    <string name="hymt2_disable_delete">حذف النموذج</string>
     <string name="hymt_status_not_downloaded">يتطلب <xliff:g id="ram" example="4 GB">%1$s</xliff:g> ذاكرة، <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g> مساحة تخزين</string>
 
     <string name="hymt_status_downloaded_disabled">تم التنزيل لكنه معطّل (<xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g> مساحة تخزين)</string>
@@ -998,7 +1055,44 @@
     <!-- ═══ FLOATING-ICON MENU WARNING PILL ═══ -->
 
     <string name="degraded_warning_offline">دون اتصال — جودة الترجمة منخفضة</string>
+    <string name="degraded_warning_cooldown">الخدمة غير متاحة حتى <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>. الجودة منخفضة</string>
+    <string name="degraded_warning_quota">الحصة مستهلكة حتى <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>. الجودة منخفضة</string>
+    <string name="degraded_warning_account">مشكلة في حساب الخدمة. الجودة منخفضة</string>
     <string name="degraded_warning_low_memory">ذاكرة منخفضة — جودة الترجمة منخفضة</string>
+
+    <!-- ═══ TRANSLATION ERROR PILL ═══ -->
+
+    <string name="translation_error_connection">خطأ في الاتصال</string>
+
+    <string name="translation_error_auth">خدمة <xliff:g id="service" example="Gemini">%1$s</xliff:g>: مفتاح API غير صالح</string>
+
+    <string name="translation_error_billing">خدمة <xliff:g id="service" example="Claude">%1$s</xliff:g>: نفد الرصيد</string>
+
+    <string name="translation_error_daily_quota">خدمة <xliff:g id="service" example="Gemini">%1$s</xliff:g>: تم بلوغ الحد اليومي</string>
+
+    <string name="translation_error_monthly_quota">خدمة <xliff:g id="service" example="DeepL">%1$s</xliff:g>: نفدت الحصة الشهرية</string>
+
+    <string name="translation_error_rate_limited">خدمة <xliff:g id="service" example="Gemini">%1$s</xliff:g>: طلبات كثيرة جدًا</string>
+
+    <string name="translation_error_server">خدمة <xliff:g id="service" example="Gemini">%1$s</xliff:g>: خطأ في الخادم</string>
+
+    <string name="translation_error_rejected_code">خدمة <xliff:g id="service" example="OpenAI">%1$s</xliff:g>: رُفض الطلب (HTTP <xliff:g id="status_code" example="404">%2$s</xliff:g>)</string>
+
+    <string name="translation_error_rejected">خدمة <xliff:g id="service" example="OpenAI">%1$s</xliff:g>: رُفض الطلب</string>
+
+    <string name="translation_error_bad_response">خدمة <xliff:g id="service" example="Gemini">%1$s</xliff:g>: استجابة غير متوقعة</string>
+
+    <string name="translation_error_timeout">خدمة <xliff:g id="service" example="DeepSeek">%1$s</xliff:g>: لا تستجيب</string>
+
+    <string name="translation_error_unreachable">خدمة <xliff:g id="service" example="Lingva">%1$s</xliff:g>: تعذّر الاتصال</string>
+
+    <string name="translation_error_discard_card_title">تجاهل البطاقة؟</string>
+
+    <string name="translation_error_discard_card_message">إذا فتحت الإعدادات فستفقد هذه البطاقة، وسيتعيّن عليك إنشاؤها مرة أخرى من التقاط جديد.</string>
+
+    <string name="translation_error_discard_card_confirm">الانتقال إلى الإعدادات</string>
+
+    <string name="hold_translation_failed">تعذّرت الترجمة</string>
 
     <!-- ═══ MAIN SCREEN — bottom-bar and overflow-menu items ═══ -->
 
@@ -1119,6 +1213,22 @@
 
     <string name="settings_vertical_grow_subtitle">توسيع مربعات النص العمودي الضيقة لتُقرأ الترجمة أفقيًا. قد يغطي المحتوى المجاور.</string>
 
+    <string name="settings_header_overlay">التراكب</string>
+
+    <string name="settings_overlay_min_text_title">الحد الأدنى لحجم النص</string>
+
+    <string name="settings_overlay_min_text_subtitle">قد يؤدي تغيير هذه القيمة إلى جعل التراكبات أكبر من النص الأصلي.</string>
+
+    <string name="settings_overlay_min_text_warning">تجريبي. قد يؤدي إلى إزالة تراكبات الترجمة التلقائية بوتيرة أعلى، خاصةً عند لعب ألعاب فيها الكثير من الرسوم المتحركة</string>
+
+    <string name="settings_overlay_min_text_example">نص نموذجي</string>
+
+    <string name="settings_filter_furigana_title">تصفية الفوريغانا من نتيجة OCR</string>
+
+    <string name="settings_edge_indicator_title">مؤشر الحواف</string>
+
+    <string name="settings_edge_indicator_subtitle">إظهار توهّج خفيف حول الشاشة أثناء ظهور التراكب.</string>
+
     <!-- ═══ HOTKEY SETUP DIALOG ═══ -->
 
     <string name="dialog_hotkey_setup_title">تعيين اختصار</string>
@@ -1133,11 +1243,11 @@
 
     <string name="cd_translation_result_back">رجوع</string>
 
-    <string name="cd_copy_translation">نسخ الترجمة</string>
-
     <string name="cd_toggle_translation_visibility">إظهار/إخفاء الترجمة</string>
 
     <string name="cd_toggle_inline_furigana">تبديل فوريغانا المضمّنة</string>
+
+    <string name="cd_toggle_inline_pinyin">تبديل بينيين المضمّن</string>
 
     <string name="cd_text_size">حجم النص</string>
 
@@ -1145,9 +1255,17 @@
 
     <string name="cd_edit_original">تعديل النص الأصلي</string>
 
-    <string name="cd_copy_original">نسخ النص الأصلي</string>
-
     <string name="cd_add_to_anki">إضافة إلى <xliff:g id="brand_anki" example="Anki">Anki</xliff:g></string>
+
+    <string name="cd_more_actions">مزيد من الإجراءات</string>
+
+    <string name="header_action_furigana">فوريغانا</string>
+
+    <string name="header_action_pinyin">بينيين</string>
+
+    <string name="header_action_read_aloud">قراءة بصوت عالٍ</string>
+
+    <string name="header_action_edit">تعديل النص</string>
 
     <string name="cd_toggle_original_visibility">إظهار/إخفاء النص الأصلي</string>
 
@@ -1696,6 +1814,7 @@
     <string name="tts_voice_picker_title">الصوت</string>
 
     <string name="tts_voices_section_header">أصوات <xliff:g id="language" example="JAPANESE">%1$s</xliff:g></string>
+    <string name="tts_speed_title">السرعة</string>
 
     <string name="tts_no_engine_dialog_title">لا يوجد تحويل نص إلى كلام</string>
 
@@ -1789,6 +1908,8 @@
     <string name="settings_debug_show_detection_log">إظهار سجل الاكتشاف</string>
     <string name="settings_debug_log_pinhole">تسجيل مقاييس pinhole للوضع المباشر</string>
     <string name="settings_debug_save_ocr_seed">حفظ التقاطات OCR كبذور</string>
+    <string name="settings_debug_short_text_routing">توجيه دون اتصال للنصوص القصيرة</string>
+    <string name="settings_debug_force_mmap_weights">فرض تحميل الأوزان عبر mmap (نموذج LLM على الجهاز)</string>
     <string name="settings_debug_log_grouping">تسجيل قرارات تجميع OCR</string>
     <string name="settings_debug_angle_gate">العتبة الكلاسيكية للزاوية (10°)</string>
     <string name="settings_debug_log_trace">تسجيل تتبُّع لسجل الترجمة</string>
@@ -1861,6 +1982,9 @@
     <string name="pos_conjunction">حرف عطف</string>
     <string name="pos_interjection">تعجب</string>
     <string name="pos_preposition">حرف جر</string>
+    <string name="pos_postposition">حرف جر لاحق</string>
+    <string name="pos_determiner">محدد</string>
+    <string name="pos_article">أداة تعريف</string>
     <string name="pos_prefix">بادئة</string>
     <string name="pos_suffix">لاحقة</string>
     <string name="pos_counter">أداة عد</string>

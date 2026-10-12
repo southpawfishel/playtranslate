@@ -282,6 +282,9 @@
     <string name="note_mlkit_no_internet">⚠ Không có kết nối internet — đang hiển thị bản dịch ngoại tuyến (chất lượng thấp hơn).</string>
 
     <string name="note_mlkit_service_unavailable">⚠ Dịch vụ dịch thuật không khả dụng — đang hiển thị bản dịch ngoại tuyến (chất lượng thấp hơn).</string>
+    <string name="note_mlkit_service_cooldown">⚠ Dịch vụ dịch thuật tạm thời không khả dụng. Đang hiển thị bản dịch ngoại tuyến (chất lượng thấp hơn) cho đến <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>.</string>
+    <string name="note_mlkit_quota_exhausted">⚠ Đã dùng hết hạn mức dịch. Đang hiển thị bản dịch ngoại tuyến (chất lượng thấp hơn) cho đến <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>.</string>
+    <string name="note_mlkit_account_issue">⚠ Tài khoản dịch vụ dịch thuật gặp sự cố (thanh toán hoặc tín dụng). Đang hiển thị bản dịch ngoại tuyến (chất lượng thấp hơn). Hãy kiểm tra dịch vụ trong phần Cài đặt.</string>
 
     <string name="note_low_memory_fallback">⚠ Bộ nhớ thấp — đang hiển thị bản dịch ngoại tuyến (chất lượng thấp hơn).</string>
 
@@ -385,6 +388,7 @@
     <string name="audio_recording_row_start">Bắt đầu ghi âm</string>
 
     <string name="audio_recording_row_active">Đang ghi âm</string>
+    <string name="audio_recording_row_failed">Ghi âm không thành công</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          MEDIAPROJECTION OVERLAY-PERMISSION DIALOG
@@ -397,14 +401,38 @@
     <string name="mp_overlay_permission_button">Mở Cài đặt</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
-         FLOATING-ICON GESTURE HINTS
+         FLOATING-ICON GESTURES
          ═══════════════════════════════════════════════════════════════ -->
 
-    <string name="overlay_icon_gesture_drag"><b>Kéo</b> qua các từ để xem định nghĩa nhanh</string>
+    <string name="icon_gesture_drag">Kéo</string>
 
-    <string name="overlay_icon_gesture_hold"><b>Giữ</b> để xem trước bản dịch</string>
+    <string name="icon_gesture_hold">Nhấn giữ</string>
 
-    <string name="overlay_icon_gesture_tap"><b>Nhấn</b> để mở menu nhanh</string>
+    <string name="icon_gesture_tap">Nhấn</string>
+
+    <string name="icon_action_lookup_words">Đưa lên một từ để xem định nghĩa</string>
+
+    <string name="icon_action_show_translations">Hiện bản dịch trên màn hình</string>
+
+    <string name="icon_action_open_quick_menu">Mở menu nhanh</string>
+
+    <string name="icon_action_capture_screen">Chụp màn hình</string>
+
+    <string name="icon_action_toggle_auto_translate">Bật/tắt Tự động dịch</string>
+
+    <string name="icon_action_swap_furigana">Chuyển giữa bản dịch và furigana</string>
+
+    <string name="icon_action_swap_pinyin">Chuyển giữa bản dịch và pinyin</string>
+
+    <string name="icon_action_change_game_language">Đổi ngôn ngữ trò chơi</string>
+
+    <string name="icon_action_translating_from">Đang dịch từ <xliff:g id="language" example="Japanese">%1$s</xliff:g></string>
+
+    <string name="icon_gestures_no_menu_title">Không có cử chỉ nào mở menu nhanh</string>
+
+    <string name="icon_gestures_no_menu_message">Bạn sẽ không mở được menu nhanh từ biểu tượng nổi. Hãy gán “Mở menu nhanh” cho Nhấn giữ hoặc Nhấn để vẫn dùng được menu nhanh.</string>
+
+    <string name="icon_gestures_no_menu_confirm">Tôi đã hiểu</string>
 
     <string name="overlay_icon_a11y_required_title">Cần quyền Hỗ trợ tiếp cận</string>
 
@@ -448,6 +476,7 @@
     <string name="anki_deck_picker_empty">Không tìm thấy bộ thẻ nào</string>
 
     <string name="anki_deck_picker_loading">Đang tải bộ thẻ…</string>
+    <string name="anki_deck_picker_title">Chọn bộ thẻ Anki</string>
 
     <string name="anki_card_type_picker_loading">Đang tải loại thẻ…</string>
 
@@ -483,6 +512,16 @@
 
     <string name="anki_send_failed_message"><xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> không chấp nhận thẻ. Hãy đảm bảo <xliff:g id="brand_ankidroid2" example="AnkiDroid">AnkiDroid</xliff:g> đang chạy, rồi thử lại.</string>
 
+    <string name="anki_card_too_large_title">Thẻ quá lớn</string>
+
+    <string name="anki_card_too_large_prompt">Định nghĩa từ điển của thẻ này quá lớn để gửi tới <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>. Lưu thẻ rút gọn với định nghĩa ở dạng văn bản thuần túy?</string>
+
+    <string name="anki_card_too_large_simplify">Lưu bản rút gọn</string>
+
+    <string name="anki_card_too_large_failed">Thẻ này quá lớn để <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> chấp nhận, ngay cả với định nghĩa rút gọn. Hãy thử bớt vài từ hoặc rút ngắn câu.</string>
+
+    <string name="anki_added_simplified">Đã thêm vào <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> (đã rút gọn định nghĩa để vừa kích thước)</string>
+
     <string name="anki_mode_sentence">Câu</string>
 
     <string name="anki_mode_word">Từ</string>
@@ -511,17 +550,22 @@
 
     <string name="anki_group_screenshot">Ảnh chụp màn hình</string>
 
-    <string name="anki_words_helper">Những từ này sẽ được đưa vào thẻ <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>. Nhấn vào một từ để làm nổi bật nó trong thẻ. Nhấn × để xóa nó khỏi thẻ.</string>
+    <string name="anki_words_helper_hide">Những từ này sẽ được đưa vào thẻ <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>. Nhấn vào một từ để làm nổi bật từ đó. Nhấn <xliff:g id="hide_icon" example="👁">%1$s</xliff:g> để loại từ đó khỏi thẻ.</string>
 
     <string name="anki_translation_error">Không thể dịch</string>
 
     <string name="anki_word_remove_content_description">Xóa khỏi thẻ</string>
+    <string name="hidden_word_hide_content_description">Ẩn từ</string>
+    <string name="hidden_word_show_content_description">Hiện từ</string>
+    <string name="hidden_word_save_failed">Không lưu được. Hãy thử lại</string>
 
     <string name="anki_screenshot_remove_content_description">Xóa ảnh chụp màn hình</string>
 
     <string name="anki_group_audio">Âm thanh</string>
 
     <string name="anki_audio_preview_content_description">Nghe thử âm thanh</string>
+
+    <string name="anki_word_audio_row_title">Kèm âm thanh</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          GAME-AUDIO RECORDING (Settings → Anki → Audio; trim editor)
@@ -732,6 +776,7 @@
     <string name="llm_backend_invalid_key_alert_title">Không thể xác minh khóa API</string>
 
     <string name="llm_backend_invalid_key_alert_message_fmt"><xliff:g id="backend_name" example="OpenAI">%1$s</xliff:g> đã từ chối khóa bạn nhập. Hãy kiểm tra lại tại <xliff:g id="dev_console_url" example="platform.openai.com">%2$s</xliff:g> và thử lại.</string>
+    <string name="llm_backend_key_needs_workspace_scope">Khóa này không gắn với một workspace nên không dùng được ở đây. Trong Claude Console, hãy tạo khóa bên trong một workspace cụ thể rồi nhập khóa đó.</string>
 
     <string name="llm_backend_invalid_key_alert_button">OK</string>
 
@@ -968,6 +1013,18 @@
 
     <!-- ── Tencent Hunyuan-MT 1.5 1.8B ────────────────────────────── -->
 
+    <string name="hymt2_status_not_downloaded">Cần bộ nhớ <xliff:g id="ram" example="4 GB">%1$s</xliff:g>, lưu trữ <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g></string>
+    <string name="hymt2_status_downloaded_disabled">Đã tải nhưng bị tắt (lưu trữ <xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g>)</string>
+    <string name="hymt2_status_ready">Cần bộ nhớ <xliff:g id="ram" example="4 GB">%1$s</xliff:g>, lưu trữ <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g></string>
+    <string name="hymt2_status_downloading">Đang tải… <xliff:g id="bytes_so_far" example="120 MB">%1$s</xliff:g> / <xliff:g id="bytes_total" example="1.5 GB">%2$s</xliff:g></string>
+    <string name="hymt2_status_verifying">Đang xác minh tệp đã tải…</string>
+    <string name="hymt2_disable_title">Tắt <xliff:g id="brand_hymt2" example="Hy-MT2">Hy-MT2</xliff:g>?</string>
+    <string name="hymt2_disable_message">Mô hình <xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g> đã được cài. Bạn có thể giữ lại để dùng sau hoặc xóa để giải phóng dung lượng.</string>
+    <string name="hymt2_download_failed">Tải xuống thất bại: <xliff:g id="error_message" example="Network unreachable">%1$s</xliff:g></string>
+    <string name="hymt2_metered_warning_title">Tải trên mạng có đo lượng dữ liệu?</string>
+    <string name="hymt2_metered_warning_message"><xliff:g id="brand_hymt2" example="Hy-MT2">Hy-MT2</xliff:g> có dung lượng <xliff:g id="download_size" example="1.5 GB">%1$s</xliff:g>. Mạng này được đánh dấu là có đo lượng dữ liệu. Tiếp tục?</string>
+    <string name="hymt2_disable_keep">Chỉ tắt</string>
+    <string name="hymt2_disable_delete">Xóa mô hình</string>
     <string name="hymt_status_not_downloaded">Cần bộ nhớ <xliff:g id="ram" example="4 GB">%1$s</xliff:g>, lưu trữ <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g></string>
 
     <string name="hymt_status_downloaded_disabled">Đã tải nhưng bị tắt (lưu trữ <xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g>)</string>
@@ -1045,7 +1102,46 @@
          ═══════════════════════════════════════════════════════════════ -->
 
     <string name="degraded_warning_offline">Ngoại tuyến — chất lượng bản dịch bị giảm</string>
+    <string name="degraded_warning_cooldown">Dịch vụ không khả dụng đến <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>. Chất lượng giảm</string>
+    <string name="degraded_warning_quota">Hết hạn mức đến <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>. Chất lượng giảm</string>
+    <string name="degraded_warning_account">Tài khoản dịch vụ gặp sự cố. Chất lượng giảm</string>
     <string name="degraded_warning_low_memory">Bộ nhớ thấp — chất lượng bản dịch bị giảm</string>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         TRANSLATION ERROR PILL
+         ═══════════════════════════════════════════════════════════════ -->
+
+    <string name="translation_error_connection">Lỗi kết nối</string>
+
+    <string name="translation_error_auth"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: khóa API không hợp lệ</string>
+
+    <string name="translation_error_billing"><xliff:g id="service" example="Claude">%1$s</xliff:g>: hết tín dụng</string>
+
+    <string name="translation_error_daily_quota"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: đã đạt giới hạn hằng ngày</string>
+
+    <string name="translation_error_monthly_quota"><xliff:g id="service" example="DeepL">%1$s</xliff:g>: đã dùng hết hạn mức hằng tháng</string>
+
+    <string name="translation_error_rate_limited"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: quá nhiều yêu cầu</string>
+
+    <string name="translation_error_server"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: lỗi máy chủ</string>
+
+    <string name="translation_error_rejected_code"><xliff:g id="service" example="OpenAI">%1$s</xliff:g>: yêu cầu bị từ chối (HTTP <xliff:g id="status_code" example="404">%2$s</xliff:g>)</string>
+
+    <string name="translation_error_rejected"><xliff:g id="service" example="OpenAI">%1$s</xliff:g>: yêu cầu bị từ chối</string>
+
+    <string name="translation_error_bad_response"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: phản hồi không mong đợi</string>
+
+    <string name="translation_error_timeout"><xliff:g id="service" example="DeepSeek">%1$s</xliff:g>: không phản hồi</string>
+
+    <string name="translation_error_unreachable"><xliff:g id="service" example="Lingva">%1$s</xliff:g>: không thể kết nối</string>
+
+    <string name="translation_error_discard_card_title">Bỏ thẻ này?</string>
+
+    <string name="translation_error_discard_card_message">Nếu mở cài đặt, bạn sẽ mất thẻ này và phải tạo lại từ một lần chụp mới.</string>
+
+    <string name="translation_error_discard_card_confirm">Đi tới cài đặt</string>
+
+    <string name="hold_translation_failed">Không thể dịch</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          MAIN SCREEN — bottom-bar and overflow-menu items
@@ -1183,6 +1279,22 @@
 
     <string name="settings_vertical_grow_subtitle">Mở rộng các khung văn bản dọc hẹp để bản dịch đọc theo chiều ngang. Có thể che nội dung lân cận.</string>
 
+    <string name="settings_header_overlay">Lớp phủ</string>
+
+    <string name="settings_overlay_min_text_title">Cỡ chữ tối thiểu</string>
+
+    <string name="settings_overlay_min_text_subtitle">Thay đổi giá trị này có thể khiến lớp phủ lớn hơn văn bản gốc.</string>
+
+    <string name="settings_overlay_min_text_warning">THỬ NGHIỆM. Có thể khiến lớp phủ của Tự động dịch bị gỡ bỏ thường xuyên hơn, nhất là khi chơi trò chơi có nhiều hoạt ảnh</string>
+
+    <string name="settings_overlay_min_text_example">Văn bản mẫu</string>
+
+    <string name="settings_filter_furigana_title">Lọc furigana khỏi kết quả OCR</string>
+
+    <string name="settings_edge_indicator_title">Chỉ báo viền màn hình</string>
+
+    <string name="settings_edge_indicator_subtitle">Hiện một vầng sáng dịu quanh viền màn hình khi có lớp phủ.</string>
+
     <!-- ═══════════════════════════════════════════════════════════════
          HOTKEY SETUP DIALOG
          ═══════════════════════════════════════════════════════════════ -->
@@ -1201,11 +1313,11 @@
 
     <string name="cd_translation_result_back">Quay lại</string>
 
-    <string name="cd_copy_translation">Sao chép bản dịch</string>
-
     <string name="cd_toggle_translation_visibility">Bật/tắt hiển thị bản dịch</string>
 
     <string name="cd_toggle_inline_furigana">Bật/tắt furigana nội dòng</string>
+
+    <string name="cd_toggle_inline_pinyin">Bật/tắt pinyin nội dòng</string>
 
     <string name="cd_text_size">Cỡ chữ</string>
 
@@ -1213,9 +1325,17 @@
 
     <string name="cd_edit_original">Chỉnh sửa văn bản gốc</string>
 
-    <string name="cd_copy_original">Sao chép văn bản gốc</string>
-
     <string name="cd_add_to_anki">Thêm vào <xliff:g id="brand_anki" example="Anki">Anki</xliff:g></string>
+
+    <string name="cd_more_actions">Thao tác khác</string>
+
+    <string name="header_action_furigana">Furigana</string>
+
+    <string name="header_action_pinyin">Pinyin</string>
+
+    <string name="header_action_read_aloud">Đọc to</string>
+
+    <string name="header_action_edit">Chỉnh sửa văn bản</string>
 
     <string name="cd_toggle_original_visibility">Bật/tắt hiển thị văn bản gốc</string>
 
@@ -1740,6 +1860,7 @@
     <string name="tts_voice_picker_title">Giọng nói</string>
 
     <string name="tts_voices_section_header">GIỌNG <xliff:g id="language" example="JAPANESE">%1$s</xliff:g></string>
+    <string name="tts_speed_title">Tốc độ</string>
 
     <string name="tts_no_engine_dialog_title">Không có công cụ đọc văn bản</string>
 
@@ -1847,6 +1968,8 @@
     <string name="settings_debug_show_detection_log">Hiện nhật ký phát hiện</string>
     <string name="settings_debug_log_pinhole">Ghi nhật ký số liệu pinhole của chế độ trực tiếp</string>
     <string name="settings_debug_save_ocr_seed">Lưu các bản chụp OCR làm seed</string>
+    <string name="settings_debug_short_text_routing">Định tuyến ngoại tuyến cho văn bản ngắn</string>
+    <string name="settings_debug_force_mmap_weights">Buộc tải trọng số bằng mmap (LLM trên thiết bị)</string>
     <string name="settings_debug_log_grouping">Ghi nhật ký quyết định nhóm OCR</string>
     <string name="settings_debug_angle_gate">Ngưỡng góc kiểu cũ (10°)</string>
     <string name="settings_debug_log_trace">Ghi lại dấu vết nhật ký dịch</string>
@@ -1914,6 +2037,9 @@
     <string name="pos_conjunction">Liên từ</string>
     <string name="pos_interjection">Thán từ</string>
     <string name="pos_preposition">Giới từ</string>
+    <string name="pos_postposition">Hậu giới từ</string>
+    <string name="pos_determiner">Từ hạn định</string>
+    <string name="pos_article">Mạo từ</string>
     <string name="pos_prefix">Tiền tố</string>
     <string name="pos_suffix">Hậu tố</string>
     <string name="pos_counter">Loại từ</string>

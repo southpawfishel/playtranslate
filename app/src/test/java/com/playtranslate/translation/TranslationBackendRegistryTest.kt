@@ -3,6 +3,7 @@ package com.playtranslate.translation
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -297,6 +298,73 @@ class TranslationBackendRegistryTest {
         assertEquals(1, healthy.translateCalls.get())
     }
 
+    @Test fun `earliestCooldownEnd returns the soonest USABLE cooldown`() {
+        val now = System.currentTimeMillis()
+        val late = FakeCooldownableBackend(id = "late", priority = 10)
+        late.cooldownState.recordParsedFailure(now + 300_000, "Rate limited")
+        val soon = FakeCooldownableBackend(id = "soon", priority = 20)
+        soon.cooldownState.recordParsedFailure(
+            now + 60_000, "Monthly quota used", CooldownCause.MONTHLY_QUOTA,
+        )
+        // Soonest of all, but unusable for the pair — a cooldown ticking
+        // on a disabled backend must not drive the "busy until X" label.
+        val disabled = FakeCooldownableBackend(id = "disabled", priority = 30, usable = false)
+        disabled.cooldownState.recordParsedFailure(now + 1_000, "Rate limited")
+        TranslationBackendRegistry.init(listOf(late, soon, disabled))
+
+        val active = TranslationBackendRegistry.earliestCooldownEnd("ja", "en")
+        assertEquals(soon.cooldownState.unavailableUntil(), active?.retryAt)
+        // The soonest backend's typed cause rides along, so the UI can
+        // distinguish quota exhaustion from a transient rate limit.
+        assertEquals(CooldownCause.MONTHLY_QUOTA, active?.cause)
+    }
+
+    @Test fun `onConnectivityRestored clears connection cooldowns on every backend and nothing else`() {
+        val now = System.currentTimeMillis()
+        val offlineA = FakeCooldownableBackend(id = "offline-a", priority = 10)
+        offlineA.cooldownState.recordLadderFailure(
+            CooldownLadder.Network, "Connection failed", CooldownCause.CONNECTION_FAILED,
+        )
+        // Disabled for the pair, yet its connection cooldown must not outlive
+        // the outage either — the user may re-enable it next.
+        val offlineB = FakeCooldownableBackend(id = "offline-b", priority = 20, usable = false)
+        offlineB.cooldownState.recordLadderFailure(
+            CooldownLadder.Network, "Connection failed", CooldownCause.CONNECTION_FAILED,
+        )
+        val limited = FakeCooldownableBackend(id = "limited", priority = 30)
+        limited.cooldownState.recordParsedFailure(now + 300_000, "Rate limited")
+        val plain = FakeOnlineBackend(id = "plain", priority = 40)
+        TranslationBackendRegistry.init(listOf(offlineA, offlineB, limited, plain))
+
+        TranslationBackendRegistry.onConnectivityRestored()
+
+        assertNull(offlineA.unavailableUntil())
+        assertNull(offlineB.unavailableUntil())
+        assertEquals(now + 300_000, limited.unavailableUntil())
+    }
+
+    @Test fun `resetCooldown clears only the named backend`() {
+        val now = System.currentTimeMillis()
+        val toggled = FakeCooldownableBackend(id = "toggled", priority = 10)
+        toggled.cooldownState.recordParsedFailure(
+            now + 3_600_000, "Monthly quota used", CooldownCause.MONTHLY_QUOTA,
+        )
+        val other = FakeCooldownableBackend(id = "other", priority = 20)
+        other.cooldownState.recordParsedFailure(now + 300_000, "Rate limited")
+        TranslationBackendRegistry.init(listOf(toggled, other))
+
+        TranslationBackendRegistry.resetCooldown("toggled")
+        TranslationBackendRegistry.resetCooldown("unknown-id")   // no-op
+
+        assertNull(toggled.unavailableUntil())
+        assertEquals(now + 300_000, other.unavailableUntil())
+    }
+
+    @Test fun `earliestCooldownEnd is null with no active cooldowns`() {
+        TranslationBackendRegistry.init(listOf(FakeCooldownableBackend(id = "ready", priority = 10)))
+        assertNull(TranslationBackendRegistry.earliestCooldownEnd("ja", "en"))
+    }
+
     @Test fun `cooldownable backend recordSuccess called on win`() = runBlocking {
         val winning = FakeCooldownableBackend(id = "winning", priority = 10, response = "first")
         TranslationBackendRegistry.init(listOf(winning))
@@ -322,6 +390,50 @@ class TranslationBackendRegistryTest {
         assertEquals("from-cooled", result.text)
         assertEquals(1, cooled.translateCalls.get())
         assertEquals(0, healthy.translateCalls.get())
+    }
+
+    @Test fun `a batch shape failure retries per-text on the same backend`() = runBlocking {
+        // BatchParseException is the LLM backends' and DeepL's signal
+        // that the BATCH request failed (malformed JSON envelope, the
+        // 50-string cap) while the per-text request, a different one,
+        // is expected to work: every text is retried here before any
+        // fallback is consulted.
+        val llm = FakeFailingBatchBackend(
+            id = "llm", priority = 10,
+            batchException = BatchParseException("envelope malformed"),
+        )
+        val fallback = FakeOnlineBackend(id = "fallback", priority = 20)
+        TranslationBackendRegistry.init(listOf(llm, fallback))
+
+        val results = TranslationBackendRegistry.translateBatch(listOf("a", "b", "c"), "ja", "en")
+
+        assertEquals(1, llm.batchCalls.get())
+        assertEquals(3, llm.translateCalls.get())
+        assertEquals(0, fallback.translateCalls.get())
+        assertTrue(results.all { it.backend === llm })
+    }
+
+    @Test fun `a structural batch failure makes no per-text requests and moves the full list on`() = runBlocking {
+        // Lingva's shape failures: its per-text path hits the same
+        // endpoint with the same parser, so a per-text retry would be N
+        // identical failures against the per-IP limiter. The registry
+        // must send nothing more to that backend and hand every text to
+        // the next one.
+        val lingva = FakeFailingBatchBackend(
+            id = "lingva", priority = 10,
+            batchException = StructuralFailureException(
+                "Lingva batch: chunk at index 0: top length 1 != q count 3", BackendFailure.BAD_RESPONSE,
+            ),
+        )
+        val fallback = FakeOnlineBackend(id = "fallback", priority = 20)
+        TranslationBackendRegistry.init(listOf(lingva, fallback))
+
+        val results = TranslationBackendRegistry.translateBatch(listOf("a", "b", "c"), "ja", "en")
+
+        assertEquals(1, lingva.batchCalls.get())
+        assertEquals("no per-text retry on the failing backend", 0, lingva.translateCalls.get())
+        assertEquals(3, fallback.translateCalls.get())
+        assertTrue(results.all { it.backend === fallback })
     }
 
     @Test fun `per-text fan-out with mixed results preserves cooldown set by failing sibling`() = runBlocking {

@@ -13,8 +13,10 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import com.playtranslate.R
+import com.playtranslate.overlay.WindowChurnGate
 import com.playtranslate.overlayThemedContext
 import com.playtranslate.themeColor
+import com.playtranslate.overlay.OwnWindows
 
 /**
  * The live-start status card: one centered window spanning the whole startup
@@ -54,6 +56,8 @@ import com.playtranslate.themeColor
 internal class StartupChip private constructor(
     private val wm: WindowManager,
     private val root: View,
+    private val windowParams: WindowManager.LayoutParams,
+    private val displayId: Int,
     private val pattern: StreamKindProbe.PatternView,
     private val spinner: ProgressBar,
 ) : StreamKindProbe.ProbeSurface {
@@ -154,10 +158,11 @@ internal class StartupChip private constructor(
     fun remove() {
         if (isRemoved) return
         isRemoved = true
-        try {
-            wm.removeViewImmediate(root)
-        } catch (_: Exception) {
-        }
+        // Gated destroy (Thor firmware add/remove race — see WindowChurnGate).
+        // The defused ghost is composited out (window alpha 0), so it can't
+        // land in captures even though [onScreenRect] stops excluding it the
+        // moment isRemoved flips.
+        WindowChurnGate.removeWindow(root, wm, windowParams, displayId)
     }
 
     companion object {
@@ -179,7 +184,7 @@ internal class StartupChip private constructor(
             val displayContext = host.displayContextFor(controller.projectedDisplayId)
                 ?.let { overlayThemedContext(it) }
                 ?: return null
-            val wm = displayContext.getSystemService(WindowManager::class.java) ?: return null
+            val wm = OwnWindows.manager(displayContext) ?: return null
             val dp = displayContext.resources.displayMetrics.density
 
             val pattern = StreamKindProbe.PatternView(displayContext).apply {
@@ -259,7 +264,7 @@ internal class StartupChip private constructor(
                 gravity = Gravity.CENTER
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) fitInsetsTypes = 0
             }
-            val chip = StartupChip(wm, card, pattern, spinner)
+            val chip = StartupChip(wm, card, params, controller.projectedDisplayId, pattern, spinner)
             // Anchor BEFORE the window exists — the add's own composition is
             // round-1 freshness evidence (the ephemeral probe's seqAtAdd,
             // transferred faithfully).

@@ -7,11 +7,9 @@ import com.playtranslate.camera.CameraActivity
 import com.playtranslate.capturableDisplays
 import com.playtranslate.capture.CaptureBackendResolver
 import com.playtranslate.capture.CaptureLifecycle
+import com.playtranslate.capture.GameAudioGate
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -24,8 +22,6 @@ import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.TextWatcher
 import android.text.style.ForegroundColorSpan
-import android.text.style.ImageSpan
-import android.text.style.StyleSpan
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
@@ -41,7 +37,6 @@ import androidx.annotation.AttrRes
 import androidx.annotation.DrawableRes
 import androidx.annotation.StringRes
 import androidx.appcompat.app.AlertDialog
-import androidx.core.content.ContextCompat
 import androidx.core.widget.ImageViewCompat
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
@@ -53,6 +48,7 @@ import com.playtranslate.ocr.core.OcrBox
 import com.playtranslate.OverlayMode
 import com.playtranslate.PlayTranslateAccessibilityService
 import com.playtranslate.PlayTranslateTileService
+import com.playtranslate.IconAction
 import com.playtranslate.Prefs
 import com.playtranslate.R
 import com.playtranslate.UpdateChecker
@@ -90,7 +86,6 @@ import java.util.Date
 import androidx.core.view.isVisible
 import androidx.core.net.toUri
 import androidx.core.view.isGone
-import androidx.core.graphics.withTranslation
 
 /** Which accessibility-gated Settings action raised the "accessibility
  *  required" alert — selects the alert's explanatory copy. */
@@ -107,56 +102,6 @@ internal fun ttsTapFor(state: RootSettingsViewModel.TtsCell): TtsTap? = when (st
     RootSettingsViewModel.TtsCell.Loading -> null
     is RootSettingsViewModel.TtsCell.Available -> TtsTap.OPEN_PICKER
     RootSettingsViewModel.TtsCell.NoEngine -> TtsTap.OPEN_SETUP
-}
-
-/** An [ImageSpan] anchored to the BASELINE's font metrics, drawn [dyPx]
- *  higher than the font bottom so an inline icon optically centers with the
- *  surrounding text. Deliberately not anchored to the framework's line-bottom
- *  (super.draw's `bottom`): on a WRAPPED line that includes line spacing,
- *  which drags the icon visibly low — the Yomitan outdated-row subtitle wraps
- *  to two lines and showed exactly that. Baseline + font metrics render
- *  identically on one line and many. */
-private class OffsetImageSpan(drawable: Drawable, private val dyPx: Int) :
-    ImageSpan(drawable, ALIGN_BOTTOM) {
-    override fun draw(
-        canvas: Canvas,
-        text: CharSequence?,
-        start: Int,
-        end: Int,
-        x: Float,
-        top: Int,
-        y: Int,
-        bottom: Int,
-        paint: Paint,
-    ) {
-        // Icon bottom at (baseline + font bottom - lift): matches the old
-        // single-line ALIGN_BOTTOM placement, independent of line spacing.
-        val transY = y + paint.fontMetricsInt.bottom - drawable.bounds.bottom - dyPx
-        canvas.withTranslation(x = x, y = transY.toFloat()) {
-            drawable.draw(this)
-        }
-    }
-}
-
-/** Appends an optically-centered inline icon tinted [tint] to [sb] — shared
- *  by the renderer's summary digests and warning subtitles elsewhere in
- *  settings (e.g. the Yomitan outdated rows). */
-internal fun appendInlineIcon(
-    ctx: Context,
-    sb: SpannableStringBuilder,
-    @DrawableRes iconRes: Int,
-    @AttrRes tint: Int = R.attr.ptTextMuted,
-) {
-    val px = (14 * ctx.resources.displayMetrics.density).toInt()
-    val drawable = ContextCompat.getDrawable(ctx, iconRes)?.mutate() ?: return
-    drawable.setTint(ctx.themeColor(tint))
-    drawable.setBounds(0, 0, px, px)
-    val start = sb.length
-    sb.append(" ")
-    // Lift 1.5dp above ALIGN_BOTTOM to optically center; at 2dp the icons
-    // read slightly high, so 1.5dp drops them ~0.5dp.
-    val dy = (1.5f * ctx.resources.displayMetrics.density).toInt()
-    sb.setSpan(OffsetImageSpan(drawable, dy), start, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
 }
 
 /** A warning-triangle icon + [label], the whole run in `ptWarning` — the
@@ -193,6 +138,9 @@ class SettingsRenderer(
         fun openAppearanceSettings()
         /** Tap on the Hotkeys CONFIGURE cell — open [HotkeysSettingsActivity]. */
         fun openHotkeysSettings()
+        /** Tap on the "On the floating icon" footer — open the gesture
+         *  picker ([IconGesturesSettingsActivity]). */
+        fun openIconGesturesSettings()
         /** Tap on the Capture & overlay CONFIGURE cell — open [CaptureOverlaySettingsActivity]. */
         fun openCaptureOverlaySettings()
         /** Tap on the Yomitan CONFIGURE cell — open [YomitanSettingsActivity]. */
@@ -233,6 +181,14 @@ class SettingsRenderer(
          *  Refreshes the top section when the flow settles so the row flips
          *  to its armed state. */
         fun requestAudioCaptureConsent()
+
+        /** Tap on the audio row in its FAILED state ("Audio recording
+         *  failed": gates pass but the recorder could not start, or its
+         *  reader died and the automatic restart did not take). Implementer
+         *  re-runs the recorder's reconcile — a user push-point, which
+         *  resets the automatic-restart budget — and refreshes the top
+         *  section so the row shows the outcome. */
+        fun retryGameAudioRecording()
 
         /** Tap on the "Update language packs" row in the Language section.
          *  Implementer instantiates [com.playtranslate.language.PackUpgradeOrchestrator]
@@ -286,15 +242,24 @@ class SettingsRenderer(
     private var overlayIconPreview: FloatingOverlayIcon? = null
     // "On the floating icon" cell — text + icon tints are driven by the
     // capture lifecycle. Active: title = ptTextMuted (GroupHeader default),
-    // gesture text + icons = ptText. Disabled: everything shifts down to
-    // ptTextHint so the whole cell reads as a single recessed group.
+    // gesture word + icon = ptAccent, bound action = ptText. Disabled:
+    // everything shifts down to ptTextHint so the whole cell reads as a
+    // single recessed group.
     private val tvOverlayIconTitle: TextView = rowOverlayIcon.findViewById(R.id.tvRowTitle)
-    private val tvGestureDrag: TextView = rowOverlayIcon.findViewById(R.id.tvGestureDrag)
-    private val tvGestureHold: TextView = rowOverlayIcon.findViewById(R.id.tvGestureHold)
-    private val tvGestureTap: TextView = rowOverlayIcon.findViewById(R.id.tvGestureTap)
-    private val iconGestureDrag: ImageView = rowOverlayIcon.findViewById(R.id.iconGestureDrag)
-    private val iconGestureHold: ImageView = rowOverlayIcon.findViewById(R.id.iconGestureHold)
-    private val iconGestureTap: ImageView = rowOverlayIcon.findViewById(R.id.iconGestureTap)
+    private val ivOverlayIconChevron: ImageView = rowOverlayIcon.findViewById(R.id.ivOverlayIconChevron)
+
+    /** One line of the cell: gesture icon, gesture word, bound action title. */
+    private class GestureLine(val icon: ImageView, val tvGesture: TextView, val tvAction: TextView)
+
+    private fun gestureLine(iconId: Int, gestureId: Int, actionId: Int) = GestureLine(
+        rowOverlayIcon.findViewById(iconId),
+        rowOverlayIcon.findViewById(gestureId),
+        rowOverlayIcon.findViewById(actionId),
+    )
+
+    private val lineDrag = gestureLine(R.id.iconGestureDrag, R.id.tvGestureDrag, R.id.tvActionDrag)
+    private val lineHold = gestureLine(R.id.iconGestureHold, R.id.tvGestureHold, R.id.tvActionHold)
+    private val lineTap = gestureLine(R.id.iconGestureTap, R.id.tvGestureTap, R.id.tvActionTap)
 
     private val btnCaptureLifecycle: ShimmerButton = root.findViewById(R.id.btnCaptureLifecycle)
 
@@ -484,43 +449,31 @@ class SettingsRenderer(
     // ── On-screen controls ───────────────────────────────────────────────
 
     private fun setupOnScreenControls() {
-        // "On the floating icon" — informational cell. No toggle, no click
-        // handler. The floating icon's visibility is driven by the capture
-        // lifecycle (and the Quick Settings tile via Prefs.showOverlayIcon)
-        // — this row just teaches the user about the icon and its gestures.
-        // Gesture text + icon tints come from refreshCaptureLifecycleButton().
+        // "On the floating icon" — the icon's gestures and what each is bound
+        // to; the row opens the picker page. No toggle: the floating icon's
+        // visibility is driven by the capture lifecycle (and the Quick
+        // Settings tile via Prefs.showOverlayIcon). The bound action titles +
+        // the tints come from refreshCaptureLifecycleButton().
         tvOverlayIconTitle.setText(R.string.settings_show_overlay_icon)
+        rowOverlayIcon.setOnClickListener { callbacks.openIconGesturesSettings() }
         overlayIconPreviewSlot.isVisible = true
         buildOverlayIconPreview()
     }
 
-
-    /** Pulls the gesture string [stringRes] (which carries an inline `<b>`
-     *  on the leading verb word), copies it into a SpannableStringBuilder,
-     *  and overlays a [ForegroundColorSpan] of [color] across the same
-     *  range as the inline BOLD — so the verb word gets the accent (or
-     *  the disabled hint) colour without needing to hardcode verb-word
-     *  lengths in code or duplicate the string.
-     *
-     *  Returns a fresh SpannableStringBuilder each call — cheap (one
-     *  StyleSpan lookup, one ForegroundColorSpan applied) and avoids the
-     *  resource cache reusing the same Spanned instance across refreshes
-     *  with stale colours layered on. */
-    private fun withVerbColored(stringRes: Int, color: Int): SpannableStringBuilder {
-        val text = ctx.getText(stringRes)
-        val sb = SpannableStringBuilder(text)
-        val boldSpan = sb.getSpans(0, sb.length, StyleSpan::class.java)
-            .firstOrNull { it.style == Typeface.BOLD }
-        if (boldSpan != null) {
-            val start = sb.getSpanStart(boldSpan)
-            val end = sb.getSpanEnd(boldSpan)
-            sb.setSpan(
-                ForegroundColorSpan(color),
-                start, end,
-                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-            )
-        }
-        return sb
+    /** Bind one gesture line: the icon + gesture word in [verbColor], the
+     *  bound [action]'s title on a source language whose reading hint is
+     *  [hint] in [baseColor]. */
+    private fun bindGestureLine(
+        line: GestureLine,
+        action: IconAction,
+        hint: HintTextKind,
+        verbColor: Int,
+        baseColor: Int,
+    ) {
+        line.icon.imageTintList = ColorStateList.valueOf(verbColor)
+        line.tvGesture.setTextColor(verbColor)
+        line.tvAction.setText(action.titleRes(hint))
+        line.tvAction.setTextColor(baseColor)
     }
 
 
@@ -568,8 +521,11 @@ class SettingsRenderer(
         // to Anki settings, where the feature switch — the real stop lever —
         // lives. Recording itself starts and stops with the session.
         rowAudioRecording.setOnClickListener {
-            if (audioArmed()) callbacks.openAnkiSettings()
-            else callbacks.requestAudioCaptureConsent()
+            when (audioRowState()) {
+                AudioRowState.DARK -> callbacks.requestAudioCaptureConsent()
+                AudioRowState.RECORDING -> callbacks.openAnkiSettings()
+                AudioRowState.FAILED -> callbacks.retryGameAudioRecording()
+            }
         }
 
         // The whole toolbar (title + Turn On/Off button together) fades in as
@@ -655,7 +611,7 @@ class SettingsRenderer(
         val showAudioRow = prefs.recordGameAudio && active
         rowAudioRecording.isVisible = showAudioRow
         dividerAudioRecording.isVisible = showAudioRow
-        if (showAudioRow) styleAudioRecordingRow(audioArmed())
+        if (showAudioRow) styleAudioRecordingRow(audioRowState())
         // The floating-icon footer is lit when the icon is actually on the
         // game screen, dim otherwise. That tracks `active` everywhere except
         // a11y dual-screen, where capture is always active but the Game
@@ -665,27 +621,30 @@ class SettingsRenderer(
         val titleColor = ctx.themeColor(
             if (iconLit) R.attr.ptTextMuted else R.attr.ptTextHint
         )
-        // Gesture line has two colour zones: the rest of the line (baseColor)
-        // and the leading bold verb (verbColor). Lit accents the verb +
-        // matching icon; dim flattens both into the same muted hint colour as
-        // the rest of the line.
+        // Gesture line has two colour zones: the bound action title
+        // (baseColor) and the leading bold gesture word (verbColor). Lit
+        // accents the word + matching icon; dim flattens both into the same
+        // muted hint colour as the rest of the line.
         val baseColor = ctx.themeColor(
             if (iconLit) R.attr.ptText else R.attr.ptTextHint
         )
         val verbColor = ctx.themeColor(
             if (iconLit) R.attr.ptAccent else R.attr.ptTextHint
         )
-        val iconTint = ColorStateList.valueOf(verbColor)
         tvOverlayIconTitle.setTextColor(titleColor)
-        tvGestureDrag.text = withVerbColored(R.string.overlay_icon_gesture_drag, verbColor)
-        tvGestureHold.text = withVerbColored(R.string.overlay_icon_gesture_hold, verbColor)
-        tvGestureTap.text  = withVerbColored(R.string.overlay_icon_gesture_tap,  verbColor)
-        tvGestureDrag.setTextColor(baseColor)
-        tvGestureHold.setTextColor(baseColor)
-        tvGestureTap.setTextColor(baseColor)
-        iconGestureDrag.imageTintList = iconTint
-        iconGestureHold.imageTintList = iconTint
-        iconGestureTap.imageTintList = iconTint
+        ivOverlayIconChevron.imageTintList = ColorStateList.valueOf(titleColor)
+        // The bindings are re-read here rather than observed: the picker page
+        // is its own Activity, and so is the language picker (the source
+        // language's reading hint decides whether a swap binding applies and
+        // names it), so the sheet's resume, which already funnels into this
+        // refresh, is the catch-up point, the same contract as the rest of
+        // the lifecycle-driven cell. One case waits past it: on dual-screen a
+        // source language picked from the floating menu while this page stays
+        // resumed on the other display shows here at the next resume.
+        val bindings = prefs.iconGestureBindings()
+        bindGestureLine(lineDrag, bindings.drag, bindings.hint, verbColor, baseColor)
+        bindGestureLine(lineHold, bindings.hold, bindings.hint, verbColor, baseColor)
+        bindGestureLine(lineTap, bindings.tap, bindings.hint, verbColor, baseColor)
         overlayIconPreviewSlot.alpha = if (iconLit) 1f else 0.5f
         if (!showPowerCell) return
         styleCaptureButton(btnCaptureLifecycle, active)
@@ -695,30 +654,48 @@ class SettingsRenderer(
         updateToolbarCrossfade(settingsScrollView.scrollY)
     }
 
-    /** Whether the session's audio is armed: the MediaProjection consent it
-     *  rides on is held AND the mic permission still stands. Keyed on gate
-     *  inputs, NOT [com.playtranslate.capture.GameAudioRecorder.running] —
-     *  the recorder legitimately pauses during the Anki card-flow activities
-     *  and the row must not flap there. (IfInitialized: an unrealized
-     *  controller holds no consent — don't force-init one to render a row.) */
-    private fun audioArmed(): Boolean =
-        CaptureService.instance?.mediaProjectionControllerIfInitialized?.hasConsent == true &&
-            ContextCompat.checkSelfPermission(
-                ctx, android.Manifest.permission.RECORD_AUDIO
-            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    /** The audio row's three states. DARK: a permission gate is missing
+     *  ([GameAudioGate.armed] false) and the tap repairs it. RECORDING: armed
+     *  and the recorder is healthy ([GameAudioGate.recording]) — the only
+     *  state whose title is a status claim. FAILED: armed but the recorder
+     *  failed a wanted start ([com.playtranslate.capture.GameAudioRecorder
+     *  .startFailed]) — the tap retries. Same definitions the floating icon's
+     *  glyph and the menu's repair bar read. */
+    private enum class AudioRowState { DARK, RECORDING, FAILED }
 
-    /** Render the audio row for [armed]: the title tracks state — "Start
+    private fun audioRowState(): AudioRowState {
+        val svc = CaptureService.instance
+        val controller = svc?.mediaProjectionControllerIfInitialized
+        return when {
+            !GameAudioGate.armed(ctx, controller) -> AudioRowState.DARK
+            GameAudioGate.recording(ctx, controller, svc?.gameAudioRecorderIfInitialized) ->
+                AudioRowState.RECORDING
+            else -> AudioRowState.FAILED
+        }
+    }
+
+    /** Render the audio row for [state]: the title tracks it — "Start
      *  recording audio" (a verb; the tap IS the action) while dark,
-     *  "Recording audio" (a status claim, true only here) while armed — and
-     *  the trailing record glyph is the state light: ptTextHint (the
-     *  recessed "this is currently dark" step) vs ptAccent. */
-    private fun styleAudioRecordingRow(armed: Boolean) {
+     *  "Recording audio" (a status claim, true only there) while recording,
+     *  "Audio recording failed" (the tap retries) while failed — and the
+     *  trailing record glyph is the state light: ptTextHint (the recessed
+     *  "this is currently dark" step), ptAccent, ptDanger. */
+    private fun styleAudioRecordingRow(state: AudioRowState) {
         tvAudioRecordingTitle.setText(
-            if (armed) R.string.audio_recording_row_active
-            else R.string.audio_recording_row_start
+            when (state) {
+                AudioRowState.DARK -> R.string.audio_recording_row_start
+                AudioRowState.RECORDING -> R.string.audio_recording_row_active
+                AudioRowState.FAILED -> R.string.audio_recording_row_failed
+            }
         )
         ivAudioRecordingGlyph.imageTintList = ColorStateList.valueOf(
-            ctx.themeColor(if (armed) R.attr.ptAccent else R.attr.ptTextHint)
+            ctx.themeColor(
+                when (state) {
+                    AudioRowState.DARK -> R.attr.ptTextHint
+                    AudioRowState.RECORDING -> R.attr.ptAccent
+                    AudioRowState.FAILED -> R.attr.ptDanger
+                }
+            )
         )
     }
 
@@ -924,19 +901,30 @@ class SettingsRenderer(
     }
 
     /** Build (or rebuild) the floating-icon preview shown in the "On the
-     *  floating icon" cell. The icon view draws a full notional 56dp circle
-     *  pushed off the screen edge — the 40dp-wide slot clips it to the
-     *  visible quarter. Non-interactive — never hosted as a window. */
+     *  floating icon" cell, beside the gesture table. The icon view draws a
+     *  full notional 56dp circle around its centre, pushed off the screen
+     *  edge; docked on the slot's start edge (left, or right in RTL), with
+     *  the view's centre on that edge, so the narrow slot clips it to the
+     *  visible slice, arrow pointing at the gestures. Non-interactive — never
+     *  hosted as a window. */
     private fun buildOverlayIconPreview() {
         destroyOverlayIconPreview()
         overlayIconPreviewSlot.removeAllViews()
+        val rtl = ctx.resources.configuration.layoutDirection == View.LAYOUT_DIRECTION_RTL
+        val edge = if (rtl) FloatingOverlayIcon.Edge.RIGHT else FloatingOverlayIcon.Edge.LEFT
         val preview = FloatingOverlayIcon(ctx).apply {
             isClickable = false
             isFocusable = false
+            // No window params, so this only sets the edge the slice is drawn on.
+            setPosition(edge.ordinal, 0.5f)
         }
         overlayIconPreviewSlot.addView(
             preview,
-            FrameLayout.LayoutParams(preview.viewSizePx, preview.viewSizePx),
+            FrameLayout.LayoutParams(
+                preview.viewSizePx,
+                preview.viewSizePx,
+                Gravity.START or Gravity.CENTER_VERTICAL,
+            ).apply { marginStart = -preview.viewSizePx / 2 },
         )
         overlayIconPreview = preview
     }
@@ -1532,6 +1520,34 @@ class SettingsRenderer(
             prefs.debugSaveOcrSeed = checked
         }
         rowSaveOcrSeed.setOnClickListener { switchSaveOcrSeed.toggle() }
+
+        // Short-text offline routing (default OFF per the 2026-09-02 device
+        // verdict; row exists to A/B the routing without a rebuild). The
+        // reconcile nudge matters: the pref is part of the cache's routing
+        // identity, so flipping it must clear cached shorts immediately —
+        // same eager pattern the backend toggles use.
+        val rowShortText = root.findViewById<View>(R.id.rowShortTextRouting)
+        val switchShortText = rowShortText.findViewById<MaterialSwitch>(R.id.switchRowToggle)
+        rowShortText.findViewById<TextView>(R.id.tvRowTitle).text = ctx.getString(R.string.settings_debug_short_text_routing)
+        switchShortText.isChecked = prefs.debugShortTextRouting
+        switchShortText.setOnCheckedChangeListener { _, checked ->
+            prefs.debugShortTextRouting = checked
+            CaptureService.instance?.reconcileBackendPreference()
+        }
+        rowShortText.setOnClickListener { switchShortText.toggle() }
+
+        // Force the on-device LLM's mmap weight path (normally taken only
+        // below the model's availMem floor, so never on a 16 GB dev device).
+        // Read at the next model load; a loaded model keeps its current mode
+        // until it is reloaded (backend swap, unload, or process restart).
+        val rowForceMmap = root.findViewById<View>(R.id.rowForceMmapWeights)
+        val switchForceMmap = rowForceMmap.findViewById<MaterialSwitch>(R.id.switchRowToggle)
+        rowForceMmap.findViewById<TextView>(R.id.tvRowTitle).text = ctx.getString(R.string.settings_debug_force_mmap_weights)
+        switchForceMmap.isChecked = prefs.debugForceMmapWeights
+        switchForceMmap.setOnCheckedChangeListener { _, checked ->
+            prefs.debugForceMmapWeights = checked
+        }
+        rowForceMmap.setOnClickListener { switchForceMmap.toggle() }
 
         // Log OCR grouping decisions (per-pair MERGE/SPLIT + numeric reason)
         val rowLogGrouping = root.findViewById<View>(R.id.rowLogGrouping)

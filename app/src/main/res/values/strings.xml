@@ -115,8 +115,10 @@
     <!-- Label of the small outlined text button in the capture-result panel's
          Translation header. Tapping it collapses the panel to a sliver and
          paints the translations in place over the game text instead. Keep it
-         short: the button wraps this label at caption size in a row of
-         32dp icon buttons. -->
+         short: the button shows this label on ONE line at caption size in a
+         row of 32dp icon buttons, and when the row runs out of room the
+         button moves into the header's "More actions" menu, where this is
+         its row's name. -->
     <string name="capture_show_on_screen">Show on screen</string>
 
     <!-- Shown when OCR returns no source-language text. %1$s = source
@@ -347,6 +349,12 @@
     <string name="pos_interjection">Interjection</string>
     <!-- POS tag shown with a word's definitions: the "preposition" category. -->
     <string name="pos_preposition">Preposition</string>
+    <!-- POS tag shown with a word's definitions: the "postposition" category (e.g. Hindi को/से). -->
+    <string name="pos_postposition">Postposition</string>
+    <!-- POS tag shown with a word's definitions: the "determiner" category (e.g. "every"). -->
+    <string name="pos_determiner">Determiner</string>
+    <!-- POS tag shown with a word's definitions: the "article" category (e.g. "the"). -->
+    <string name="pos_article">Article</string>
     <!-- POS tag shown with a word's definitions: the "prefix" category. -->
     <string name="pos_prefix">Prefix</string>
     <!-- POS tag shown with a word's definitions: the "suffix" category. -->
@@ -717,6 +725,23 @@
     <!-- Shown when online backends are reachable but returning errors. -->
     <string name="note_mlkit_service_unavailable">⚠ Translation service unavailable — showing offline translation (lower quality).</string>
 
+    <!-- Shown when the online backend is in a TRANSIENT cooldown (rate
+         limit, server error, or a recent connection-failure ladder).
+         %1$s is a locale-formatted clock time ("3:42 PM") or, for a
+         cooldown more than a day out, a short date ("Sep 1") — both
+         read naturally after "until". -->
+    <string name="note_mlkit_service_cooldown">⚠ Translation service is temporarily unavailable. Showing offline translation (lower quality) until <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>.</string>
+
+    <!-- Shown when the online backend's usage quota is exhausted (Gemini
+         daily / DeepL monthly).  %1$s: same time-or-date value as
+         note_mlkit_service_cooldown. -->
+    <string name="note_mlkit_quota_exhausted">⚠ Translation quota used up. Showing offline translation (lower quality) until <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>.</string>
+
+    <!-- Shown when the online backend reports an account/billing problem
+         (e.g. OpenAI insufficient_quota).  Deliberately NO retry time:
+         the user has to fix the account, waiting won't help. -->
+    <string name="note_mlkit_account_issue">⚠ Translation service account problem (billing or credit). Showing offline translation (lower quality). Check the service in Settings.</string>
+
     <!-- Shown when a TG / Qwen / Gemma backend OOMed and we fell
          through to a lighter backend. -->
     <string name="note_low_memory_fallback">⚠ Low memory — showing offline translation (lower quality).</string>
@@ -941,6 +966,11 @@
          in this state; the tap is the quiet manage path (Anki settings). -->
     <string name="audio_recording_row_active">Recording audio</string>
 
+    <!-- Settings row title while the permission gates pass but the recorder
+         could not start (or its reader died and the automatic restart did
+         not take); the tap retries. -->
+    <string name="audio_recording_row_failed">Audio recording failed</string>
+
     <!-- ═══════════════════════════════════════════════════════════════
          MEDIAPROJECTION OVERLAY-PERMISSION DIALOG
          ═══════════════════════════════════════════════════════════════ -->
@@ -957,21 +987,64 @@
     <string name="mp_overlay_permission_button">Open settings</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
-         FLOATING-ICON GESTURE HINTS
-         Each string is a short verb + em-dash + explanation, rendered
-         in the "On the floating icon" cell with a leading Material
-         Symbol from the layout.  <b> is rendered as bold via HtmlCompat;
-         preserve the markup.
+         FLOATING-ICON GESTURES
+         The "On the floating icon" cell lists each gesture with the
+         action bound to it, as (icon) (gesture word) (action title), and
+         opens a picker page with one section per gesture. The gesture
+         words are that page's section headers too (rendered ALL CAPS
+         there by Text.PT.GroupHeader; keep normal case).
          ═══════════════════════════════════════════════════════════════ -->
 
-    <!-- Drag gesture hint. -->
-    <string name="overlay_icon_gesture_drag"><b>Drag</b> over words for quick definitions</string>
+    <!-- Gesture names: short imperative verbs, shown bold beside the
+         gesture icon. -->
+    <string name="icon_gesture_drag">Drag</string>
+    <string name="icon_gesture_hold">Hold</string>
+    <string name="icon_gesture_tap">Tap</string>
 
-    <!-- Hold gesture hint. -->
-    <string name="overlay_icon_gesture_hold"><b>Hold</b> to preview translations</string>
+    <!-- Action titles, sentence case, no period. Each is both a picker
+         row and the cell's third column, e.g. "Hold  Open the quick menu". -->
+    <!-- Drag: the magnifier lens over game text. -->
+    <string name="icon_action_lookup_words">Hover over a word for its definition</string>
+    <!-- Hold: the hold-to-preview one-shot on the game screen. -->
+    <string name="icon_action_show_translations">Show translations on screen</string>
+    <!-- Hold or Tap: open the floating icon's menu. "Quick menu" is the
+         term the icon's tap hint has always used. -->
+    <string name="icon_action_open_quick_menu">Open the quick menu</string>
+    <!-- Tap: the one-shot capture the quick menu's Capture button runs. -->
+    <string name="icon_action_capture_screen">Capture screen</string>
+    <!-- Hold or Tap: what the quick menu's Auto button does. Starts
+         auto-translate while it's off, stops it while it runs. -->
+    <string name="icon_action_toggle_auto_translate">Start/stop auto translate</string>
+    <!-- Hold or Tap, offered only for a source language with furigana:
+         while auto-translate runs, switches its overlays between the
+         translation and the furigana (the kana readings over the
+         Japanese text); while it's off, starts it. "Translation" and
+         "furigana" are the two overlay modes, lowercase mid-sentence. -->
+    <string name="icon_action_swap_furigana">Swap between translation and furigana</string>
+    <!-- The same action for a Chinese source, whose reading hint is
+         pinyin (the romanized readings over the Chinese text). -->
+    <string name="icon_action_swap_pinyin">Swap between translation and pinyin</string>
+    <!-- Hold or Tap: change the game language (the language IN the game
+         being translated; "Game Language" is the picker's title,
+         lang_translate_from). With exactly two languages downloaded it
+         switches to the other one; otherwise it opens that picker. Also
+         the title of the Hotkeys page row that binds a key to the same
+         action, and of the dialog that records that key. -->
+    <string name="icon_action_change_game_language">Change game language</string>
+    <!-- Brief pill at the top of the game screen after that action
+         switched to the other downloaded language, confirming which one
+         the app now reads. It fades out by itself after two seconds.
+         %1$s = the language's name in the UI language (e.g. "Japanese",
+         "Chinese (Traditional)"), the same name the language picker
+         shows. -->
+    <string name="icon_action_translating_from">Translating from <xliff:g id="language" example="Japanese">%1$s</xliff:g></string>
 
-    <!-- Tap gesture hint. -->
-    <string name="overlay_icon_gesture_tap"><b>Tap</b> to open the quick menu</string>
+    <!-- Alert shown on leaving the picker page while no gesture is bound
+         to "Open the quick menu". The confirm button leaves with the
+         choices as they are; Cancel stays on the page. -->
+    <string name="icon_gestures_no_menu_title">No gesture opens the quick menu</string>
+    <string name="icon_gestures_no_menu_message">The quick menu won\'t be reachable from the floating icon. Bind \"Open the quick menu\" to Hold or Tap to keep it available.</string>
+    <string name="icon_gestures_no_menu_confirm">I understand</string>
 
     <!-- Title of the alert shown when the floating icon is enabled but
          accessibility has been turned off externally. -->
@@ -1054,6 +1127,7 @@
          AnkiDroid in the background. The trailing ellipsis is a single
          character (…), not three dots. -->
     <string name="anki_deck_picker_loading">Loading decks…</string>
+    <string name="anki_deck_picker_title">Select Anki Deck</string>
 
     <!-- Loading indicator shown while the Anki card-type picker queries
          AnkiDroid for available card types. -->
@@ -1128,6 +1202,33 @@
     <!-- Body of the same dialog. -->
     <string name="anki_send_failed_message"><xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> didn\'t accept the card. Make sure <xliff:g id="brand_ankidroid2" example="AnkiDroid">AnkiDroid</xliff:g> is running, then try again.</string>
 
+    <!-- Title of the oversize-card prompt (the consent dialog only): the
+         note's field payload would blow Android's 1MB binder transaction
+         limit on the AnkiDroid ContentProvider insert. The too-large
+         FAILURE is reported under anki_send_failed_title, or with no title
+         at all as a long Toast, so anki_card_too_large_failed must stand on
+         its own. -->
+    <string name="anki_card_too_large_title">Card too large</string>
+
+    <!-- Body of the oversize-card prompt shown on the review sheets before
+         sending: the styled dictionary definitions (structured glossaries
+         plus each dictionary's stylesheet) are what blows the budget, and
+         "simplified" means plain text definitions without them. -->
+    <string name="anki_card_too_large_prompt">This card\'s dictionary definitions are too big to send to <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>. Save a simplified card with plain text definitions?</string>
+
+    <!-- Confirm button of the oversize-card prompt. -->
+    <string name="anki_card_too_large_simplify">Save simplified</string>
+
+    <!-- Failure message when the card exceeds the binder budget even with
+         plain text definitions. Shown instead of anki_send_failed_message,
+         which would wrongly blame AnkiDroid not running. -->
+    <string name="anki_card_too_large_failed">This card is too big for <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> to accept, even with simplified definitions. Try removing some words or shortening the sentence.</string>
+
+    <!-- Success toast for a card that was automatically simplified to fit
+         (one-tap sends have no UI to ask first). Same surface as the
+         media-shortfall toasts above. -->
+    <string name="anki_added_simplified">Added to <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> (definitions simplified to fit)</string>
+
     <!-- Mode chip on the Anki-card review sheet — sentence mode. -->
     <string name="anki_mode_sentence">Sentence</string>
 
@@ -1171,17 +1272,34 @@
     <!-- Group header — screenshot group. -->
     <string name="anki_group_screenshot">Screenshot</string>
 
-    <!-- Helper line under the Words group explaining the tap targets.
-         × is a literal multiplication-sign glyph; preserve it. -->
-    <string name="anki_words_helper">These words will be included in the <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> card. Tap a word to highlight them in the card. Tap × to remove it from the card.</string>
+    <!-- Helper line under the Words group of the sentence card editor
+         explaining the tap targets. %1$s is drawn at runtime as the inline
+         eye icon (the same glyph as on each word row) that hides a word;
+         keep the placeholder where the language names the icon. -->
+    <string name="anki_words_helper_hide">These words will be included in the <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> card. Tap a word to highlight it. Tap <xliff:g id="hide_icon" example="👁">%1$s</xliff:g> to exclude it from the card.</string>
 
     <!-- Fallback label shown on the Translation row when the
          translation failed. -->
     <string name="anki_translation_error">Couldn\'t translate</string>
 
-    <!-- contentDescription for the × button beside each word chip in
-         the words group. -->
+    <!-- contentDescription for the × on a removable sense or example row
+         in the word card editor. -->
     <string name="anki_word_remove_content_description">Remove from card</string>
+
+    <!-- contentDescription for the eye button on a word row (the results
+         page's words list, the Anki sentence card's words group). Tapping it
+         hides the word: the row minimizes to the word alone and the word is
+         left off sentence cards until it is shown again. -->
+    <string name="hidden_word_hide_content_description">Hide word</string>
+
+    <!-- contentDescription for the eye-off button on a minimized (hidden)
+         word row. Tapping it shows the word again. -->
+    <string name="hidden_word_show_content_description">Show word</string>
+
+    <!-- Toast after a hide/show tap on a word row when the change could not
+         be saved to storage (disk full, unreadable store); the row did not
+         change. Short, one line. -->
+    <string name="hidden_word_save_failed">Couldn\'t save. Try again.</string>
 
     <!-- contentDescription for the screenshot's remove button. -->
     <string name="anki_screenshot_remove_content_description">Remove screenshot</string>
@@ -1191,6 +1309,14 @@
 
     <!-- contentDescription for the audio-preview play button. -->
     <string name="anki_audio_preview_content_description">Preview audio</string>
+
+    <!-- Title of the switch row inside a highlighted word's cell in the
+         sentence card editor's Words group, between the word's own title
+         line and its definition. Turning the switch on adds that word's
+         pronunciation audio to the Anki card. The row also holds a play
+         button and a pill naming the audio source, so keep it short: one
+         line beside them. -->
+    <string name="anki_word_audio_row_title">Include audio</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          GAME-AUDIO RECORDING (Settings → Anki → Audio; trim editor).
@@ -1660,6 +1786,7 @@ It is optional: grammar matching already works without it.</string>
     <string name="mistral_display_name" translatable="false">Mistral</string>
     <string name="groq_display_name" translatable="false">Groq</string>
     <string name="openrouter_display_name" translatable="false">OpenRouter</string>
+    <string name="claude_display_name" translatable="false">Claude</string>
     <string name="deepl_display_name" translatable="false">DeepL</string>
     <!-- Cell title + provider-preset pill label for an OpenAI-compatible
          service pointed at a user-entered URL (LM Studio, OpenRouter, …). -->
@@ -1713,6 +1840,14 @@ It is optional: grammar matching already works without it.</string>
          (e.g. "OpenAI"); %2$s = the backend's developer console URL
          (e.g. "platform.openai.com"). -->
     <string name="llm_backend_invalid_key_alert_message_fmt"><xliff:g id="backend_name" example="OpenAI">%1$s</xliff:g> rejected the key you entered. Double-check it at <xliff:g id="dev_console_url" example="platform.openai.com">%2$s</xliff:g> and try again.</string>
+
+    <!-- Body of the same dialog when Claude reported that the key is a
+         valid account-level key not scoped to a workspace. The app cannot
+         send the workspace header such keys need, so re-checking the key
+         would send the user in circles; a key created inside a workspace
+         is the fix. "Claude Console" is the product name of Anthropic's
+         developer console at platform.claude.com. -->
+    <string name="llm_backend_key_needs_workspace_scope">This key isn\'t scoped to a workspace, so it can\'t be used here. In the Claude Console, create a key inside a specific workspace and enter that one instead.</string>
 
     <!-- Dismiss button on the same dialog. -->
     <string name="llm_backend_invalid_key_alert_button">OK</string>
@@ -2017,10 +2152,9 @@ It is optional: grammar matching already works without it.</string>
          switch, like the LLM hardware-unsupported lines) when Mozilla's model
          set has no path for the current source→target language pair. -->
     <string name="bergamot_pair_unsupported">Not supported for the current language pair</string>
-    <!-- Same inert reason line for the device-level gate: 32-bit, or arm64
-         running under a binary translator (x86 emulators — Houdini crashes the
-         native engine; see BinaryTranslation). Device-level, so it outranks the
-         per-pair line above. -->
+    <!-- Same inert reason line for the device-level gate: a 32-bit device,
+         where the arm64-only native engine can't load. Device-level, so it
+         outranks the per-pair line above. -->
     <string name="bergamot_device_unsupported">Not supported on this device</string>
 
     <!-- contentDescription suffix tokens for the offline row. -->
@@ -2198,10 +2332,54 @@ It is optional: grammar matching already works without it.</string>
     <!-- Disable-dialog buttons. -->
     <string name="gemma_e2b_mnn_disable_keep">Disable only</string>
     <string name="gemma_e2b_mnn_disable_delete">Delete model</string>
+    <!-- ── MNN-backed Tencent Hy-MT2 1.8B (translation specialist).
+            Apache-2.0, so unlike the retired Hunyuan-MT 1.5 block below
+            there is no region gate and no legal attestation. ────────── -->
+
+    <string name="hymt2_display_name" translatable="false">Hy-MT2 1.8B</string>
+
+    <!-- Status line before download. -->
+    <string name="hymt2_status_not_downloaded">Requires <xliff:g id="ram" example="4 GB">%1$s</xliff:g> memory, <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g> on disk</string>
+
+    <!-- Status line when on disk but disabled.  %1$s = on-disk size. -->
+    <string name="hymt2_status_downloaded_disabled">Downloaded but disabled (<xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g> on disk)</string>
+
+    <!-- Status line when downloaded AND enabled. -->
+    <string name="hymt2_status_ready">Requires <xliff:g id="ram" example="4 GB">%1$s</xliff:g> memory, <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g> on disk</string>
+
+    <!-- In-flight download status. -->
+    <string name="hymt2_status_downloading">Downloading… <xliff:g id="bytes_so_far" example="120 MB">%1$s</xliff:g> of <xliff:g id="bytes_total" example="1.5 GB">%2$s</xliff:g></string>
+
+    <!-- Status during SHA verification. -->
+    <string name="hymt2_status_verifying">Verifying download…</string>
+
+    <!-- Disable-confirm title. -->
+    <string name="hymt2_disable_title">Disable <xliff:g id="brand_hymt2" example="Hy-MT2">Hy-MT2</xliff:g>?</string>
+
+    <!-- Disable-confirm body.  %1$s = on-disk size. -->
+    <string name="hymt2_disable_message">The <xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g> model is installed. You can keep it for later or delete it to free up space.</string>
+
+    <!-- Error toast on download failure.  %1$s = error description. -->
+    <string name="hymt2_download_failed">Download failed: <xliff:g id="error_message" example="Network unreachable">%1$s</xliff:g></string>
+
+    <!-- Metered-connection warning title. -->
+    <string name="hymt2_metered_warning_title">Download on metered network?</string>
+
+    <!-- Metered-connection warning body.  %1$s = human file size. -->
+    <string name="hymt2_metered_warning_message"><xliff:g id="brand_hymt2" example="Hy-MT2">Hy-MT2</xliff:g> is <xliff:g id="download_size" example="1.5 GB">%1$s</xliff:g>. This network is marked as metered. Continue?</string>
+
+    <!-- Disable-dialog buttons. -->
+    <string name="hymt2_disable_keep">Disable only</string>
+    <string name="hymt2_disable_delete">Delete model</string>
+
     <!-- ── MNN-backed Tencent Hunyuan-MT 1.5 1.8B (translation
-            specialist).  Region-gated by RegionPolicy (hidden in EU /
-            UK / SK) and behind a one-time legal-attestation
-            click-through.  See mnn-spike/HYMT_SPIKE_REPORT.md. ─────── -->
+            specialist).  RETIRED in favour of Hy-MT2 above: the catalog
+            entry is deprecated, so the row only appears for users who
+            already have the model installed.  Still region-gated by
+            RegionPolicy (hidden in EU / UK / SK) and behind a one-time
+            legal-attestation click-through.  These strings stay for as
+            long as those installs do.  See
+            docs/hy-mt1.5-offline-model-evaluation.md. ──────────────── -->
 
     <string name="hymt_display_name" translatable="false">Hunyuan-MT 1.5 1.8B</string>
 
@@ -2320,8 +2498,10 @@ It is optional: grammar matching already works without it.</string>
     <string name="llm_status_low_memory_badge">Low memory, translations using fallback</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
-         FLOATING-ICON MENU WARNING PILL.  Two strings cover the same
-         pill, depending on the cause: network/service degradation
+         FLOATING-ICON MENU WARNING PILL.  Five strings cover the same
+         pill, depending on the cause: an active cooldown shows one of
+         three cause-typed labels (transient / quota / account — see
+         each string's comment); other network/service degradation
          falls back to ML Kit (offline label); a TG / Qwen displacement
          caused by transient memory pressure shows the low-memory label
          even when the chain also bottomed out at ML Kit (memory is the
@@ -2330,7 +2510,95 @@ It is optional: grammar matching already works without it.</string>
          ═══════════════════════════════════════════════════════════════ -->
 
     <string name="degraded_warning_offline">Offline — translation quality is reduced</string>
+    <!-- Warning-pill label while the online service is in a TRANSIENT
+         cooldown (rate limit / server error / connection ladder).  Keep
+         it short (single pill line).  %1$s is a locale clock time
+         ("3:42 PM") or short date ("Sep 1"); both must read naturally
+         after "until". -->
+    <string name="degraded_warning_cooldown">Service unavailable until <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>. Quality reduced</string>
+    <!-- Warning-pill label while the online service's usage quota is
+         exhausted.  %1$s: same time-or-date value as degraded_warning_cooldown. -->
+    <string name="degraded_warning_quota">Quota used up until <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>. Quality reduced</string>
+    <!-- Warning-pill label for an account/billing problem on the online
+         service.  No retry time on purpose: the user has to fix the
+         account, waiting won't help. -->
+    <string name="degraded_warning_account">Service account problem. Quality reduced</string>
     <string name="degraded_warning_low_memory">Low memory — translation quality is reduced</string>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         TRANSLATION ERROR PILL — a small pill at the top of the game
+         screen, shown while the user plays when an online translation
+         service fails: the app's logo, one of these messages, a gear that
+         opens the Translation services settings, and a × that closes it.
+         It appears once per problem and goes away by
+         itself when the service works again.  Every message but the
+         connection one starts with the service's name exactly as it
+         appears on the Translation services page ("Gemini", "OpenAI",
+         "Claude", "DeepL", "Lingva", or a user-chosen provider name),
+         followed by a colon and the problem.  Keep each message short:
+         the pill has room for about one line over the game.
+         ═══════════════════════════════════════════════════════════════ -->
+
+    <!-- Translation error pill: the device can't reach the internet (no
+         network, or a network without internet access), so no online
+         service can be reached and none is named.  Short noun phrase. -->
+    <string name="translation_error_connection">Connection error</string>
+    <!-- Translation error pill: the service rejected the API key the user
+         entered for it (or no key is set).  %1$s = service name. -->
+    <string name="translation_error_auth"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: Invalid API key</string>
+    <!-- Translation error pill: the user's account with the service has no
+         credit or money left (e.g. OpenAI "insufficient_quota", Claude
+         "credit balance too low").  %1$s = service name. -->
+    <string name="translation_error_billing"><xliff:g id="service" example="Claude">%1$s</xliff:g>: Out of credits</string>
+    <!-- Translation error pill: the service's daily usage limit is used
+         up (Gemini's free tier); it resets the next day.  %1$s = service
+         name. -->
+    <string name="translation_error_daily_quota"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: Daily limit reached</string>
+    <!-- Translation error pill: the service's monthly character quota is
+         used up (DeepL).  %1$s = service name. -->
+    <string name="translation_error_monthly_quota"><xliff:g id="service" example="DeepL">%1$s</xliff:g>: Monthly quota used up</string>
+    <!-- Translation error pill: the service is refusing requests because
+         too many were sent too quickly (HTTP 429).  %1$s = service name. -->
+    <string name="translation_error_rate_limited"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: Too many requests</string>
+    <!-- Translation error pill: the service's own servers returned an
+         error (HTTP 5xx); nothing the user did.  %1$s = service name. -->
+    <string name="translation_error_server"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: Server error</string>
+    <!-- Translation error pill: the service refused the request for
+         another reason, e.g. a model name it doesn't know.  %1$s = service
+         name; %2$s = the HTTP status code as digits (e.g. 404), shown so
+         the user can look it up; keep it as written. -->
+    <string name="translation_error_rejected_code"><xliff:g id="service" example="OpenAI">%1$s</xliff:g>: Request rejected (HTTP <xliff:g id="status_code" example="404">%2$s</xliff:g>)</string>
+    <!-- Translation error pill: same as translation_error_rejected_code
+         when no status code is known.  %1$s = service name. -->
+    <string name="translation_error_rejected"><xliff:g id="service" example="OpenAI">%1$s</xliff:g>: Request rejected</string>
+    <!-- Translation error pill: the service answered, but with nothing
+         usable (an empty or garbled reply).  %1$s = service name. -->
+    <string name="translation_error_bad_response"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: Unexpected response</string>
+    <!-- Translation error pill: the service didn't answer in time, while
+         the internet itself works.  %1$s = service name. -->
+    <string name="translation_error_timeout"><xliff:g id="service" example="DeepSeek">%1$s</xliff:g>: Not responding</string>
+    <!-- Translation error pill: the app couldn't connect to the service's
+         server, while the internet itself works (other services answer).
+         %1$s = service name. -->
+    <string name="translation_error_unreachable"><xliff:g id="service" example="Lingva">%1$s</xliff:g>: Can\'t connect</string>
+    <!-- Title of the confirm shown when the user taps a translation error
+         pill's gear while an Anki card they are building over the game is
+         open: opening the settings closes that card, and it can't be
+         brought back. -->
+    <string name="translation_error_discard_card_title">Discard card?</string>
+    <!-- Body of the same confirm.  "Settings" is the Translation services
+         settings page the gear opens; "capture" is a screen capture, the
+         way the user made the card in the first place. -->
+    <string name="translation_error_discard_card_message">If you launch settings, you will lose this card and have to regenerate it from a new capture.</string>
+    <!-- Destructive button on the same confirm: close the card and open
+         the Translation services settings.  Cancel, below it, keeps the
+         card open. -->
+    <string name="translation_error_discard_card_confirm">Go to settings</string>
+    <!-- Brief pill at the top of the game screen after the user presses
+         and holds the floating icon, when text was found but no
+         translation service could translate it.  Same short pill as
+         "No text found". -->
+    <string name="hold_translation_failed">Couldn\'t translate</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          MAIN SCREEN — bottom-bar and overflow-menu items.
@@ -2582,6 +2850,46 @@ It is optional: grammar matching already works without it.</string>
     <!-- Subtitle under the "widen vertical text" switch row in Capture/Overlay settings. -->
     <string name="settings_vertical_grow_subtitle">Grow narrow vertical-text boxes so the translation reads horizontally. May cover nearby content.</string>
 
+    <!-- Group header (rendered UPPERCASE) above the overlay settings on the Capture
+         and overlay screen: the Overlay Mode chooser, the "minimum text size" slider,
+         the "filter furigana" switch, the "widen vertical text" switch and the "edge
+         indicator" switch. "Overlay" is
+         what the app draws over the game
+         (the translation boxes on the game's text, and the result panel), so use the
+         same word as the screen title (settings_cell_capture_overlay) and the Overlay
+         Mode row (settings_overlay_mode_title). -->
+    <string name="settings_header_overlay">Overlay</string>
+    <!-- Title of the "minimum text size" slider row on the Capture and overlay screen,
+         under the Overlay Mode chooser: the smallest size the translation text drawn
+         over the game aims for. "Text size" is the results screen's term for the same
+         thing (cd_text_size). -->
+    <string name="settings_overlay_min_text_title">Minimum text size</string>
+    <!-- Subtitle under the "minimum text size" slider: above the lowest value, a
+         translation box grows into free space around it so its text can reach the
+         chosen size, so it can end up bigger than the game text it covers. -->
+    <string name="settings_overlay_min_text_subtitle">Changing this value may make overlays larger than the original text.</string>
+    <!-- Warning line under the "minimum text size" subtitle, shown in the warning
+         color: a grown overlay covers more of the game, so with auto-translate on,
+         animation under it can make the overlay be removed when the text has not
+         changed. -->
+    <string name="settings_overlay_min_text_warning">EXPERIMENTAL. May cause auto-translate overlays to get removed more frequently, especially while playing games with a lot of animations</string>
+    <!-- Sample drawn under the "minimum text size" slider at the chosen size (bold,
+         like the overlays) so the user can judge the size; hidden at the lowest value. -->
+    <string name="settings_overlay_min_text_example">Example text</string>
+    <!-- Title of the "filter furigana" switch row on the Capture and overlay screen,
+         under the "minimum text size" slider, shown only when the source language is
+         Japanese. While ON, the small kana readings printed beside kanji (furigana)
+         are dropped from the text read off the screen (OCR), so they are neither
+         translated nor shown as overlays. "Furigana" is the Japanese term; keep it as
+         a loanword where the locale has no native one. -->
+    <string name="settings_filter_furigana_title">Filter furigana from OCR</string>
+    <!-- Title of the "edge indicator" switch row: the soft accent-colored glow drawn
+         around the edges of the screen while the result panel is showing, so a panel
+         collapsed to its bottom strip is not mistaken for no overlay at all. -->
+    <string name="settings_edge_indicator_title">Edge indicator</string>
+    <!-- Subtitle under the "edge indicator" switch row, explaining the glow. -->
+    <string name="settings_edge_indicator_subtitle">Show a soft glow around the screen while the overlay is on screen.</string>
+
     <!-- ═══════════════════════════════════════════════════════════════
          HOTKEY SETUP DIALOG
          ═══════════════════════════════════════════════════════════════ -->
@@ -2620,9 +2928,6 @@ It is optional: grammar matching already works without it.</string>
          translation-result activity. -->
     <string name="cd_translation_result_back">Back</string>
 
-    <!-- contentDescription for the "copy translation" icon button. -->
-    <string name="cd_copy_translation">Copy translation</string>
-
     <!-- contentDescription for the eye-toggle that hides / shows the
          translated text. -->
     <string name="cd_toggle_translation_visibility">Toggle translation visibility</string>
@@ -2631,8 +2936,16 @@ It is optional: grammar matching already works without it.</string>
          on / off above the source text. -->
     <string name="cd_toggle_inline_furigana">Toggle inline furigana</string>
 
+    <!-- contentDescription for the same toggle when the source is Chinese:
+         it turns inline pinyin (the romanized readings shown above the
+         Chinese text) on / off. -->
+    <string name="cd_toggle_inline_pinyin">Toggle inline pinyin</string>
+
     <!-- contentDescription for the button that opens the text-size range
-         slider for the original and translation text. -->
+         slider for the original and translation text. Also the name of
+         that action's row in the header's "More actions" menu (the row
+         list a section header shows for actions that don't fit), so keep
+         it short. -->
     <string name="cd_text_size">Text size</string>
 
     <!-- contentDescription for the speaker button that reads the
@@ -2643,12 +2956,39 @@ It is optional: grammar matching already works without it.</string>
          edit-original sheet. -->
     <string name="cd_edit_original">Edit original text</string>
 
-    <!-- contentDescription for the "copy original" icon button. -->
-    <string name="cd_copy_original">Copy original</string>
-
     <!-- contentDescription for the section-header button that adds the
-         current text to <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>. -->
+         current text to <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>. Also the
+         name of that action's row in the header's "More actions" menu. -->
     <string name="cd_add_to_anki">Add to <xliff:g id="brand_anki" example="Anki">Anki</xliff:g></string>
+
+    <!-- contentDescription for the three-dots button a section header of the
+         results (the row above the original text, or above the translation)
+         shows when its action buttons don't all fit beside the language
+         name. Tapping it opens a small menu listing the actions that didn't
+         fit, and this text is also that menu's spoken title. -->
+    <string name="cd_more_actions">More actions</string>
+
+    <!-- Name of the furigana toggle's row in a section header's "More
+         actions" menu (shown when the header runs out of room). Each row is
+         an icon plus this short name; tapping it turns the small reading
+         hints above the Japanese text on or off. Keep it to the one word. -->
+    <string name="header_action_furigana">Furigana</string>
+
+    <!-- The same menu row when the source is Chinese: tapping it turns the
+         romanized pinyin readings above the Chinese text on or off. Keep it
+         to the one word. -->
+    <string name="header_action_pinyin">Pinyin</string>
+
+    <!-- Name of the speaker action's row in a section header's "More
+         actions" menu: tapping it reads the original (game) text aloud, and
+         tapping it again while it reads stops it. A short command. -->
+    <string name="header_action_read_aloud">Read aloud</string>
+
+    <!-- Name of the pencil action's row in a section header's "More
+         actions" menu: tapping it opens the original (game) text for
+         editing, to fix what the text recognition misread. A short
+         command. -->
+    <string name="header_action_edit">Edit text</string>
 
     <!-- contentDescription for the eye-toggle on the original-text
          row. -->
@@ -2659,7 +2999,10 @@ It is optional: grammar matching already works without it.</string>
     <string name="cd_toggle_grammar_visibility">Toggle grammar visibility</string>
 
     <!-- contentDescription for the × close button on the word-detail
-         bottom sheet. -->
+         bottom sheet and on the translation error pill at the top of the
+         game screen, and for the invisible area around a results popover
+         (the text-size slider, the "More actions" menu) whose tap closes
+         it. -->
     <string name="cd_close">Close</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
@@ -3415,6 +3758,19 @@ It is optional: grammar matching already works without it.</string>
          (already locale-aware via Locale.displayName().uppercase()). -->
     <string name="tts_voices_section_header"><xliff:g id="language" example="JAPANESE">%1$s</xliff:g> VOICES</string>
 
+    <!-- Title inside the global TTS speed cell, shown at the top of the TTS
+         voice picker and under the Text-to-speech section header of the
+         Anki audio picker. -->
+    <string name="tts_speed_title">Speed</string>
+
+    <!-- Scale labels under the speed slider: multiplier notation for the
+         slow edge (2x slower) and fast edge (2x faster), plus the dot mark
+         repeated under each snap detent (1.5x slower, 1x, 1.5x faster).
+         Numeric/symbolic notation, never translated. -->
+    <string name="tts_speed_slow_label" translatable="false">-2x</string>
+    <string name="tts_speed_detent_dot" translatable="false">·</string>
+    <string name="tts_speed_fast_label" translatable="false">2x</string>
+
     <!-- Title of the dialog shown when the user tries to read a word
          aloud but no TTS engine is installed. -->
     <string name="tts_no_engine_dialog_title">No Text-to-Speech</string>
@@ -3607,6 +3963,15 @@ It is optional: grammar matching already works without it.</string>
     <string name="settings_debug_show_detection_log">Show detection log</string>
     <string name="settings_debug_log_pinhole">Log live-mode pinhole metrics</string>
     <string name="settings_debug_save_ocr_seed">Save OCR captures as seeds</string>
+    <!-- Switch-row title in the debug section of Settings. Toggles whether very short
+         OCR texts (menu items) are translated by the on-device engine instead of the
+         online service. Debug-build-only surface. -->
+    <string name="settings_debug_short_text_routing">Short-text offline routing</string>
+    <!-- Settings dialog, debug section: switch-row title. Forces the on-device
+         LLM to load its weights through the mmap (reclaimable) path that is
+         normally taken only below the model's memory floor, so that path can be
+         tested on a high-memory device. Debug-build-only surface. -->
+    <string name="settings_debug_force_mmap_weights">Force mmap weight loading (on-device LLM)</string>
     <string name="settings_debug_log_grouping">Log OCR grouping decisions</string>
     <!-- Settings dialog, debug section: switch-row title. Rollback switch:
          while ON, slanted-text detection uses the old 10-degree threshold

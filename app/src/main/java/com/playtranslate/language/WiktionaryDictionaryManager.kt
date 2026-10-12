@@ -12,6 +12,7 @@ import com.playtranslate.model.Example
 import com.playtranslate.model.Headword
 import com.playtranslate.model.PosVocabulary
 import com.playtranslate.model.Sense
+import com.playtranslate.model.expressionFrom
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -36,9 +37,10 @@ import java.io.File
  *  3. Stem-form fallback supplied by [LatinEngine] (Snowball Porter).
  *  4. Silent pass-through on miss (per decision 7 in the architecture doc).
  *
- * No de-inflection table. No N-gram phrase batching. No `kanjidic` table —
- * the Wiktionary pack's `kanjidic` is empty by design, and this manager
- * does not probe or query it.
+ * No de-inflection table. No `kanjidic` table — the Wiktionary pack's
+ * `kanjidic` is empty by design, and this manager does not probe or query it.
+ * [phrasesExist] is the batched membership gate for tap-time multi-word
+ * expression matching ([LatinEngine.longestPhraseAt]).
  *
  * Process-scoped singleton keyed on [SourceLangId]. One instance per source
  * language (EN, ES, FR, …, KO), each opening its own SQLite pack.
@@ -155,6 +157,33 @@ class WiktionaryDictionaryManager private constructor(
         words
     }
 
+    /**
+     * Batch existence gate for multi-word expression matching
+     * ([LatinEngine.longestPhraseAt] and [LatinEngine.phrasesIn]): the
+     * subset of [candidates] with a
+     * lemma (position 0) or `form_of` alias (position 2) headword row — so
+     * inflected phrase surfaces ("gave up") gate through their alias rows
+     * exactly like the follow-up [lookup] will resolve them. Position-1 STEM
+     * rows are deliberately excluded, unlike [lookup]'s surface tier: the
+     * build Snowball-stems the whole joined phrase, producing garbage keys
+     * that collide with real word sequences ("that is" stems to "that i",
+     * which would phrase-match every "that I" in ordinary text — the en pack
+     * carries ~40k such stem-only multi-word keys). Nothing legitimate is
+     * lost: lemmas gate via 0, inflected surfaces via 2. Each candidate is
+     * lowercased with the pack's locale for the query; the returned set
+     * contains the candidates AS PASSED. Keys whose entries are pure `&lit`
+     * cross-reference stubs are also excluded — see [phrasesExistQuery].
+     * Empty when the pack isn't openable, degrading callers to single-word
+     * behavior.
+     */
+    suspend fun phrasesExist(candidates: Set<String>): Set<String> = withContext(Dispatchers.IO) {
+        if (candidates.isEmpty()) return@withContext emptySet()
+        val database = ensureOpen() ?: return@withContext emptySet()
+        val byLower = candidates.groupBy { it.lowercase(locale) }
+        phrasesExistQuery(database, byLower.keys)
+            .flatMapTo(mutableSetOf()) { byLower[it].orEmpty() }
+    }
+
     fun close() {
         db?.close()
         db = null
@@ -215,13 +244,19 @@ class WiktionaryDictionaryManager private constructor(
      * match position (0 = direct lemma, 1 = stem, 2 = form_of alias). The
      * caller uses that position to derive the POS marker shown to users.
      *
-     * Sort order is freq_score DESC → match position ASC → entry_id ASC.
-     *  - `pos ASC` keeps direct-lemma matches (position 0) ahead of stem
-     *    matches (1) and `form_of` aliases (2). Otherwise a query string
-     *    that's both a standalone lemma AND an inflected alias of another
-     *    entry could surface the alias as primary, mislabeling the popup
-     *    header (e.g. "ran" → "run" with an inflection note instead of
-     *    "ran" itself).
+     * Sort order is match position ASC → freq_score DESC → entry_id ASC.
+     *  - `pos ASC` FIRST keeps direct-lemma matches (position 0) ahead of
+     *    stem matches (1) and `form_of` aliases (2). Otherwise a query
+     *    string that's both a standalone lemma AND an inflected alias of
+     *    another entry surfaces the alias's parent as primary, mislabeling
+     *    the popup header with a different word. Position must dominate
+     *    frequency: with freq_score sorted first, any alias parent more
+     *    frequent than the word's own entry won — "hinder" surfaced "hind",
+     *    "running" surfaced "run", German "es" surfaced "das" (4k affected
+     *    surfaces in the en pack alone). The alias parent still appears in
+     *    the response, after the word's own entries, with its [inflected]
+     *    marker.
+     *  - `freq_score DESC` ranks entries within a position tier.
      *  - `entry_id ASC` is the freq_score tiebreaker. Wiktionary sections
      *    are typically Noun → Verb → Adjective → Interjection in
      *    dictionary order; the kaikki extractor emits them in that order
@@ -253,7 +288,7 @@ class WiktionaryDictionaryManager private constructor(
                 "JOIN entry e ON e.id = h.entry_id " +
                 "WHERE h.text = ?$positionClause " +
                 "GROUP BY h.entry_id " +
-                "ORDER BY e.freq_score DESC, pos ASC, h.entry_id ASC LIMIT 8",
+                "ORDER BY pos ASC, e.freq_score DESC, h.entry_id ASC LIMIT 8",
             arrayOf(word)
         ).use { c ->
             while (c.moveToNext()) results.add(c.getLong(0) to c.getInt(1))
@@ -383,6 +418,7 @@ class WiktionaryDictionaryManager private constructor(
             jlpt = emptyList(),
             headwords = headwords,
             senses = senses,
+            isExpression = expressionFrom(senses),
             // DB stores 0-100 (fine-grained, used for ORDER BY). Normalize to
             // 0-5 for display consistency with JMdict's 0-5 star scale.
             freqScore = (freqScore * 5 / 100).coerceIn(0, 5),
@@ -391,6 +427,50 @@ class WiktionaryDictionaryManager private constructor(
 
     companion object {
         private const val TAG = "WiktionaryDictMgr"
+
+        /** Wiktionary's `&lit` cross-reference template rendering — the
+         *  "definition" of a phrase Wiktionary itself marks non-idiomatic
+         *  ("Used other than figuratively or idiomatically: see do, you.").
+         *  An entry whose every sense starts with this defines nothing. */
+        private const val LIT_STUB_PREFIX = "Used other than figuratively or idiomatically"
+
+        /** SQL core of [phrasesExist], separated so tests drive it against a
+         *  fixture DB. Returns the subset of (already locale-lowercased)
+         *  [keys] with a position-0 lemma or position-2 alias row —
+         *  position-1 phrase stems are garbage match keys (see
+         *  [phrasesExist]) and position-3 fold rows stay fallback-only —
+         *  whose entry carries at least one REAL sense: keys reaching only
+         *  `&lit` cross-reference stubs ([LIT_STUB_PREFIX] — the en pack has
+         *  179 such all-stub phrases, "do you", "want to", …) are dropped at
+         *  candidacy, so the longest-match tie-breaks fall through to the
+         *  next candidate instead of surfacing an entry that defines
+         *  nothing. Entries with a stub ALONGSIDE real senses ("open the
+         *  door") still gate. The prefix test is per sense ROW (a row's
+         *  tab-joined glosses mixing a stub prefix with a real gloss would
+         *  read as stub — doesn't occur: `&lit` is always its own sense).
+         *  Glosses are English in every pack (all built from en-Wiktionary),
+         *  so one prefix covers all languages. FUTURE PACK REBUILD: drop
+         *  all-stub multi-word entries at build time
+         *  (scripts/wiktionary_filters.py) so typed lookup stops surfacing
+         *  them too; this gate then filters nothing and stays as a safety.
+         *  Chunked so an oversized caller can't blow SQLite's bind-argument
+         *  limit (phrase windows pass a handful). */
+        internal fun phrasesExistQuery(db: SQLiteDatabase, keys: Collection<String>): Set<String> {
+            val found = mutableSetOf<String>()
+            for (chunk in keys.chunked(500)) {
+                val placeholders = chunk.joinToString(",") { "?" }
+                db.rawQuery(
+                    "SELECT DISTINCT h.text FROM headword h" +
+                        " WHERE h.position IN (0, 2) AND h.text IN ($placeholders)" +
+                        " AND EXISTS (SELECT 1 FROM sense s WHERE s.entry_id = h.entry_id" +
+                        " AND s.glosses NOT LIKE ?)",
+                    (chunk + "$LIT_STUB_PREFIX%").toTypedArray(),
+                ).use { c ->
+                    while (c.moveToNext()) found.add(c.getString(0))
+                }
+            }
+            return found
+        }
 
         @SuppressLint("StaticFieldLeak")
         private val instances = java.util.concurrent.ConcurrentHashMap<SourceLangId, WiktionaryDictionaryManager>()

@@ -6,18 +6,18 @@ import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import androidx.core.animation.doOnEnd
+import androidx.core.graphics.ColorUtils
 import android.net.Uri
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
-import android.widget.Spinner
 import android.widget.TextView
 import androidx.fragment.app.DialogFragment
 import androidx.fragment.app.Fragment
@@ -37,52 +37,35 @@ import com.playtranslate.themeColor
 import com.playtranslate.tts.TtsEngine
 import com.playtranslate.tts.TtsVoiceLabels
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
 import androidx.core.net.toUri
 import androidx.core.view.isVisible
 import androidx.core.view.isGone
 
 /**
- * Loads AnkiDroid decks into [spinner] and auto-saves the selection to [Prefs].
- * [onLoaded] is called with the ordered list of deck entries once loaded.
- *
- * No-ops if AnkiDroid is not installed or permission has not been granted.
- * Must be called from a Fragment with a live [viewLifecycleOwner].
+ * True when a Fragment view teardown is provably FINAL for files this
+ * surface owns (screenshot pins, game-audio snapshots): the activity is
+ * finishing (finished activities are never restored), or the teardown ran
+ * with no state saved AND the host not even stopped (plain dismissal while
+ * resumed — no bundle exists that could recreate this surface). Everything
+ * else is a potential saved-state destroy — the activity released while
+ * stopped behind the trim editor / audio picker, memory pressure,
+ * don't-keep-activities — and MUST keep the files: the just-saved bundle
+ * references them and the restored instance re-owns them. Both clauses
+ * matter: isStateSaved alone is not "a bundle exists" (FragmentManager
+ * reports true for a merely-stopped host, so finish-from-stopped would leak
+ * every file to the sweep), and isFinishing alone misses resumed-state
+ * dismissal. Process death skips teardown entirely; a restore that never
+ * happens is the orphan sweep's job. Don't replace this with a hand-tracked
+ * flag or an isChangingConfigurations proxy — those enumerate single
+ * recreation paths and re-open the deleted-snapshot-on-restore hole.
  */
-fun Fragment.loadAnkiDecksInto(
-    spinner: Spinner,
-    onLoaded: (entries: List<Map.Entry<Long, String>>) -> Unit
-) {
-    viewLifecycleOwner.lifecycleScope.launch {
-        val prefs       = Prefs(requireContext())
-        val ankiManager = AnkiManager(requireContext())
-        if (!ankiManager.isAnkiDroidInstalled() || !ankiManager.hasPermission()) return@launch
-
-        val decks = withContext(Dispatchers.IO) { ankiManager.getDecks() }
-        if (decks.isEmpty()) return@launch
-
-        val entries = decks.entries.toList()
-        spinner.adapter = ArrayAdapter(
-            requireContext(),
-            android.R.layout.simple_spinner_dropdown_item,
-            entries.map { it.value }
-        )
-        val savedIdx = entries.indexOfFirst { it.key == prefs.ankiDeckId }.takeIf { it >= 0 } ?: 0
-        spinner.setSelection(savedIdx)
-
-        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>, v: View?, pos: Int, id: Long) {
-                val entry = entries.getOrNull(pos) ?: return
-                prefs.ankiDeckId   = entry.key
-                prefs.ankiDeckName = entry.value
-            }
-            override fun onNothingSelected(parent: AdapterView<*>) {}
-        }
-
-        onLoaded(entries)
-    }
-}
+fun Fragment.isFinalMediaTeardown(): Boolean =
+    activity?.isFinishing == true || !isStateSaved
 
 /**
  * Selected-row background for grouped-card pickers (deck + card type).
@@ -137,34 +120,19 @@ fun ankiGroupHeader(parent: LinearLayout, title: String, suffix: String? = null)
     parent.addView(header)
 }
 
-/** Adds a flat MaterialCardView with the design-system stroke + radius to
- *  [parent] and returns its inner vertical LinearLayout. Mirrors the
- *  pattern Word Detail uses so headers, dividers, and rows compose
- *  consistently across sheets. */
+/** Adds a flat design-system group card ([PtGroupCard]) to [parent] and
+ *  returns it as the row container. Mirrors the pattern Word Detail uses so
+ *  headers, dividers, and rows compose consistently across sheets — and
+ *  plain-view, so overlay-hosted surfaces compose the same card. */
 fun ankiGroupCard(parent: LinearLayout): LinearLayout {
-    val ctx = parent.context
-    val density = ctx.resources.displayMetrics.density
-    val card = com.google.android.material.card.MaterialCardView(ctx).apply {
-        setCardBackgroundColor(ctx.themeColor(R.attr.ptCard))
-        radius = ctx.resources.getDimension(R.dimen.pt_radius)
-        cardElevation = 0f
-        strokeColor = ctx.themeColor(R.attr.ptDivider)
-        strokeWidth = (1 * density).toInt()
+    val card = PtGroupCard(parent.context).apply {
         layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         )
     }
-    val inner = LinearLayout(ctx).apply {
-        orientation = LinearLayout.VERTICAL
-        layoutParams = ViewGroup.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        )
-    }
-    card.addView(inner)
     parent.addView(card)
-    return inner
+    return card
 }
 
 /** Adds a 1dp inset divider inside a group card. The default 16dp inset
@@ -201,8 +169,30 @@ fun Fragment.addAnkiSection(
     mode: CardMode,
     onDeckChanged: () -> Unit,
     onCardTypeChanged: () -> Unit,
+) = addAnkiSection(
+    requireContext(),
+    viewLifecycleOwner.lifecycleScope,
+    parent,
+    // The Fragment host presents the pickers as DialogFragments; a
+    // workspace host pushes its picker pages instead.
+    openDeckPicker = { onPicked -> showAnkiDeckPicker(onPicked) },
+    openCardTypePicker = { onPicked -> showAnkiCardTypePicker(mode, onPicked) },
+    onDeckChanged = onDeckChanged,
+    onCardTypeChanged = onCardTypeChanged,
+)
+
+/** Host-agnostic core of [Fragment.addAnkiSection]: the picker
+ *  presentations are injected, so the same section renders inside the
+ *  review sheets and the floating workspace's editor page. */
+fun addAnkiSection(
+    ctx: Context,
+    scope: CoroutineScope,
+    parent: LinearLayout,
+    openDeckPicker: (onPicked: (deckId: Long, deckName: String) -> Unit) -> Unit,
+    openCardTypePicker: (onPicked: (modelId: Long, modelName: String) -> Unit) -> Unit,
+    onDeckChanged: () -> Unit,
+    onCardTypeChanged: () -> Unit,
 ) {
-    val ctx = requireContext()
     val density = ctx.resources.displayMetrics.density
     val inflater = android.view.LayoutInflater.from(ctx)
     val prefs = Prefs(ctx)
@@ -216,6 +206,10 @@ fun Fragment.addAnkiSection(
     val deckRow = inflater.inflate(R.layout.settings_row_value, card, false)
     val deckTitle = deckRow.findViewById<TextView>(R.id.tvRowTitle)
     val deckValue = deckRow.findViewById<TextView>(R.id.tvRowValue)
+    // The row chevron's app:tint is AppCompat-only — a workspace page's
+    // plain inflater drops it. Tint in code for both hosts.
+    deckRow.findViewById<ImageView>(R.id.ivRowChevron).imageTintList =
+        ColorStateList.valueOf(muted)
     deckTitle.text = ctx.getString(R.string.anki_deck_row_label)
     fun applyDeckValue(name: String) {
         if (name.isBlank()) {
@@ -228,7 +222,7 @@ fun Fragment.addAnkiSection(
     }
     applyDeckValue(prefs.ankiDeckName)
     deckRow.setOnClickListener {
-        showAnkiDeckPicker { _, name ->
+        openDeckPicker { _, name ->
             applyDeckValue(name)
             onDeckChanged()
         }
@@ -248,6 +242,8 @@ fun Fragment.addAnkiSection(
     val cardTypeRow = inflater.inflate(R.layout.settings_row_value, card, false)
     val cardTypeTitle = cardTypeRow.findViewById<TextView>(R.id.tvRowTitle)
     val cardTypeValue = cardTypeRow.findViewById<TextView>(R.id.tvRowValue)
+    cardTypeRow.findViewById<ImageView>(R.id.ivRowChevron).imageTintList =
+        ColorStateList.valueOf(muted)
     cardTypeTitle.text = ctx.getString(R.string.anki_card_type_row_label)
     fun applyCardTypeValue(name: String) {
         if (name.isBlank()) {
@@ -260,7 +256,7 @@ fun Fragment.addAnkiSection(
     }
     applyCardTypeValue(prefs.ankiModelName)
     cardTypeRow.setOnClickListener {
-        showAnkiCardTypePicker(mode) { _, name ->
+        openCardTypePicker { _, name ->
             applyCardTypeValue(name)
             onCardTypeChanged()
         }
@@ -269,7 +265,7 @@ fun Fragment.addAnkiSection(
 
     // -- Healing pass: rectify deck + model selections against
     //    AnkiDroid's live state. Runs once on view-created.
-    viewLifecycleOwner.lifecycleScope.launch {
+    scope.launch {
         val ankiManager = AnkiManager(ctx)
         if (!ankiManager.isAnkiDroidInstalled() || !ankiManager.hasPermission()) return@launch
         val (decks, models) = withContext(Dispatchers.IO) {
@@ -325,27 +321,34 @@ class AnkiAudioToggleHandle internal constructor(
      *  index → "Voice N" resolution requires [TtsEngine.voicesFor]
      *  which suspends on engine bind. */
     fun refreshPillLabel(
-        fragment: Fragment,
+        scope: CoroutineScope,
         lang: SourceLangId,
         voice: String?,
     ) {
         val p = pill ?: return
-        fragment.viewLifecycleOwner.lifecycleScope.launch {
+        scope.launch {
             p.setLabel(computeVoicePillLabel(p.view.context, lang, voice))
         }
     }
 
     /** Refresh the pill from an [AudioSelection] (multi-source Anki flow). */
     fun refreshPillLabel(
-        fragment: Fragment,
+        scope: CoroutineScope,
         lang: SourceLangId,
         selection: AudioSelection,
     ) {
         val p = pill ?: return
-        fragment.viewLifecycleOwner.lifecycleScope.launch {
+        scope.launch {
             p.setLabel(AudioSelections.label(p.view.context, selection, lang))
         }
     }
+
+    /** Fragment-host conveniences (view-lifecycle scope). */
+    fun refreshPillLabel(fragment: Fragment, lang: SourceLangId, voice: String?) =
+        refreshPillLabel(fragment.viewLifecycleOwner.lifecycleScope, lang, voice)
+
+    fun refreshPillLabel(fragment: Fragment, lang: SourceLangId, selection: AudioSelection) =
+        refreshPillLabel(fragment.viewLifecycleOwner.lifecycleScope, lang, selection)
 }
 
 /** Pill label for a cell: the [AudioSelection] label in multi-source mode,
@@ -403,8 +406,27 @@ fun Fragment.addAnkiAudioSection(
     onVoicePillTap: (() -> Unit)? = null,
     selection: (() -> AudioSelection)? = null,
     audioRequest: (() -> AudioRequest)? = null,
+): AnkiAudioToggleHandle = addAnkiAudioSection(
+    requireContext(), viewLifecycleOwner.lifecycleScope, parent, lang, rowLabel,
+    previewText, initialChecked, onCheckedChange, voiceOverride, onVoicePillTap,
+    selection, audioRequest,
+)
+
+/** Host-agnostic core of [Fragment.addAnkiAudioSection]. */
+fun addAnkiAudioSection(
+    ctx: Context,
+    scope: CoroutineScope,
+    parent: LinearLayout,
+    lang: SourceLangId,
+    rowLabel: String,
+    previewText: () -> String,
+    initialChecked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    voiceOverride: () -> String? = { null },
+    onVoicePillTap: (() -> Unit)? = null,
+    selection: (() -> AudioSelection)? = null,
+    audioRequest: (() -> AudioRequest)? = null,
 ): AnkiAudioToggleHandle {
-    val ctx = requireContext()
     val inflater = android.view.LayoutInflater.from(ctx)
 
     ankiGroupHeader(parent, ctx.getString(R.string.anki_group_audio))
@@ -426,17 +448,17 @@ fun Fragment.addAnkiAudioSection(
     }
     val switch = audioRow.findViewById<MaterialSwitch>(R.id.switchRowToggle)
     val chip = AnkiAudioPreviewChip(
-        this, lang, previewText, voiceOverride,
+        ctx, scope, lang, previewText, voiceOverride,
         selectionProvider = selection, requestProvider = audioRequest,
     )
     audioRow.addView(chip.view, 0)
     val pill: VoicePillView? = if (onVoicePillTap != null) {
-        val p = VoicePillView(this, lang)
+        val p = VoicePillView(ctx, lang)
         p.setOnTap(onVoicePillTap)
         // Insert immediately after the chip — index 1, before the title TextView.
         audioRow.addView(p.view, 1)
         // Initial label fills in async (engine bind suspends).
-        viewLifecycleOwner.lifecycleScope.launch {
+        scope.launch {
             p.setLabel(audioPillLabel(ctx, lang, selection, voiceOverride))
         }
         p
@@ -469,10 +491,11 @@ fun Fragment.addAnkiAudioSection(
  * Inflates a single 44dp audio row — preview chip, [label], and an
  * include-on-card switch — into [parent] without wrapping it in its own
  * group card or header. Used by the sentence-card flow to inline the
- * sentence audio toggle inside the Original group and to attach
- * per-target-word audio toggles directly beneath their word rows.
- * [label] is the text being spoken (the word or sentence); the switch
- * itself conveys the "include on card" action.
+ * sentence audio toggle inside the Original group and to put each
+ * target word's audio toggle inside that word's row, between its title
+ * line and its definition. [label] is the row's title: the sentence being
+ * spoken in the Original group, "Include audio" in a word's row (whose
+ * title line already names the word).
  *
  * Stripped-down sibling of [addAnkiAudioSection]: no Voice sub-row
  * (Voice lives in the top Anki section now via [addAnkiSection]'s
@@ -497,8 +520,29 @@ fun Fragment.addCompactAudioToggleRow(
     /** See [AnkiAudioPreviewChip]'s playOverride — host-played preview
      *  (the sentence cell's inline game-audio playback). */
     playOverride: (suspend (onStart: (() -> Unit)?) -> PlayOutcome?)? = null,
+): AnkiAudioToggleHandle = addCompactAudioToggleRow(
+    requireContext(), viewLifecycleOwner.lifecycleScope, parent, lang, label,
+    previewText, initialChecked, onCheckedChange, voiceOverride, onVoicePillTap,
+    prepare, selection, audioRequest, playOverride,
+)
+
+/** Host-agnostic core of [Fragment.addCompactAudioToggleRow]. */
+fun addCompactAudioToggleRow(
+    ctx: Context,
+    scope: CoroutineScope,
+    parent: LinearLayout,
+    lang: SourceLangId,
+    label: String,
+    previewText: () -> String,
+    initialChecked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    voiceOverride: () -> String? = { null },
+    onVoicePillTap: (() -> Unit)? = null,
+    prepare: suspend (String) -> String = { it },
+    selection: (() -> AudioSelection)? = null,
+    audioRequest: (() -> AudioRequest)? = null,
+    playOverride: (suspend (onStart: (() -> Unit)?) -> PlayOutcome?)? = null,
 ): AnkiAudioToggleHandle {
-    val ctx = requireContext()
     val inflater = android.view.LayoutInflater.from(ctx)
     val density = ctx.resources.displayMetrics.density
 
@@ -521,16 +565,16 @@ fun Fragment.addCompactAudioToggleRow(
     }
     val switch = row.findViewById<MaterialSwitch>(R.id.switchRowToggle)
     val chip = AnkiAudioPreviewChip(
-        this, lang, previewText, voiceOverride, prepare,
+        ctx, scope, lang, previewText, voiceOverride, prepare,
         selectionProvider = selection, requestProvider = audioRequest,
         playOverride = playOverride,
     )
     row.addView(chip.view, 0)
     val pill: VoicePillView? = if (onVoicePillTap != null) {
-        val p = VoicePillView(this, lang)
+        val p = VoicePillView(ctx, lang)
         p.setOnTap(onVoicePillTap)
         row.addView(p.view, 1)
-        viewLifecycleOwner.lifecycleScope.launch {
+        scope.launch {
             p.setLabel(audioPillLabel(ctx, lang, selection, voiceOverride))
         }
         p
@@ -618,9 +662,15 @@ fun Fragment.showAnkiCardTypeMappingDialog(
 
 /**
  * Builds a two-up pill segmented toggle inside [container] (a FrameLayout).
- * Mirrors the [SettingsRenderer]'s buildPillToggle pattern: surface-tinted
- * track, sliding accent indicator, transparent labels on top. Used in the
- * Anki review toolbar to switch between Sentence and Word card flows.
+ * Mirrors the [SettingsRenderer]'s buildPillToggle pattern (sliding accent
+ * indicator, transparent labels on top) with the track one step further off
+ * its ground: every host draws it on the ptBg window ground (the overlay
+ * workspace card, the results activity's toolbar, the Anki review sheet),
+ * where buildPillToggle's ptSurface track all but vanishes (dark: #141719 on
+ * #0B0D0E), so the track is ptElevated, the fill the capture panel's header
+ * toggle uses on the same ground. Used in the Anki review toolbar to switch
+ * between Sentence and Word card flows, and by the lookup page's
+ * Sentence | word pill.
  *
  * @param leftLabel  Label for the left segment (e.g. "Sentence").
  * @param rightLabel Label for the right segment (e.g. "Word").
@@ -643,7 +693,7 @@ fun buildAnkiModeToggle(
     val trackPad = (3 * density).toInt()
     val pillH = (30 * density).toInt()
 
-    val surfaceColor = ctx.themeColor(R.attr.ptSurface)
+    val trackColor = ctx.themeColor(R.attr.ptElevated)
     val accentColor = ctx.themeColor(R.attr.ptAccent)
     val accentOnColor = ctx.themeColor(R.attr.ptAccentOn)
     val mutedColor = ctx.themeColor(R.attr.ptTextMuted)
@@ -654,7 +704,7 @@ fun buildAnkiModeToggle(
             FrameLayout.LayoutParams.WRAP_CONTENT
         )
         background = GradientDrawable().apply {
-            setColor(surfaceColor)
+            setColor(trackColor)
             cornerRadius = trackRadius
         }
         setPadding(trackPad, trackPad, trackPad, trackPad)
@@ -694,6 +744,10 @@ fun buildAnkiModeToggle(
             setTextColor(if (isActive) accentOnColor else mutedColor)
             layoutParams = LinearLayout.LayoutParams(0, pillH, 1f)
             setPadding((14 * density).toInt(), 0, (14 * density).toInt(), 0)
+            // One line, ellipsized: the lookup page's right segment is the
+            // looked-up word itself, which can outgrow a 220dp track.
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
             isClickable = true
             isFocusable = true
         }
@@ -704,15 +758,17 @@ fun buildAnkiModeToggle(
     container.addView(track)
 
     var currentIdx = initialIdx
+    var sliding = false
     // Resize + reposition the indicator on every layout pass: the
     // initial measurement (via `pillRow.post`) wasn't enough because
     // the activity now handles config changes itself, so a rotation
     // resizes the toolbar without recreating the toggle. We need the
     // indicator width / translation to track the new pill width as
     // pills resize. Guarded against no-op writes to avoid a relayout
-    // loop.
+    // loop, and stood down while a click's slide runs — a stray layout
+    // pass would snap the indicator to its target mid-animation.
     pillRow.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-        if (pills.isEmpty()) return@addOnLayoutChangeListener
+        if (pills.isEmpty() || sliding) return@addOnLayoutChangeListener
         val pillW = pills[0].width
         if (pillW <= 0) return@addOnLayoutChangeListener
         val targetX = (pillW * currentIdx).toFloat()
@@ -729,16 +785,36 @@ fun buildAnkiModeToggle(
             if (idx == currentIdx) return@setOnClickListener
             currentIdx = idx
             val pillW = pills[0].width
+            // One motion, no flash: the labels crossfade between their
+            // active/muted colors over the same 200ms the indicator slides
+            // — an instant text swap reads as the highlight jumping to the
+            // new segment before the pill arrives. The bold swap lands at
+            // the end (binary anyway, and it re-renders the glyphs).
+            sliding = true
             indicator.animate()
                 .translationX((pillW * idx).toFloat())
                 .setDuration(200)
                 .setInterpolator(android.view.animation.DecelerateInterpolator())
+                .withEndAction { sliding = false }
                 .start()
-            pills.forEachIndexed { i, p ->
-                val active = i == idx
-                p.setTextColor(if (active) accentOnColor else mutedColor)
-                p.typeface = Typeface.create("sans-serif-medium",
-                    if (active) Typeface.BOLD else Typeface.NORMAL)
+            val startColors = pills.map { it.currentTextColor }
+            android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 200
+                interpolator = android.view.animation.DecelerateInterpolator()
+                addUpdateListener { va ->
+                    val f = va.animatedFraction
+                    pills.forEachIndexed { i, p ->
+                        val end = if (i == idx) accentOnColor else mutedColor
+                        p.setTextColor(ColorUtils.blendARGB(startColors[i], end, f))
+                    }
+                }
+                doOnEnd {
+                    pills.forEachIndexed { i, p ->
+                        p.typeface = Typeface.create("sans-serif-medium",
+                            if (i == idx) Typeface.BOLD else Typeface.NORMAL)
+                    }
+                }
+                start()
             }
             onSelect(idx == 0)
         }
@@ -816,6 +892,14 @@ fun showAnkiNotInstalledDialog(
     configureAnkiNotInstalled(
         context, OverlayAlert.Builder(context, overlayHost, wm, displayId),
     ).showAsOverlay()
+}
+
+/** In-window variant — for the floating workspace's modal layer, where a
+ *  sibling overlay window would be dimmed by the MediaProjection QTI clamp
+ *  and steal the workspace's taps (see [FontSizeRangePopover]). */
+fun showAnkiNotInstalledDialog(context: Context, parent: ViewGroup) {
+    configureAnkiNotInstalled(context, OverlayAlert.Builder(context))
+        .showInParent(parent)
 }
 
 /**
@@ -962,23 +1046,76 @@ fun DialogFragment.applyAnkiSendResult(
     result: AnkiSendResult,
     onSuccess: () -> Unit,
     onRestore: () -> Unit,
+) = applyAnkiSendResult(
+    requireContext(), result,
+    presentAlert = { it.showInDialog(requireDialog()) },
+    onSuccess = onSuccess,
+    onRestore = onRestore,
+)
+
+/** Host-agnostic core of [DialogFragment.applyAnkiSendResult]:
+ *  [presentAlert] is the failure alert's terminal — the sheet's own dialog
+ *  window for fragment hosts, the workspace's modal layer otherwise. */
+fun applyAnkiSendResult(
+    ctx: Context,
+    result: AnkiSendResult,
+    presentAlert: (OverlayAlert.Builder) -> Unit,
+    onSuccess: () -> Unit,
+    onRestore: () -> Unit,
 ) {
     when (result) {
         is AnkiSendResult.Success -> onSuccess()
         is AnkiSendResult.Failed -> {
-            val ctx = requireContext()
-            OverlayAlert.Builder(ctx)
-                .setTitle(getString(R.string.anki_send_failed_title))
-                .setMessage(result.message ?: getString(result.messageRes))
-                .addButton(
-                    getString(android.R.string.ok),
-                    ctx.themeColor(R.attr.ptAccent),
-                    ctx.themeColor(R.attr.ptAccentOn),
-                ) {}
-                .showInDialog(requireDialog())
+            presentAlert(
+                OverlayAlert.Builder(ctx)
+                    .setTitle(ctx.getString(R.string.anki_send_failed_title))
+                    .setMessage(result.message ?: ctx.getString(result.messageRes))
+                    .addButton(
+                        ctx.getString(android.R.string.ok),
+                        ctx.themeColor(R.attr.ptAccent),
+                        ctx.themeColor(R.attr.ptAccentOn),
+                    ) {}
+            )
             onRestore()
         }
         is AnkiSendResult.NeedsMapping -> onRestore()
+        // The user just declined the oversize prompt — restoring the save
+        // button silently IS the requested outcome; no alert re-explains it.
+        is AnkiSendResult.Declined -> onRestore()
     }
+}
+
+/**
+ * Suspend bridge for [Context.dispatchSendToAnki]'s `oversizePrompt`: an
+ * [OverlayAlert] asking whether to save the over-budget card with
+ * plain-text definitions. Returns true to send simplified, false to
+ * abort. [presentAlert] is the same host terminal [applyAnkiSendResult]
+ * uses (the sheet's dialog window, the workspace's modal layer), so the
+ * prompt layers wherever that host's failure alert would.
+ *
+ * Every non-confirm path — Cancel button, scrim tap, back press, and a
+ * host teardown ([OverlayAlert.DismissReason.LIFECYCLE_PAUSE]) — resolves
+ * false: a card the user never confirmed must not send. The isActive
+ * guard covers the teardown case, where the awaiting coroutine may
+ * already be cancelled when the alert's cancel handler fires.
+ */
+suspend fun awaitOversizeConsent(
+    ctx: Context,
+    presentAlert: (OverlayAlert.Builder) -> Unit,
+): Boolean = suspendCancellableCoroutine { cont ->
+    fun finish(proceed: Boolean) {
+        if (cont.isActive) cont.resume(proceed)
+    }
+    presentAlert(
+        OverlayAlert.Builder(ctx)
+            .setTitle(ctx.getString(R.string.anki_card_too_large_title))
+            .setMessage(ctx.getString(R.string.anki_card_too_large_prompt))
+            .addButton(
+                ctx.getString(R.string.anki_card_too_large_simplify),
+                ctx.themeColor(R.attr.ptAccent),
+                ctx.themeColor(R.attr.ptAccentOn),
+            ) { finish(true) }
+            .addCancelButton(ctx.getString(R.string.btn_cancel)) { finish(false) }
+    )
 }
 

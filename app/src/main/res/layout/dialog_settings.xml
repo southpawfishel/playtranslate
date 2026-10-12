@@ -269,15 +269,20 @@
                     <!-- "On the floating icon" — sits at the bottom of the
                          top section as a footer (same surface tint + hairline
                          top divider as the capture-display footer; see
-                         bg_word_tatoeba_attribution). Text formatting and
-                         the runtime dim/recolour driven by
-                         refreshCaptureLifecycleButton are unchanged from
-                         when this lived in the middle of the card. -->
+                         bg_word_tatoeba_attribution). The whole row is the
+                         tap target for the gesture picker page (ripple on
+                         the foreground so the footer keeps its background);
+                         the chevron at the end is the affordance. The
+                         runtime dim/recolour is driven by
+                         refreshCaptureLifecycleButton. -->
                     <LinearLayout
                         android:id="@+id/rowOverlayIcon"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:background="@drawable/bg_word_tatoeba_attribution"
+                        android:foreground="?attr/selectableItemBackground"
+                        android:clickable="true"
+                        android:focusable="true"
                         android:baselineAligned="false"
                         android:gravity="center_vertical"
                         android:minHeight="@dimen/pt_row_min_height"
@@ -285,8 +290,9 @@
                         android:paddingHorizontal="@dimen/pt_row_h_padding"
                         android:paddingVertical="12dp">
 
-                        <!-- Text container: GroupHeader-styled title above a
-                             three-row gesture list. Container id is kept so
+                        <!-- Text container: GroupHeader-styled title above the
+                             icon preview and the three-line gesture table
+                             beside it. Container id is kept so
                              refreshCaptureLifecycleButton can dim or recolor
                              everything inside in lock-step. -->
                         <LinearLayout
@@ -303,97 +309,143 @@
                                 android:layout_height="wrap_content"
                                 style="@style/Text.PT.GroupHeader" />
 
-                            <!-- Three gesture rows. Verb is bold (inline <b>
-                                 in the string resource); icon to the left.
-                                 Icon tint + text colour are driven by
-                                 refreshCaptureLifecycleButton: ptText when
-                                 active, ptTextMuted when disabled (matching
-                                 the GroupHeader title). -->
                             <LinearLayout
-                                android:id="@+id/gestureList"
-                                android:layout_width="wrap_content"
+                                android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
                                 android:layout_marginTop="6dp"
-                                android:orientation="vertical">
+                                android:baselineAligned="false"
+                                android:orientation="horizontal">
 
-                                <LinearLayout
-                                    android:layout_width="wrap_content"
+                                <!-- The floating icon's visible edge slice, drawn
+                                     as if docked on this slot's start edge: the
+                                     slot is as wide as the slice and as tall as
+                                     the gesture table, and
+                                     buildOverlayIconPreview offsets the icon view
+                                     so only the slice lands inside it. -->
+                                <FrameLayout
+                                    android:id="@+id/overlayIconPreviewSlot"
+                                    android:layout_width="16dp"
+                                    android:layout_height="match_parent"
+                                    android:layout_marginEnd="12dp"
+                                    android:visibility="gone" />
+
+                                <!-- Three gesture lines, one column each for the
+                                     gesture icon, the gesture word (bold) and the
+                                     action bound to it ("Hold  Open the quick
+                                     menu"). A TableLayout so the action column
+                                     lines up across lines whatever the gesture
+                                     words' widths in a locale; that column shrinks
+                                     to wrap. refreshCaptureLifecycleButton binds
+                                     the action titles from Prefs and the colours:
+                                     lit = icon + word ptAccent, action ptText;
+                                     dim = everything ptTextHint. -->
+                                <TableLayout
+                                    android:id="@+id/gestureList"
+                                    android:layout_width="0dp"
                                     android:layout_height="wrap_content"
-                                    android:gravity="center_vertical"
-                                    android:orientation="horizontal">
+                                    android:layout_weight="1"
+                                    android:shrinkColumns="2">
 
-                                    <ImageView
-                                        android:id="@+id/iconGestureDrag"
-                                        android:layout_width="20dp"
-                                        android:layout_height="20dp"
-                                        android:layout_marginEnd="10dp"
-                                        android:importantForAccessibility="no"
-                                        android:src="@drawable/ic_touch_triple" />
+                                    <TableRow
+                                        android:gravity="center_vertical">
 
-                                    <TextView
-                                        android:id="@+id/tvGestureDrag"
-                                        android:layout_width="wrap_content"
-                                        android:layout_height="wrap_content"
-                                        android:text="@string/overlay_icon_gesture_drag"
-                                        android:textColor="?attr/ptText"
-                                        android:textSize="15sp" />
-                                </LinearLayout>
+                                        <ImageView
+                                            android:id="@+id/iconGestureDrag"
+                                            android:layout_width="20dp"
+                                            android:layout_height="20dp"
+                                            android:layout_marginEnd="10dp"
+                                            android:importantForAccessibility="no"
+                                            android:src="@drawable/ic_touch_triple" />
 
-                                <LinearLayout
-                                    android:layout_width="wrap_content"
-                                    android:layout_height="wrap_content"
-                                    android:layout_marginTop="4dp"
-                                    android:gravity="center_vertical"
-                                    android:orientation="horizontal">
+                                        <TextView
+                                            android:id="@+id/tvGestureDrag"
+                                            android:layout_width="wrap_content"
+                                            android:layout_height="wrap_content"
+                                            android:layout_marginEnd="8dp"
+                                            android:text="@string/icon_gesture_drag"
+                                            android:textColor="?attr/ptText"
+                                            android:textSize="15sp"
+                                            android:textStyle="bold" />
 
-                                    <ImageView
-                                        android:id="@+id/iconGestureHold"
-                                        android:layout_width="20dp"
-                                        android:layout_height="20dp"
-                                        android:layout_marginEnd="10dp"
-                                        android:importantForAccessibility="no"
-                                        android:src="@drawable/ic_touch_long" />
+                                        <TextView
+                                            android:id="@+id/tvActionDrag"
+                                            android:layout_width="wrap_content"
+                                            android:layout_height="wrap_content"
+                                            android:textColor="?attr/ptText"
+                                            android:textSize="15sp" />
+                                    </TableRow>
 
-                                    <TextView
-                                        android:id="@+id/tvGestureHold"
-                                        android:layout_width="wrap_content"
-                                        android:layout_height="wrap_content"
-                                        android:text="@string/overlay_icon_gesture_hold"
-                                        android:textColor="?attr/ptText"
-                                        android:textSize="15sp" />
-                                </LinearLayout>
+                                    <TableRow
+                                        android:layout_marginTop="4dp"
+                                        android:gravity="center_vertical">
 
-                                <LinearLayout
-                                    android:layout_width="wrap_content"
-                                    android:layout_height="wrap_content"
-                                    android:layout_marginTop="4dp"
-                                    android:gravity="center_vertical"
-                                    android:orientation="horizontal">
+                                        <ImageView
+                                            android:id="@+id/iconGestureHold"
+                                            android:layout_width="20dp"
+                                            android:layout_height="20dp"
+                                            android:layout_marginEnd="10dp"
+                                            android:importantForAccessibility="no"
+                                            android:src="@drawable/ic_touch_long" />
 
-                                    <ImageView
-                                        android:id="@+id/iconGestureTap"
-                                        android:layout_width="20dp"
-                                        android:layout_height="20dp"
-                                        android:layout_marginEnd="10dp"
-                                        android:importantForAccessibility="no"
-                                        android:src="@drawable/ic_touch_app" />
+                                        <TextView
+                                            android:id="@+id/tvGestureHold"
+                                            android:layout_width="wrap_content"
+                                            android:layout_height="wrap_content"
+                                            android:layout_marginEnd="8dp"
+                                            android:text="@string/icon_gesture_hold"
+                                            android:textColor="?attr/ptText"
+                                            android:textSize="15sp"
+                                            android:textStyle="bold" />
 
-                                    <TextView
-                                        android:id="@+id/tvGestureTap"
-                                        android:layout_width="wrap_content"
-                                        android:layout_height="wrap_content"
-                                        android:text="@string/overlay_icon_gesture_tap"
-                                        android:textColor="?attr/ptText"
-                                        android:textSize="15sp" />
-                                </LinearLayout>
+                                        <TextView
+                                            android:id="@+id/tvActionHold"
+                                            android:layout_width="wrap_content"
+                                            android:layout_height="wrap_content"
+                                            android:textColor="?attr/ptText"
+                                            android:textSize="15sp" />
+                                    </TableRow>
+
+                                    <TableRow
+                                        android:layout_marginTop="4dp"
+                                        android:gravity="center_vertical">
+
+                                        <ImageView
+                                            android:id="@+id/iconGestureTap"
+                                            android:layout_width="20dp"
+                                            android:layout_height="20dp"
+                                            android:layout_marginEnd="10dp"
+                                            android:importantForAccessibility="no"
+                                            android:src="@drawable/ic_touch_app" />
+
+                                        <TextView
+                                            android:id="@+id/tvGestureTap"
+                                            android:layout_width="wrap_content"
+                                            android:layout_height="wrap_content"
+                                            android:layout_marginEnd="8dp"
+                                            android:text="@string/icon_gesture_tap"
+                                            android:textColor="?attr/ptText"
+                                            android:textSize="15sp"
+                                            android:textStyle="bold" />
+
+                                        <TextView
+                                            android:id="@+id/tvActionTap"
+                                            android:layout_width="wrap_content"
+                                            android:layout_height="wrap_content"
+                                            android:textColor="?attr/ptText"
+                                            android:textSize="15sp" />
+                                    </TableRow>
+                                </TableLayout>
                             </LinearLayout>
                         </LinearLayout>
 
-                        <FrameLayout
-                            android:id="@+id/overlayIconPreviewSlot"
-                            android:layout_width="40dp"
-                            android:layout_height="80dp"
-                            android:visibility="gone" />
+                        <ImageView
+                            android:id="@+id/ivOverlayIconChevron"
+                            android:layout_width="18dp"
+                            android:layout_height="18dp"
+                            android:layout_marginStart="8dp"
+                            android:src="@drawable/ic_chevron_right"
+                            app:tint="?attr/ptTextMuted"
+                            android:importantForAccessibility="no" />
 
                     </LinearLayout>
 
@@ -582,6 +634,16 @@
 
                         <include layout="@layout/settings_row_switch"
                             android:id="@+id/rowSaveOcrSeed" />
+
+                        <include layout="@layout/settings_row_divider" />
+
+                        <include layout="@layout/settings_row_switch"
+                            android:id="@+id/rowShortTextRouting" />
+
+                        <include layout="@layout/settings_row_divider" />
+
+                        <include layout="@layout/settings_row_switch"
+                            android:id="@+id/rowForceMmapWeights" />
 
                         <include layout="@layout/settings_row_divider" />
 

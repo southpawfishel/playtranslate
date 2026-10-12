@@ -419,3 +419,181 @@ from "None" — the row means *no restriction*, not *unset*, and not *the whole 
 
 **PASS after fixes.** One ⚠️ (round 2) and one 💬 (round 1). Apostrophe escaping and
 space-before-punctuation — the recurring French mechanical risks — were clean in both rounds.
+
+## Delta review 2026-09-08 (7 keys: oversize-card guard + two debug rows)
+
+Mechanical layer verified programmatically across all 12 locales: all 7 delta names
+present, no extras, no duplicate `name=`; every `<xliff:g>` span byte-identical to EN
+(`id`, `example`, inner brand text); no `%n$s` in this delta; `<b>`, `\n`, `\{ \}`,
+`&lt;/&gt;/&amp;` counts match; no unescaped `'`/`"`; no em/en dashes. Analyzer reports
+`missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD SUCCESSFUL. No
+`<plurals>` in this delta. **No 🛑 build-breaking issues.**
+
+**Render code read before reviewing** (per the 2026-07-14 lesson): the prompt is an
+`OverlayAlert` capped at 280 dp with **full-width, vertically stacked** buttons
+(`OverlayAlert.kt` :306-341) and the debug rows are `settings_row_switch.xml` →
+`Text.PT.RowTitle`, 15 sp, **no `maxLines`, no `ellipsize`**. Nothing in this delta
+clips; long labels wrap. Accuracy was preferred over brevity throughout.
+
+**Source-side finding (EN, applies to all 12 locales) — ❌ fixed in this pass.** The
+comment on `anki_card_too_large_title` claimed the title serves "the oversize-card prompt
+AND the too-large failure alert". It does not: every failure path shows
+`anki_card_too_large_failed` either under `anki_send_failed_title` (`AnkiUiHelper.kt`
+:1060, `TranslationResultFragment.kt` :967, `WordDetailBinder.kt` :691) or with **no title
+at all** as a `LENGTH_LONG` Toast (`AnkiOneTapDispatch.kt` :162,
+`TranslationResultFragment.kt` :1082). The failure string therefore has to name its own
+subject, and was reviewed on that basis in every locale. The EN comment now says so.
+
+### Findings (delta)
+
+None. No 🛑/❌/⚠️; one 💬 recorded as a decision rather than a defect.
+
+| name | severity | current | note |
+|---|---|---|---|
+| anki_card_too_large_simplify | 💬 | « Enregistrer en version simplifiée » | 33 characters on a dialog button. Kept rather than shortened: `OverlayAlert`'s buttons are `MATCH_PARENT` inside a 280 dp dialog with no `maxLines`, so a long label wraps instead of clipping — and the 2026-07-14 review lesson is explicitly not to trade accuracy for brevity against a constraint that turns out not to exist. The shorter « Enregistrer simplifié » would leave the adjective agreeing with nothing. |
+
+### Clean areas (delta) — checked, no findings
+
+**Apostrophes and spacing.** The one apostrophe in the delta is escaped — « LLM sur
+l\'appareil » — and the prompt's question mark carries the French space before it
+(« …en texte brut ? »), matching `onboarding_welcome_play_title` « Vous ne parlez pas la
+langue ? ».
+
+**vous throughout.** « Essayez de retirer quelques mots ou de raccourcir la phrase » is the
+same register as `anki_send_failed_message` « Assurez-vous que AnkiDroid est en cours
+d\'exécution, puis réessayez ». The prompt is an infinitive question, so it takes no person
+— as `llm_prompt_discard_title` does not.
+
+**Terminology.** carte (card), définitions, dictionnaire, « texte brut » for plain text —
+the last from `yomitan_styling_subtitle`'s « toujours utiliser du texte brut ». mots and
+phrase in the advice match `anki_mode_word` « Mot » and `anki_mode_sentence` « Phrase ».
+« sur l\'appareil » for on-device comes from `llm_prompt_row_system_subtitle` « en ligne
+comme sur l\'appareil ».
+
+**Modifier attachment.** « Routage hors ligne des textes courts » puts *hors ligne* directly
+on *routage*, so the row cannot be read as "routing of short texts that are offline" — the
+failure mode that hit four postposed-adjective locales at once on "Classic angle threshold"
+and was recorded in `l10n-updating-locales.md`.
+
+**volumineux, not grand.** Both size sentences use *trop volumineuse*, which is what French
+uses for data size; *trop grande* would read as physical dimensions.
+
+### Verdict
+
+**PASS.** No fixes required; one 💬 recorded as a deliberate length decision.
+
+## Delta review 2026-09-23 (6 keys: the results headers' ⋯ overflow menu)
+
+Mechanical layer verified programmatically across all 12 locales: all 6 delta names
+present once, no extras; no `<xliff:g>`, placeholders, `<plurals>`, quotes or
+apostrophes, and no em/en dashes in this delta. The two orphans `cd_copy_original` /
+`cd_copy_translation` (the headers' copy buttons, removed with this change) are deleted.
+For this delta's keys the analyzer reports nothing missing and nothing orphaned; the
+remaining `missing=14 orphan=1` belong to other, not-yet-synced features (icon gestures,
+edge indicator, the Anki words helper). `:app:processDebugResources` BUILD SUCCESSFUL.
+**No 🛑 build-breaking issues.**
+
+**Render code read before reviewing.** The four `header_action_*` names, like the reused
+`cd_add_to_anki`, `cd_text_size` and `capture_show_on_screen`, are the rows of
+`ActionOverflowMenu`: 15 sp medium, `maxLines=1` + `ellipsize=end`, in a card 160 to 280
+dp wide less 72 dp of icon and padding, so up to about 208 dp of label. `cd_more_actions`
+is spoken only (the ⋯ button's description and the menu's pane title);
+`cd_toggle_inline_pinyin` is the furigana button's spoken name when the source is Chinese
+(it replaces a hardcoded English "Toggle inline pinyin").
+
+### Findings (delta)
+
+None.
+
+### Clean areas (delta) — checked, no findings
+
+**Siblings, one term swapped.** «Activer ou désactiver le pinyin intégré» mirrors the
+furigana string.
+
+**The ⋯.** «Autres actions» (no elision, so no apostrophe to escape).
+
+**Row names.** «Lire à voix haute» and «Modifier le texte» come from
+`cd_read_original_aloud` / `label_edit`. Longest row: the reused «Afficher à l'écran», 19
+characters, fits.
+
+### Verdict
+
+**PASS.** Every delta string reuses the locale's own committed wording for its sibling
+(the furigana toggle, the read-aloud and edit descriptions, the parked sheet's "more"
+hint), so the menu reads in the same voice as the buttons it replaces.
+
+## Delta review 2026-09-29 (39 keys + 1 orphan: floating-icon gestures and the no-menu alert, "Change game language", the translation error pill and its discard confirm, the hold failure pill, the Overlay card rows, the Anki words helper)
+
+Mechanical layer verified programmatically across all 12 locales: all 39 delta names
+present once, the orphan `anki_words_helper` deleted (its replacement
+`anki_words_helper_hide` was translated afresh, as its commit asked), no duplicate `name=`;
+every `<xliff:g>` span byte-identical to EN (`id`, `example`, inner text); `%1$s`/`%2$s`
+parity; `<b>`, `\n`, `\{ \}`, `&lt;/&gt;/&amp;` counts match; no unescaped `'`/`"`; each file
+parses. Analyzer reports `missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD
+SUCCESSFUL. No `<plurals>` in this delta. `settings_filter_furigana_title` (already
+translated) was moved from its old Debug position to its English position between the new
+Overlay rows, text unchanged, so the file stays diffable against English. **No 🛑
+build-breaking issues.**
+
+**Render code read before reviewing.**
+- `icon_gesture_*` are bold 15 sp in the Settings cell's `TableLayout`; only the action
+  column shrinks (`shrinkColumns="2"`), so the longest gesture word sets the width left for
+  all three action titles. They are also the picker page's section headers
+  (`Text.PT.GroupHeader`, ALL CAPS, 11 sp). Action titles wrap freely in the cell and in the
+  picker's `settings_row_choice` rows (no `maxLines`).
+- `icon_action_translating_from` and `hold_translation_failed` are drawn by
+  `OverlayUiController.showNoTextPill` as ONE line of `Canvas.drawText` in a window sized to
+  the text: no wrapping, so both must stay short. `%1$s` is `SourceLangId.displayName()`,
+  the language name in the UI locale with its first letter capitalized.
+- The error pill (`TranslationErrorPills`) is a 14 sp TextView, `maxLines=2`, ellipsized,
+  spanning most of the display width; every message but the connection one leads with the
+  service name.
+- The no-menu alert and the discard confirm are `OverlayAlert`s with full-width stacked
+  buttons (the confirm in the danger colour, then `btn_cancel`).
+- `anki_words_helper_hide`'s `%1$s` becomes an ImageSpan of the eye glyph
+  (`inlineIconString`).
+- The Overlay card on screen: Overlay Mode, Minimum text size (title, subtitle, warning,
+  value + slider, example), Filter furigana (Japanese only), Widen vertical text, Edge
+  indicator.
+
+**Source-side observations (EN; reported, not changed):**
+1. `settings_overlay_min_text_warning` ends without a period after two sentences; every
+   locale mirrors that.
+2. The comments on `icon_action_translating_from` and `hold_translation_failed` do not say
+   the pill is a single canvas-drawn line that never wraps. A translator who writes a long
+   sentence there gets it drawn past the pill's edge.
+3. The error-pill banner asks every message to start with the service name. In an RTL
+   locale that makes the first strong character Latin, so the pill's TextView resolves an
+   LTR paragraph (see the ar report).
+4. `icon_gesture_*` asks for "short imperative verbs". Several locales label gestures with
+   an infinitive or a noun instead (see each report); the binding constraint is the width
+   one above.
+
+### Findings (delta, round 1)
+
+| name | severity | current | suggested | note |
+|---|---|---|---|---|
+| settings_edge_indicator_subtitle | 💬 | Affiche … tant que la superposition est affichée. | Affiche … tant que la superposition est visible. | affiche … affichée. |
+
+### Clean areas (delta) — checked, no findings
+
+**Typography.** vous; every apostrophe escaped; a space before : and ? (Gemini : …,
+Abandonner la carte ?); « » with inner spaces as `overlay_hide_controls_message`. The pill
+«Langue du jeu : %1$s» avoids elision with a capitalized language name.
+
+**Terms.** Reused: menu rapide, Changer la langue du jeu, Lancer/arrêter la traduction auto
+(the hotkey), Impossible de traduire, clé d'API non valide, quota … épuisé, EXPÉRIMENTAL.,
+Abandonner (`llm_prompt_discard_title`), superposition. Infinitive gesture labels match
+the hotkey rows (Maintenir pour…, Appuyer pour…).
+
+### Verdict (round 1)
+
+1 💬, to apply.
+
+### Round 2 (2026-09-29), after applying round 1
+
+Round-1 fix present: «…tant que la superposition est visible.» Mechanical layer re-run after the fixes: 0 problems; analyzer `missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD SUCCESSFUL. Every screen of the delta was re-read in full, not only the changed keys.
+
+No new findings.
+
+**Verdict (round 2):** **PASS.**

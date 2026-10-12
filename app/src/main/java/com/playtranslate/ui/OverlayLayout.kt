@@ -54,8 +54,17 @@ data class OrientedChip(
  *  the input `boxes` list — the index alignment is load-bearing for pinhole change-detection
  *  (`PinholeOverlayMode` walks `getChildScreenRects()` positionally against its box list).
  *  [chip] is non-null ⟺ the mode is [RenderMode.SOURCE_ANGLE] (derived from the box's
- *  angle, never dual state); [rect] is then the chip's EXACT unclamped oriented AABB. */
-data class ResolvedBox(val rect: RectF, val mode: RenderMode, val chip: OrientedChip? = null)
+ *  angle, never dual state); [rect] is then the chip's EXACT unclamped oriented AABB.
+ *  [grownFrom] is the rect before the minimum-text-size pass when that pass grew the box
+ *  (null otherwise), and [floorPx] the text size, in px, the pass certified [rect] for (null
+ *  when the pass didn't run, skipped the box, or couldn't fit even its smallest size). */
+data class ResolvedBox(
+    val rect: RectF,
+    val mode: RenderMode,
+    val chip: OrientedChip? = null,
+    val grownFrom: RectF? = null,
+    val floorPx: Int? = null,
+)
 
 /**
  * Pure geometry for translation overlays: maps OCR-bitmap box bounds to on-screen rects,
@@ -63,7 +72,8 @@ data class ResolvedBox(val rect: RectF, val mode: RenderMode, val chip: Oriented
  *
  * Extracted from `TranslationOverlayView.rebuildChildren` so the geometry resolves through
  * one tested implementation. Pure and side-effect free — unit-testable without a live View
- * (callers inject [TextBox.minWidthPx]; this object never measures text).
+ * (callers inject [TextBox.minWidthPx] and pass 4's [MinTextMeasurer]; this object never
+ * measures text itself).
  */
 internal object OverlayLayout {
 
@@ -94,8 +104,10 @@ internal object OverlayLayout {
      * non-furigana boxes, resolve overlaps in two passes keyed by the box's source
      * **orientation** (not its render footprint) — horizontal-source boxes are stacked rows →
      * vertical-overlap shrink; vertical-source boxes are side-by-side columns → horizontal-
-     * overlap shrink — then pick each box's render mode from its **post-shrink** rect and grow
-     * GROW boxes into the freed width. Resolving by orientation is essential: a wide vertical
+     * overlap shrink — then pick each box's render mode from its **post-shrink** rect, grow
+     * GROW boxes into the freed width, and (only when [minText] is given) grow any box whose
+     * text can't reach the minimum size into free space. Resolving by orientation is
+     * essential: a wide vertical
      * column rendered HORIZONTAL_IN_PLACE is still a column and must de-overlap with its sibling
      * columns, not get siloed away from them. Choosing the mode *after* the shrink matters too:
      * a column carved below its min width must reclassify (e.g. to GROW), not render too-narrow
@@ -109,10 +121,12 @@ internal object OverlayLayout {
      *   non-CJK targets.
      * @param growEnabled the grow-narrow-boxes pref. When off, a narrow non-stackable box
      *   falls back to [RenderMode.ROTATE] instead of growing.
+     * @param minText the minimum-text-size pass (pass 4, [MinTextLayout]); null when the
+     *   minimum is the default, which leaves the output exactly as passes 1–3 produce it.
      *
      * Returns one [ResolvedBox] per input box, index-aligned with [boxes].
      */
-    fun resolveScreenRects(
+    internal fun resolveScreenRects(
         boxes: List<TextBox>,
         cropLeft: Int, cropTop: Int,
         screenshotW: Int, screenshotH: Int,
@@ -121,6 +135,7 @@ internal object OverlayLayout {
         targetIsVerticalScript: Boolean,
         targetStackable: Boolean = false,
         growEnabled: Boolean = false,
+        minText: MinTextGrowth? = null,
     ): List<ResolvedBox> {
         val scaleX = displayW.toFloat() / screenshotW
         val scaleY = displayH.toFloat() / screenshotH
@@ -128,9 +143,11 @@ internal object OverlayLayout {
         val dW = displayW.toFloat()
         val dH = displayH.toFloat()
 
-        // Map OCR bounds to screen coordinates; pad non-furigana boxes.
+        // Map the DRAWN rects to screen coordinates; pad non-furigana boxes.
+        // drawBounds, not bounds: a base line whose furigana was filtered
+        // draws over the reading's pixels too (TextBox.drawBounds).
         val finalRects = boxes.map { box ->
-            val r = mapRect(box.bounds, cropLeft, cropTop, scaleX, scaleY)
+            val r = mapRect(box.drawBounds, cropLeft, cropTop, scaleX, scaleY)
             if (box.isFurigana) {
                 RectF(r.left, r.top, r.right, r.bottom)
             } else {
@@ -153,7 +170,7 @@ internal object OverlayLayout {
         // left as-is deliberately: its carves feed the mode reclassification +
         // growIntoGaps machinery, and no uncovering instance has been observed
         // there — same-family watch item if vertical-text churn ever shows up.
-        val sourceRects = boxes.map { mapRect(it.bounds, cropLeft, cropTop, scaleX, scaleY) }
+        val sourceRects = boxes.map { mapRect(it.drawBounds, cropLeft, cropTop, scaleX, scaleY) }
 
         // SOURCE_ANGLE chips: padding lives in the DESKEWED frame — the drawn
         // chip is the oriented dims + padding, centered on the unpadded mapped
@@ -267,7 +284,31 @@ internal object OverlayLayout {
         // disjoint; growth only ever expands, so each box keeps covering its source.
         growIntoGaps(boxes, finalRects, modes, dW)
 
-        return boxes.indices.map { ResolvedBox(finalRects[it], modes[it], chips[it]) }
+        // Pass 4 — minimum text size: grow any box whose text can't reach the user's
+        // minimum into free space (Widen's rules on both axes) inside the caller's
+        // bound (clipped to the view; the whole view without one), clear of the other
+        // boxes and of the caller's avoid rects, each kept at the box padding: the
+        // distance a box keeps from its source. Runs last and never changes a mode
+        // or a chip, so passes 1–3 keep their guarantees.
+        val outcomes = minText?.let { growth ->
+            val view = RectF(0f, 0f, dW, dH)
+            val bound = growth.limits.bounds
+                ?.let { mapRect(it, cropLeft, cropTop, scaleX, scaleY) }
+                ?.takeIf { it.intersect(view) }
+                ?: view
+            val avoid = growth.limits.avoid.map { a ->
+                mapRect(a, cropLeft, cropTop, scaleX, scaleY).apply { inset(-boxPadding, -boxPadding) }
+            }
+            MinTextLayout.grow(boxes, finalRects, modes, bound, avoid, growth)
+        }
+
+        return boxes.indices.map {
+            ResolvedBox(
+                finalRects[it], modes[it], chips[it],
+                grownFrom = outcomes?.get(it)?.grownFrom,
+                floorPx = outcomes?.get(it)?.floorPx,
+            )
+        }
     }
 
     /** Same-angle slant-cluster carve tolerance (degrees): must exceed the
@@ -538,6 +579,10 @@ internal object OverlayLayout {
                     bb.bounds, bb.angleDeg, bb.orientedWidth, bb.orientedHeight,
                 ) > tolerance
             ) return false
+            // The MATCHED rect, which is the one that jitters per re-OCR. A
+            // change in the DRAWN extension beyond it (a furigana band joining
+            // or leaving the chip) is not jitter and is caught separately by
+            // TranslationOverlayView.setBoxes, which rebuilds on it.
             val ra = ba.bounds; val rb = bb.bounds
             if (Math.abs(ra.left - rb.left) > tolerance ||
                 Math.abs(ra.top - rb.top) > tolerance ||

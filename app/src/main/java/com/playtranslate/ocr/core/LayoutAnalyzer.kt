@@ -89,12 +89,15 @@ object LayoutAnalyzer {
 
     /**
      * True iff [a] and [b] overlap by at least [CROSS_FRAME_OVERLAP_RATIO]
-     * of the smaller rect's area. Used only by the
+     * of the smaller rect's area. Cross-frame evidence only: the
      * [GroupingMode.CROSS_FRAME_SAME_REGION] path of [wouldGroup] /
-     * [groupDecision] — see [GroupingMode] kdoc for why same-pass callers
-     * must NOT use this check.
+     * [groupDecision], and live classification, which keeps this test
+     * alive for a group whose continuation inference a stale note has
+     * barred (the box's own region re-read is a different inference from
+     * "the paragraph grew"). See [GroupingMode] kdoc for why same-pass
+     * callers must NOT use this check.
      */
-    private fun hasSubstantialOverlap(a: Rect, b: Rect): Boolean {
+    fun hasSubstantialOverlap(a: Rect, b: Rect): Boolean {
         if (!Rect.intersects(a, b)) return false
         val ix = minOf(a.right, b.right) - maxOf(a.left, b.left)
         val iy = minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)
@@ -2435,4 +2438,9 @@ data class LayoutGroup(
     val angleDeg: Float = 0f,
     val orientedWidth: Float = 0f,
     val orientedHeight: Float = 0f,
+    /** Rect the overlay DRAWS at, same space as [bounds]. Equal to [bounds]
+     *  unless [RubyFilter.extendBases] folded a demoted furigana reading into
+     *  its base group. [bounds] itself stays the lines' own union: it is what
+     *  live mode matches between cycles, and ruby detection flickers. */
+    val drawBounds: Rect = bounds,
 )

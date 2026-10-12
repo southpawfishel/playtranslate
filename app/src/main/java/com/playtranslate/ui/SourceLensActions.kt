@@ -1,6 +1,7 @@
 package com.playtranslate.ui
 
 import android.content.Context
+import android.util.Log
 import android.content.Intent
 import android.widget.Toast
 import com.playtranslate.AnkiManager
@@ -13,6 +14,7 @@ import com.playtranslate.model.FrequencyTag
 import com.playtranslate.model.headwordDisplay
 import com.playtranslate.model.selectHeadword
 import com.playtranslate.overlay.OverlayHost
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 /** The looked-up word context the lens actions operate on, snapshotted at
@@ -29,7 +31,43 @@ data class LensActionContext(
      *  was produced ([com.playtranslate.model.TranslationResult.createdAtMs]).
      *  Null when the hosting surface has no capture moment (drag flow). */
     val audioAnchorMs: Long? = null,
+    /** Every entry the lookup resolved ([entry] first) — POS-split packs
+     *  return several, and the lens's sense rows span all of them, so the
+     *  Anki card built from here must too. */
+    val entries: List<DictionaryEntry> = listOfNotNull(entry),
 )
+
+/**
+ * What the lens's open-detail tap hands the workspace page it presents:
+ * the looked-up unit, the sentence it sits in, and the sentence context
+ * snapshot (cached translation + words, when the drag flow produced them)
+ * that seeds the page's Anki card before its own Sentence tab runs.
+ */
+data class LensDetailArgs(
+    val word: String,
+    /** The occurrence reading the lens displayed (when it adds information;
+     *  null when none or equal to the word). */
+    val reading: String?,
+    val sentence: String,
+    val screenshotPath: String?,
+    val audioAnchorMs: Long?,
+    val sentenceContext: SentenceContext,
+    /** The backend that produced [sentenceContext]'s translation, when the
+     *  drag flow cached one — the "Translated by …" label the Sentence page
+     *  binds beside it. */
+    val cachedTranslationSource: String? = null,
+)
+
+/** The word page alone, seeded with the snapshot — the default detail
+ *  presentation (the capture sheet's lens, nested drill-ins). */
+fun WorkspaceWordDetailPage(args: LensDetailArgs): WorkspaceWordDetailPage =
+    WorkspaceWordDetailPage(
+        word = args.word,
+        reading = args.reading,
+        screenshotPath = args.screenshotPath,
+        audioAnchorMs = args.audioAnchorMs,
+        sentenceContext = { args.sentenceContext },
+    )
 
 /**
  * The magnifying-lens "open detail" tap + Anki chip actions, shared by the
@@ -56,18 +94,42 @@ class SourceLensActions(
      *  not installed" dialog through their own presenter — the default
      *  overlay window needs a permission an activity flow may not have. */
     private val showAnkiNotInstalled: (() -> Unit)? = null,
+    /** How the open-detail tap and the Anki chip reach the floating
+     *  workspace (single-screen, word context present) before falling back
+     *  to their Activity launches: a fresh workspace from a non-workspace
+     *  surface, a push from a workspace page's own lens, or never for the
+     *  in-activity hosts (camera / import), whose lens actions stay
+     *  activity-routed. */
+    private val route: WorkspaceRoute,
+    /** The page the open-detail tap presents in the workspace. Default: the
+     *  word-detail page alone (the capture sheet already shows the sentence;
+     *  a page's own lens drills into a nested word). The floating-icon drag
+     *  flow substitutes its Sentence/word lookup page. */
+    private val detailPage: (LensDetailArgs) -> WorkspacePage = { WorkspaceWordDetailPage(it) },
+    /** Context for the lens's split-body SECONDARY sections by index — the
+     *  containing phrase (space-delimited surfaces) or a fused expression's
+     *  member words (JA) — same sentence/screenshot as [current], with the
+     *  secondary unit as the word. Null (the default) leaves
+     *  [MagnifierLens.onSecondaryOpenTap] unwired; a wired provider may
+     *  itself return null (no such secondary at the moment of the tap) for
+     *  a no-op. */
+    private val currentSecondary: ((Int) -> LensActionContext?)? = null,
     private val current: () -> LensActionContext,
 ) {
     /** Which Activity an action launched, so the caller can react differently. */
     enum class LaunchKind { Detail, Anki }
 
     init {
-        // "Open in detail view" always goes to TranslationResultActivity —
-        // sentence + segmented Sentence/Word toggle. Anki chip: tap opens the
-        // editable review sheet; long-press is the headless one-tap shortcut.
-        lens.onOpenTap = { openSentenceInApp() }
+        // "Open in detail view": the workspace detail page over the game when
+        // the route can present it, else TranslationResultActivity (sentence +
+        // its Sentence/Word toggle). Anki chip: tap opens the editable
+        // review; long-press is the headless one-tap shortcut.
+        lens.onOpenTap = { openSentenceInApp(current()) }
         lens.onAnkiTap = { openAnkiReviewForLens() }
         lens.onAnkiLongPress = { oneTapFromLens() }
+        currentSecondary?.let { secondary ->
+            lens.onSecondaryOpenTap = { i -> secondary(i)?.let { openSentenceInApp(it) } }
+        }
     }
 
     private data class LensAnkiSnapshot(
@@ -81,12 +143,16 @@ class SourceLensActions(
         val screenshotPath: String?,
         val sentence: String?,
         val sentenceTranslation: String?,
+        /** The sentence's per-word breakdown, snapshotted with the
+         *  translation (and for the same reason — see
+         *  [snapshotLensFieldsForAnki]). The workspace editor builds from
+         *  this; the Activity route re-reads the cache in its own onCreate. */
+        val sentenceWordResults: Map<String, Triple<String, String, Int>>?,
         val sourceLangCode: String,
         val audioAnchorMs: Long?,
     )
 
-    private fun openSentenceInApp() {
-        val cur = current()
+    private fun openSentenceInApp(cur: LensActionContext) {
         val sentence = cur.sentence ?: return
         // Snapshot word context + cached sentence translation/words BEFORE
         // lens.dismiss() — dismiss nulls the source's word/entry and (drag flow)
@@ -102,8 +168,43 @@ class SourceLensActions(
         val cachedTranslation = cached?.translation
         val cachedTranslationSource = cached?.translationSource
         val cachedWordResults = cached?.wordResults?.takeIf { it.isNotEmpty() }
+        // The workspace page's Anki flow wants the ATOMIC words payload
+        // (results + surfaces + enrichment) — snapshotted here for the same
+        // stomp reason as the fields above.
+        val wordsPayload = if (route !is WorkspaceRoute.None) LastSentenceCache.snapshotFor(sentence) else null
         CaptureBackendResolver.activeOverlayUi?.cancelLivePauseObligation()
         lens.dismiss()
+        // Single-screen: the detail page opens in the floating workspace over
+        // the game instead of leaving it — [detailPage] decides its shape
+        // (the word page alone, or the drag flow's Sentence/word lookup
+        // page); the sentence context travels either way for the Anki card.
+        // A route that can't present (dual-screen coordinator posture) falls
+        // through to the Activity launch.
+        if (word != null) {
+            val snapshot = SentenceContext(
+                original = sentence,
+                translation = cachedTranslation,
+                wordResults = wordsPayload?.results ?: cachedWordResults,
+                surfaceForms = wordsPayload?.surfaces,
+                wordEnrichment = wordsPayload?.enrichment,
+            )
+            val args = LensDetailArgs(
+                word = word,
+                reading = reading,
+                sentence = sentence,
+                screenshotPath = cur.screenshotPath,
+                audioAnchorMs = cur.audioAnchorMs,
+                sentenceContext = snapshot,
+                cachedTranslationSource = cachedTranslationSource,
+            )
+            val opened = route.present(cur.screenshotPath) { detailPage(args) }
+            if (opened) {
+                // The capture sheet maps Detail to its stash-for-reshow, so a
+                // USER dismissal of the workspace brings the sheet back.
+                onLaunchedActivity(LaunchKind.Detail)
+                return
+            }
+        }
         // Replace any previously launched TRA (MULTIPLE_TASK otherwise leaves it
         // alive in a hidden task on a possibly-wrong display).
         TranslationResultActivity.finishCurrentIfAny()
@@ -143,6 +244,7 @@ class SourceLensActions(
         val opts = android.app.ActivityOptions.makeBasic()
             .setLaunchDisplayId(targetDisplay)
             .toBundle()
+        route.prepareActivityLaunch()
         context.startActivity(intent, opts)
         onLaunchedActivity(LaunchKind.Detail)
     }
@@ -160,7 +262,39 @@ class SourceLensActions(
         val snap = snapshotLensFieldsForAnki(word, entry, cur)
         CaptureBackendResolver.activeOverlayUi?.cancelLivePauseObligation()
         lens.dismiss()
+        if (openAnkiEditorWorkspace(snap)) return
         launchWordAnkiActivity(snap)
+    }
+
+    /** Single-screen with the AnkiDroid permission already held: the editor
+     *  opens as a floating-workspace page over the game. False (dual-screen,
+     *  in-activity host, permission missing) leaves the caller on the
+     *  Activity trampoline — which owns the runtime permission request. */
+    private fun openAnkiEditorWorkspace(snap: LensAnkiSnapshot): Boolean {
+        if (!AnkiManager(context).hasPermission()) return false
+        val opened = route.present(snap.screenshotPath) {
+                AnkiEditorPage(
+                    WordAnkiReviewBinder.buildArgs(
+                        word = snap.word,
+                        reading = snap.reading,
+                        pos = snap.pos,
+                        definition = snap.definition,
+                        screenshotPath = snap.screenshotPath,
+                        freqScore = snap.freqScore,
+                        sentenceOriginal = snap.sentence,
+                        sentenceTranslation = snap.sentenceTranslation,
+                        sentenceWordResults = snap.sentenceWordResults,
+                        sourceLangId = Prefs(context).sourceLangId,
+                        audioAnchorMs = snap.audioAnchorMs,
+                    ),
+                )
+            }
+        if (opened) {
+            // The capture sheet maps Anki to its dismiss — same as the
+            // activity launch it replaces.
+            onLaunchedActivity(LaunchKind.Anki)
+        }
+        return opened
     }
 
     private fun oneTapFromLens() {
@@ -189,22 +323,40 @@ class SourceLensActions(
         ankiOneTapSendScope.launch {
             // Sentence card (dragged word bolded) vs word card routing — incl.
             // the single-word-sentence rule — is shared via oneTapSend.
-            val (result, mode) = context.oneTapSend(
-                word = snap.word,
-                reading = snap.reading,
-                pos = snap.pos,
-                fallbackDefinition = snap.definition,
-                freqScore = snap.freqScore,
-                pitch = snap.pitch,
-                frequencies = snap.frequencies,
-                sentenceOriginal = snap.sentence,
-                sentenceTranslation = snap.sentenceTranslation,
-                wordsPayload = null,
-                screenshotPath = snap.screenshotPath,
-                sourceLangId = sourceLangId,
-            )
+            // The pipeline is exception-free by contract; a bug that escapes
+            // anyway is contained here the way launchOneTapSend contains it
+            // for fragment hosts (loud log + failure toast), instead of
+            // crashing the app from a detached coroutine.
+            val (result, mode) = try {
+                context.oneTapSend(
+                    word = snap.word,
+                    reading = snap.reading,
+                    pos = snap.pos,
+                    entry = entry,
+                    entries = cur.entries,
+                    fallbackDefinition = snap.definition,
+                    freqScore = snap.freqScore,
+                    pitch = snap.pitch,
+                    frequencies = snap.frequencies,
+                    sentenceOriginal = snap.sentence,
+                    sentenceTranslation = snap.sentenceTranslation,
+                    wordsPayload = null,
+                    screenshotPath = snap.screenshotPath,
+                    sourceLangId = sourceLangId,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(ONE_TAP_TAG, "lens one-tap send escaped an exception", e)
+                oneTapSendFailedToast(context.applicationContext)
+                return@launch
+            }
             when (result) {
-                is AnkiSendResult.NeedsMapping -> launchWordAnkiActivity(snap)
+                // The mapping needs UI: the workspace editor when available
+                // (its NeedsMapping flow configures the mapping in-window),
+                // else the review activity — the lens's existing parity.
+                is AnkiSendResult.NeedsMapping ->
+                    if (!openAnkiEditorWorkspace(snap)) launchWordAnkiActivity(snap)
                 else -> oneTapResultToast(context.applicationContext, result, mode)
             }
         }
@@ -228,6 +380,14 @@ class SourceLensActions(
         val sentence = cur.sentence
         val sentenceTranslation = LastSentenceCache
             .takeIf { it.original == sentence }?.translation
+        // Word breakdown for the editor's Sentence card, snapshotted BEFORE
+        // lens.dismiss() like the translation above: dismiss resumes live
+        // mode (drag flow), and a fresh capture can rotate the cache before
+        // the editor binds. Null (cache already rotated) leaves the binder's
+        // lazy words-fill to recompute — the same fallback the Activity
+        // route has when ITS cache read misses.
+        val sentenceWordResults = LastSentenceCache
+            .takeIf { it.original == sentence }?.wordResults
         return LensAnkiSnapshot(
             word = word,
             reading = reading,
@@ -239,6 +399,7 @@ class SourceLensActions(
             screenshotPath = cur.screenshotPath,
             sentence = sentence,
             sentenceTranslation = sentenceTranslation,
+            sentenceWordResults = sentenceWordResults,
             sourceLangCode = Prefs(context).sourceLangId.code,
             audioAnchorMs = cur.audioAnchorMs,
         )
@@ -272,6 +433,7 @@ class SourceLensActions(
         val opts = android.app.ActivityOptions.makeBasic()
             .setLaunchDisplayId(targetDisplay)
             .toBundle()
+        route.prepareActivityLaunch()
         context.startActivity(intent, opts)
         onLaunchedActivity(LaunchKind.Anki)
     }

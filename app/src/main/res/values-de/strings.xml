@@ -285,6 +285,9 @@
     <string name="note_mlkit_no_internet">⚠ Keine Internetverbindung – Offline-Übersetzung wird angezeigt (geringere Qualität).</string>
 
     <string name="note_mlkit_service_unavailable">⚠ Übersetzungsdienst nicht verfügbar – Offline-Übersetzung wird angezeigt (geringere Qualität).</string>
+    <string name="note_mlkit_service_cooldown">⚠ Übersetzungsdienst ist vorübergehend nicht verfügbar. Bis <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g> wird die Offline-Übersetzung angezeigt (geringere Qualität).</string>
+    <string name="note_mlkit_quota_exhausted">⚠ Übersetzungskontingent aufgebraucht. Bis <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g> wird die Offline-Übersetzung angezeigt (geringere Qualität).</string>
+    <string name="note_mlkit_account_issue">⚠ Problem mit dem Konto des Übersetzungsdienstes (Abrechnung oder Guthaben). Offline-Übersetzung wird angezeigt (geringere Qualität). Bitte den Dienst in den Einstellungen prüfen.</string>
 
     <string name="note_low_memory_fallback">⚠ Wenig Arbeitsspeicher – Offline-Übersetzung wird angezeigt (geringere Qualität).</string>
 
@@ -389,6 +392,7 @@
     <string name="audio_recording_row_start">Audioaufnahme starten</string>
 
     <string name="audio_recording_row_active">Audio wird aufgenommen</string>
+    <string name="audio_recording_row_failed">Audioaufnahme fehlgeschlagen</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          MEDIAPROJECTION OVERLAY-PERMISSION DIALOG
@@ -401,14 +405,38 @@
     <string name="mp_overlay_permission_button">Einstellungen öffnen</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
-         FLOATING-ICON GESTURE HINTS
+         FLOATING-ICON GESTURES
          ═══════════════════════════════════════════════════════════════ -->
 
-    <string name="overlay_icon_gesture_drag"><b>Ziehe</b> über Wörter für schnelle Definitionen</string>
+    <string name="icon_gesture_drag">Ziehen</string>
 
-    <string name="overlay_icon_gesture_hold"><b>Halte</b> gedrückt, um Übersetzungen vorab anzuzeigen</string>
+    <string name="icon_gesture_hold">Gedrückt halten</string>
 
-    <string name="overlay_icon_gesture_tap"><b>Tippe</b>, um das Schnellmenü zu öffnen</string>
+    <string name="icon_gesture_tap">Tippen</string>
+
+    <string name="icon_action_lookup_words">Über ein Wort fahren, um seine Definition zu sehen</string>
+
+    <string name="icon_action_show_translations">Übersetzungen auf dem Bildschirm anzeigen</string>
+
+    <string name="icon_action_open_quick_menu">Schnellmenü öffnen</string>
+
+    <string name="icon_action_capture_screen">Bildschirm aufnehmen</string>
+
+    <string name="icon_action_toggle_auto_translate">Auto-Übersetzung starten/stoppen</string>
+
+    <string name="icon_action_swap_furigana">Zwischen Übersetzung und Furigana wechseln</string>
+
+    <string name="icon_action_swap_pinyin">Zwischen Übersetzung und Pinyin wechseln</string>
+
+    <string name="icon_action_change_game_language">Spielsprache ändern</string>
+
+    <string name="icon_action_translating_from">Spielsprache: <xliff:g id="language" example="Japanese">%1$s</xliff:g></string>
+
+    <string name="icon_gestures_no_menu_title">Keine Geste öffnet das Schnellmenü</string>
+
+    <string name="icon_gestures_no_menu_message">Das Schnellmenü ist dann über das schwebende Symbol nicht mehr erreichbar. Weise „Schnellmenü öffnen“ der Geste „Gedrückt halten“ oder „Tippen“ zu, damit es verfügbar bleibt.</string>
+
+    <string name="icon_gestures_no_menu_confirm">Verstanden</string>
 
     <string name="overlay_icon_a11y_required_title">Bedienungshilfen erforderlich</string>
 
@@ -452,6 +480,7 @@
     <string name="anki_deck_picker_empty">Keine Stapel gefunden</string>
 
     <string name="anki_deck_picker_loading">Stapel werden geladen…</string>
+    <string name="anki_deck_picker_title">Anki-Stapel auswählen</string>
 
     <string name="anki_card_type_picker_loading">Kartentypen werden geladen…</string>
 
@@ -487,6 +516,16 @@
 
     <string name="anki_send_failed_message"><xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> hat die Karte nicht akzeptiert. Stelle sicher, dass <xliff:g id="brand_ankidroid2" example="AnkiDroid">AnkiDroid</xliff:g> läuft, und versuche es erneut.</string>
 
+    <string name="anki_card_too_large_title">Karte zu groß</string>
+
+    <string name="anki_card_too_large_prompt">Die Wörterbuchdefinitionen dieser Karte sind zu groß, um sie an <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> zu senden. Eine vereinfachte Karte mit Definitionen als reinem Text speichern?</string>
+
+    <string name="anki_card_too_large_simplify">Vereinfacht speichern</string>
+
+    <string name="anki_card_too_large_failed">Diese Karte ist selbst mit vereinfachten Definitionen zu groß für <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>. Entferne ein paar Wörter oder kürze den Satz.</string>
+
+    <string name="anki_added_simplified">Zu <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> hinzugefügt (Definitionen vereinfacht, damit sie passen)</string>
+
     <string name="anki_mode_sentence">Satz</string>
 
     <string name="anki_mode_word">Wort</string>
@@ -515,17 +554,22 @@
 
     <string name="anki_group_screenshot">Screenshot</string>
 
-    <string name="anki_words_helper">Diese Wörter werden in die <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>-Karte aufgenommen. Tippe auf ein Wort, um es auf der Karte hervorzuheben. Tippe auf ×, um es von der Karte zu entfernen.</string>
+    <string name="anki_words_helper_hide">Diese Wörter werden in die <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>-Karte aufgenommen. Tippe auf ein Wort, um es hervorzuheben. Tippe auf <xliff:g id="hide_icon" example="👁">%1$s</xliff:g>, um es von der Karte auszuschließen.</string>
 
     <string name="anki_translation_error">Konnte nicht übersetzt werden</string>
 
     <string name="anki_word_remove_content_description">Von der Karte entfernen</string>
+    <string name="hidden_word_hide_content_description">Wort ausblenden</string>
+    <string name="hidden_word_show_content_description">Wort einblenden</string>
+    <string name="hidden_word_save_failed">Speichern fehlgeschlagen. Bitte erneut versuchen</string>
 
     <string name="anki_screenshot_remove_content_description">Screenshot entfernen</string>
 
     <string name="anki_group_audio">Audio</string>
 
     <string name="anki_audio_preview_content_description">Audio anhören</string>
+
+    <string name="anki_word_audio_row_title">Audio hinzufügen</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          GAME-AUDIO RECORDING (Settings → Anki → Audio; trim editor)
@@ -736,6 +780,7 @@
     <string name="llm_backend_invalid_key_alert_title">API-Schlüssel konnte nicht überprüft werden</string>
 
     <string name="llm_backend_invalid_key_alert_message_fmt"><xliff:g id="backend_name" example="OpenAI">%1$s</xliff:g> hat den von dir eingegebenen Schlüssel abgelehnt. Überprüfe ihn unter <xliff:g id="dev_console_url" example="platform.openai.com">%2$s</xliff:g> und versuche es erneut.</string>
+    <string name="llm_backend_key_needs_workspace_scope">Dieser Schlüssel ist keinem Workspace zugeordnet und kann hier nicht verwendet werden. Erstelle in der Claude Console einen Schlüssel innerhalb eines bestimmten Workspace und gib diesen stattdessen ein.</string>
 
     <string name="llm_backend_invalid_key_alert_button">OK</string>
 
@@ -971,6 +1016,18 @@
 
     <!-- ── Tencent Hunyuan-MT 1.5 1.8B ────────────────────────────── -->
 
+    <string name="hymt2_status_not_downloaded">Benötigt <xliff:g id="ram" example="4 GB">%1$s</xliff:g> Arbeitsspeicher, <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g> Speicherplatz</string>
+    <string name="hymt2_status_downloaded_disabled">Heruntergeladen, aber deaktiviert (<xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g> Speicherplatz)</string>
+    <string name="hymt2_status_ready">Benötigt <xliff:g id="ram" example="4 GB">%1$s</xliff:g> Arbeitsspeicher, <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g> Speicherplatz</string>
+    <string name="hymt2_status_downloading">Wird heruntergeladen… <xliff:g id="bytes_so_far" example="120 MB">%1$s</xliff:g> von <xliff:g id="bytes_total" example="1.5 GB">%2$s</xliff:g></string>
+    <string name="hymt2_status_verifying">Download wird überprüft…</string>
+    <string name="hymt2_disable_title"><xliff:g id="brand_hymt2" example="Hy-MT2">Hy-MT2</xliff:g> deaktivieren?</string>
+    <string name="hymt2_disable_message">Das <xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g> große Modell ist installiert. Du kannst es für später behalten oder löschen, um Speicherplatz freizugeben.</string>
+    <string name="hymt2_download_failed">Download fehlgeschlagen: <xliff:g id="error_message" example="Network unreachable">%1$s</xliff:g></string>
+    <string name="hymt2_metered_warning_title">Über ein getaktetes Netzwerk herunterladen?</string>
+    <string name="hymt2_metered_warning_message"><xliff:g id="brand_hymt2" example="Hy-MT2">Hy-MT2</xliff:g> ist <xliff:g id="download_size" example="1.5 GB">%1$s</xliff:g> groß. Dieses Netzwerk ist als getaktet markiert. Fortfahren?</string>
+    <string name="hymt2_disable_keep">Nur deaktivieren</string>
+    <string name="hymt2_disable_delete">Modell löschen</string>
     <string name="hymt_status_not_downloaded">Benötigt <xliff:g id="ram" example="4 GB">%1$s</xliff:g> Arbeitsspeicher, <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g> Speicherplatz</string>
 
     <string name="hymt_status_downloaded_disabled">Heruntergeladen, aber deaktiviert (<xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g> Speicherplatz)</string>
@@ -1048,7 +1105,46 @@
          ═══════════════════════════════════════════════════════════════ -->
 
     <string name="degraded_warning_offline">Offline – die Übersetzungsqualität ist reduziert</string>
+    <string name="degraded_warning_cooldown">Dienst nicht verfügbar bis <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>. Qualität reduziert</string>
+    <string name="degraded_warning_quota">Kontingent aufgebraucht bis <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>. Qualität reduziert</string>
+    <string name="degraded_warning_account">Problem mit dem Dienstkonto. Qualität reduziert</string>
     <string name="degraded_warning_low_memory">Wenig Arbeitsspeicher – die Übersetzungsqualität ist reduziert</string>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         TRANSLATION ERROR PILL
+         ═══════════════════════════════════════════════════════════════ -->
+
+    <string name="translation_error_connection">Verbindungsfehler</string>
+
+    <string name="translation_error_auth"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: ungültiger API-Schlüssel</string>
+
+    <string name="translation_error_billing"><xliff:g id="service" example="Claude">%1$s</xliff:g>: Guthaben aufgebraucht</string>
+
+    <string name="translation_error_daily_quota"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: Tageslimit erreicht</string>
+
+    <string name="translation_error_monthly_quota"><xliff:g id="service" example="DeepL">%1$s</xliff:g>: Monatskontingent aufgebraucht</string>
+
+    <string name="translation_error_rate_limited"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: zu viele Anfragen</string>
+
+    <string name="translation_error_server"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: Serverfehler</string>
+
+    <string name="translation_error_rejected_code"><xliff:g id="service" example="OpenAI">%1$s</xliff:g>: Anfrage abgelehnt (HTTP <xliff:g id="status_code" example="404">%2$s</xliff:g>)</string>
+
+    <string name="translation_error_rejected"><xliff:g id="service" example="OpenAI">%1$s</xliff:g>: Anfrage abgelehnt</string>
+
+    <string name="translation_error_bad_response"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: unerwartete Antwort</string>
+
+    <string name="translation_error_timeout"><xliff:g id="service" example="DeepSeek">%1$s</xliff:g>: reagiert nicht</string>
+
+    <string name="translation_error_unreachable"><xliff:g id="service" example="Lingva">%1$s</xliff:g>: keine Verbindung möglich</string>
+
+    <string name="translation_error_discard_card_title">Karte verwerfen?</string>
+
+    <string name="translation_error_discard_card_message">Wenn du die Einstellungen öffnest, geht diese Karte verloren und du musst sie aus einer neuen Aufnahme neu erstellen.</string>
+
+    <string name="translation_error_discard_card_confirm">Zu den Einstellungen</string>
+
+    <string name="hold_translation_failed">Konnte nicht übersetzt werden</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          MAIN SCREEN — bottom-bar and overflow-menu items
@@ -1186,6 +1282,22 @@
 
     <string name="settings_vertical_grow_subtitle">Vergrößert schmale Felder mit vertikalem Text, damit sich die Übersetzung horizontal lesen lässt. Kann benachbarte Inhalte verdecken.</string>
 
+    <string name="settings_header_overlay">Overlay</string>
+
+    <string name="settings_overlay_min_text_title">Minimale Textgröße</string>
+
+    <string name="settings_overlay_min_text_subtitle">Wenn du diesen Wert änderst, können Overlays größer als der Originaltext werden.</string>
+
+    <string name="settings_overlay_min_text_warning">EXPERIMENTELL. Kann dazu führen, dass Overlays der automatischen Übersetzung häufiger entfernt werden, besonders bei Spielen mit vielen Animationen</string>
+
+    <string name="settings_overlay_min_text_example">Beispieltext</string>
+
+    <string name="settings_filter_furigana_title">Furigana aus dem OCR-Ergebnis filtern</string>
+
+    <string name="settings_edge_indicator_title">Randanzeige</string>
+
+    <string name="settings_edge_indicator_subtitle">Zeigt ein sanftes Leuchten am Bildschirmrand, solange das Overlay zu sehen ist.</string>
+
     <!-- ═══════════════════════════════════════════════════════════════
          HOTKEY SETUP DIALOG
          ═══════════════════════════════════════════════════════════════ -->
@@ -1204,11 +1316,11 @@
 
     <string name="cd_translation_result_back">Zurück</string>
 
-    <string name="cd_copy_translation">Übersetzung kopieren</string>
-
     <string name="cd_toggle_translation_visibility">Übersetzung ein-/ausblenden</string>
 
     <string name="cd_toggle_inline_furigana">Inline-Furigana ein-/ausschalten</string>
+
+    <string name="cd_toggle_inline_pinyin">Inline-Pinyin ein-/ausschalten</string>
 
     <string name="cd_text_size">Textgröße</string>
 
@@ -1216,9 +1328,17 @@
 
     <string name="cd_edit_original">Originaltext bearbeiten</string>
 
-    <string name="cd_copy_original">Original kopieren</string>
-
     <string name="cd_add_to_anki">Zu <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> hinzufügen</string>
+
+    <string name="cd_more_actions">Weitere Aktionen</string>
+
+    <string name="header_action_furigana">Furigana</string>
+
+    <string name="header_action_pinyin">Pinyin</string>
+
+    <string name="header_action_read_aloud">Vorlesen</string>
+
+    <string name="header_action_edit">Text bearbeiten</string>
 
     <string name="cd_toggle_original_visibility">Original ein-/ausblenden</string>
 
@@ -1753,6 +1873,7 @@
     <string name="tts_voice_picker_title">Stimme</string>
 
     <string name="tts_voices_section_header">STIMMEN FÜR <xliff:g id="language" example="JAPANESE">%1$s</xliff:g></string>
+    <string name="tts_speed_title">Geschwindigkeit</string>
 
     <string name="tts_no_engine_dialog_title">Keine Sprachausgabe</string>
 
@@ -1860,6 +1981,8 @@
     <string name="settings_debug_show_detection_log">Erkennungsprotokoll anzeigen</string>
     <string name="settings_debug_log_pinhole">Pinhole-Metriken des Live-Modus protokollieren</string>
     <string name="settings_debug_save_ocr_seed">OCR-Aufnahmen als Seeds speichern</string>
+    <string name="settings_debug_short_text_routing">Offline-Routing für kurze Texte</string>
+    <string name="settings_debug_force_mmap_weights">Laden der Gewichte per mmap erzwingen (LLM auf dem Gerät)</string>
     <string name="settings_debug_log_grouping">OCR-Gruppierungsentscheidungen protokollieren</string>
     <string name="settings_debug_angle_gate">Klassischer Winkelschwellenwert (10°)</string>
     <string name="settings_debug_log_trace">Trace des Textverlaufs aufzeichnen</string>
@@ -1930,6 +2053,9 @@
     <string name="pos_conjunction">Konjunktion</string>
     <string name="pos_interjection">Interjektion</string>
     <string name="pos_preposition">Präposition</string>
+    <string name="pos_postposition">Postposition</string>
+    <string name="pos_determiner">Determinativ</string>
+    <string name="pos_article">Artikel</string>
     <string name="pos_prefix">Präfix</string>
     <string name="pos_suffix">Suffix</string>
     <string name="pos_counter">Zählwort</string>

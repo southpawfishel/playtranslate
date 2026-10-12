@@ -20,6 +20,7 @@ import android.widget.TextView
 import androidx.appcompat.content.res.AppCompatResources
 import androidx.core.graphics.drawable.DrawableCompat
 import com.playtranslate.overlay.OverlayHost
+import com.playtranslate.overlay.WindowChurnGate
 import com.playtranslate.R
 import androidx.core.graphics.toColorInt
 
@@ -217,10 +218,20 @@ class WordLookupPopup(
 
         if (overlayHost != null) {
             // Backend overlay host — registers the window so it's blanked
-            // alongside the icon/magnifier during clean screenshots.
+            // alongside the icon/magnifier during clean screenshots. The host
+            // also mirrors the game's system-bar state onto this focusable
+            // window, so taking focus doesn't flash the nav pill over an
+            // immersive game.
             if (!overlayHost.addOverlayWindow(container, wm, popupParams, displayId)) return false
         } else {
+            // Activity-window popup: the focused panel becomes the system-bar
+            // control target just like an overlay would, so mirror the hosting
+            // activity's bar state (read from its decor BEFORE our window can
+            // affect it) — else opening the popup un-hides bars the activity
+            // keeps hidden.
+            val activityHiddenBars = OverlayHost.hiddenSystemBarsOfActivity(ctx)
             try { wm.addView(container, popupParams) } catch (_: Exception) { return false }
+            OverlayHost.mirrorSystemBars(container, activityHiddenBars)
         }
         // Request window focus so onGenericMotionListener receives joystick
         // events (the previous architecture got focus via the backdrop).
@@ -235,6 +246,11 @@ class WordLookupPopup(
             if (overlayHost != null) {
                 overlayHost.removeOverlayWindow(view)
             } else {
+                // Activity-window popup: deliberately NOT gated through
+                // WindowChurnGate — a destroy deferred past the hosting
+                // activity's finish would trip the framework's
+                // window-leak detection. Its add still ticks the gate's
+                // quiet clock above.
                 try { wm.removeView(view) } catch (_: Exception) {}
             }
         }

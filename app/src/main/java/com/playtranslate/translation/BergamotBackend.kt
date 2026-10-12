@@ -7,7 +7,7 @@ import com.playtranslate.translation.bergamot.BergamotTranslator
 
 /**
  * Offline NMT backend: Firefox Translations (Bergamot) via slimt built with the
- * gemmology int8 backend — correct on arm64 (avoids the ruy garbage bug) and
+ * gemmology int8 backend (Firefox's shift arithmetic; see bergamot_jni.cpp),
  * ~18 ms/sentence on a Snapdragon 8 Gen 2.
  *
  * The everyday "fast offline" tier: priority 28, just above ML Kit (30) and
@@ -37,12 +37,6 @@ class BergamotBackend(
      *  headword and definition-gloss waterfall over ML Kit (see
      *  OfflineFallbackTranslators). */
     override val usableAsOfflineFallback: Boolean = true
-
-    /** arm64-only (the .so) and real-ARM-only — gates the backend off 32-bit
-     *  (like the MNN tier) and off binary-translated environments, where
-     *  Houdini-class translators SIGSEGV libbergamot_jni's thread_locals
-     *  (see [BinaryTranslation]). */
-    fun supportsNativeRuntime(): Boolean = supportsNativeRuntime(appContext)
 
     override fun isUsable(source: String, target: String): Boolean {
         if (!supportsNativeRuntime()) return false
@@ -92,10 +86,11 @@ class BergamotBackend(
     }
 
     companion object {
-        /** Static form for callers without a backend instance (BergamotWarmup,
-         *  which runs before/without the registry). Same gate as the instance
-         *  [supportsNativeRuntime]. */
-        fun supportsNativeRuntime(context: Context): Boolean =
-            Process.is64Bit() && !BinaryTranslation.isTranslated(context)
+        /** arm64-only (the .so), like the MNN tier: false on a 32-bit process.
+         *  Static so BergamotWarmup, which runs before/without the registry,
+         *  shares the backend's own check. Binary-translated hosts used to be
+         *  refused too; the thread-local crash behind that is fixed in the
+         *  build (bergamot/src/main/cpp/CMakeLists.txt). */
+        fun supportsNativeRuntime(): Boolean = Process.is64Bit()
     }
 }

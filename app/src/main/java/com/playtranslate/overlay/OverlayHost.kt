@@ -1,7 +1,9 @@
 package com.playtranslate.overlay
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.PixelFormat
 import android.graphics.Point
 import android.hardware.display.DisplayManager
@@ -10,10 +12,15 @@ import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
+import androidx.annotation.RequiresApi
 import androidx.core.view.doOnLayout
 import com.playtranslate.DrawRateProbe
 import com.playtranslate.displaySizePx
+import com.playtranslate.displayWindowMetrics
+import com.playtranslate.overlay.OwnWindows
 
 /**
  * Owns every overlay window the app paints on a game display — the registry,
@@ -50,6 +57,14 @@ class OverlayHost(
     /** Per-display 1×1 touch sentinels — see [addTouchSentinel]. */
     private val touchSentinels = mutableMapOf<Int, View>()
 
+    /** Per display, the clean captures in flight, from [prepareForCleanCapture]
+     *  to [restoreAfterCapture]. A window added meanwhile starts blanked and
+     *  comes back with the newest of them, so it can't reach a frame stamped
+     *  free of our overlays (Codex 2026-09-27: a translation-error pill
+     *  reported mid-capture could). Every capture site restores in a
+     *  `finally`, so an entry never outlives its capture. */
+    private val capturesInFlight = mutableMapOf<Int, MutableList<OverlayState>>()
+
     /** One handle's snapshot for restore: the handle plus the alpha it was
      *  at before [prepareForCleanCapture] blanked it. Stored because not
      *  every overlay runs at α=1 — the MediaProjection live-pinhole window
@@ -61,28 +76,47 @@ class OverlayHost(
         val originalAlpha: Float,
     )
 
-    /** Opaque snapshot returned by [prepareForCleanCapture]. */
+    /** Opaque snapshot returned by [prepareForCleanCapture]. The two flags
+     *  are deliberately separate because their freshness-wait PROOFS differ
+     *  and a consumer must know which one it holds. */
     class OverlayState internal constructor(
-        internal val saved: List<SavedHandle>
-    ) {
-        /** True when the prepare call actually blanked at least one visible
-         *  window. When false, no frame can contain this backend's overlays
-         *  AND no blank-induced repaint is coming — callers gating capture
-         *  freshness on the blank must not wait for one. */
-        val blankedAnything: Boolean get() = saved.isNotEmpty()
-    }
+        internal val displayId: Int,
+        /** Mutable so a window added while this capture is in flight joins
+         *  its restore ([addOverlayWindow]). */
+        internal val saved: MutableList<SavedHandle>,
+        /** This prepare blanked at least one visible window. The blank's own
+         *  repaint is guaranteed to come AND lands after any anchor taken
+         *  before the prepare call, so a wait predicated on that anchor
+         *  terminates. */
+        val blankedAnything: Boolean,
+        /** A just-removed window is a defused-but-not-yet-composited
+         *  [WindowChurnGate] ghost on this display — visible when defused,
+         *  unregistered, surface still live until its alpha-0 commits. Its
+         *  repaint is guaranteed to have been PRODUCED (visible → invisible
+         *  is a content change) but may have been DELIVERED before any
+         *  anchor a consumer takes now, so an anchored wait can starve on a
+         *  static screen and needs a serve-current fallback. Ghosts that
+         *  were already blanked when removed never set this: they composite
+         *  nothing and are already absent from every frame. When both flags
+         *  are false, no frame can contain this backend's overlays and no
+         *  repaint of ours is coming — waiting would only burn budget. */
+        val uncompositedGhost: Boolean,
+    )
 
     /**
      * Add a window via [WindowManager.addView] AND register it for
      * clean-capture blanking. The window's type is forced to [windowType], so
      * the caller's params need not pick a backend. Returns true on success.
      *
-     * Honors whatever [WindowManager.LayoutParams.alpha] is on [params]. In
-     * particular, the floating-icon "bring to front" path removes and re-adds
-     * the icon with the same params object — if a clean capture has the icon
-     * blanked at alpha=0, the re-added window stays invisible until the
-     * capture's restore fires. Forcing alpha=1 here would flash the icon
-     * mid-capture and contaminate the bitmap.
+     * Honors whatever [WindowManager.LayoutParams.alpha] is on [params] —
+     * never forces alpha=1. Historically load-bearing for the icon
+     * bring-to-front's same-params re-add (a capture-blanked icon had to
+     * come back at alpha 0); that path now replaces its view with fresh
+     * params, but the contract stays: a caller's pre-set alpha is a
+     * deliberate statement about capture interplay, not a bug to correct.
+     * One exception, for the length of a clean capture of [displayId]: a
+     * window added then goes up blanked and returns to its alpha with the
+     * capture's restore ([capturesInFlight]).
      */
     fun addOverlayWindow(
         view: View,
@@ -90,6 +124,14 @@ class OverlayHost(
         params: WindowManager.LayoutParams,
         displayId: Int,
     ): Boolean {
+        // Belt: a re-add of a view with a pending gated destroy would make
+        // the addView below throw "view already attached", so flush it first.
+        // No current caller re-adds a removed view (the icon re-raise
+        // replaces its view instead — the flush's synchronous destroy is
+        // release-adjacent to this add, the shape the gate prevents), so
+        // this should never fire; it exists so a future same-view re-add
+        // degrades to the old risk instead of crashing the add.
+        WindowChurnGate.flushPendingFor(view)
         params.type = windowType
         // Service-added windows are software-rendered by default (the
         // manifest's hardwareAccelerated only covers activity windows).
@@ -112,16 +154,37 @@ class OverlayHost(
         // (Thor 2026-07-05: menu window 1920x1080 -> 1240x1080 nine ms after a
         // gear tap; 1240 = the app display's width). Pin every full-screen
         // overlay to its own display's explicit size so overlay == display by
-        // construction on every API level.
+        // construction on every API level. WRAP_CONTENT widths go through the
+        // same delegation (Thor 2026-09-26: the translation-error pills' wrap
+        // window came out 1240px wide on the 1920px screen), so a window whose
+        // content can be wider than the narrowest display pins its own width
+        // (TranslationErrorPills does).
         if (fullScreen) pinFullScreenSize(params, displayId)
+        // A focusable window becomes the system-bar control target on focus,
+        // and its default requested state is "bars visible" — which yanks the
+        // nav pill (and status bar) back over an immersive game the moment a
+        // popup opens. Read the game's current bar state BEFORE this window
+        // exists, and arm the same request on it right after addView so the
+        // request is already recorded when focus lands.
+        val focusable = params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE == 0
+        val hiddenBars = if (focusable) hiddenSystemBarsOnDisplay(displayId) else null
+        // A clean capture of this display is in flight: go up blanked and
+        // come back with it, or this window lands in its frame.
+        val capture = capturesInFlight[displayId]?.lastOrNull()
+        val requestedAlpha = params.alpha
+        if (capture != null) params.alpha = 0f
         return try {
             wm.addView(view, params)
-            overlayWindows += OverlayHandle(view, wm, params, displayId)
+            if (focusable) mirrorSystemBars(view, hiddenBars)
+            val handle = OverlayHandle(view, wm, params, displayId)
+            overlayWindows += handle
+            capture?.saved?.add(SavedHandle(handle, requestedAlpha))
             logOverlayGeometry(view, params, displayId, fullScreen)
             logFocusableOverlay("add", view, params, displayId)
             DrawRateProbe.attach(view, "${view.javaClass.simpleName}@d$displayId")
             true
         } catch (e: Exception) {
+            params.alpha = requestedAlpha
             Log.w(TAG, "addOverlayWindow failed: ${e.message}")
             false
         }
@@ -162,6 +225,49 @@ class OverlayHost(
         val handle = overlayWindows.firstOrNull { it.view === view } ?: return
         if (!pinFullScreenSize(handle.params, displayId)) return
         try { handle.wm.updateViewLayout(view, handle.params) } catch (_: Exception) {}
+    }
+
+    /**
+     * Which system bars (status/navigation) the app under our overlays
+     * currently has hidden on [displayId], as a [WindowInsets.Type] mask —
+     * read from the DISPLAY's insets state through a window-metrics query
+     * ([displayWindowMetrics]), never from one of our own windows' insets.
+     * Null when unknowable: pre-R (per-type visibility only exists in the R
+     * insets model, and the legacy approximation reads a NO_LIMITS window's
+     * zero insets as "hidden", which would blanket-hide bars the game never
+     * hid), or the metrics query failed. Safe to call in the same frame a
+     * window was added: nothing here waits on a traversal.
+     *
+     * Why not a registered window's [View.getRootWindowInsets] (the read
+     * this replaced): from Android 12 a window is dispatched only the insets
+     * sources of the windows ABOVE it in Z order (WindowState.mAboveInsetsState,
+     * filled by InsetsStateController.updateAboveInsetsState's top-down walk,
+     * which seeds the state with cutout + gesture types only and adds each
+     * window's provided sources after visiting it). TYPE_ACCESSIBILITY_OVERLAY
+     * (layer 31) sits above the status bar (15) and navigation bar (24), so on
+     * the accessibility backend the bar sources are absent from every window
+     * of ours, an absent type reads as not visible, and the mask came back
+     * 0x3 whatever the game requested — right by coincidence over an
+     * immersive game, and hiding both bars over everything else (the Thor
+     * "status bar disappears on capture" report, 2026-09-06). The
+     * window-metrics path is InsetsPolicy.getInsetsForWindowMetrics server
+     * side: the display's raw state with transiently-shown bars masked as
+     * hidden, i.e. exactly the request of whichever window holds the bar
+     * control. A display with no bar of a type (the Thor's second screen has
+     * no status bar) reads that type as hidden, and hiding a bar that does
+     * not exist is a no-op.
+     *
+     * Only meaningful as a picture of the GAME's state while no focusable
+     * overlay of ours holds the bar control — but every focusable overlay we
+     * add mirrors the state it observed (see [addOverlayWindow] /
+     * [mirrorSystemBars]), so inductively the global state under any stack of
+     * our windows still equals the game's own request.
+     */
+    fun hiddenSystemBarsOnDisplay(displayId: Int): Int? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        val insets = displayContextFor(displayId)?.displayWindowMetrics()?.windowInsets
+            ?: return null
+        return hiddenBarsMask(insets)
     }
 
     /**
@@ -233,23 +339,34 @@ class OverlayHost(
         return context.createDisplayContext(display)
     }
 
-    /** Unregister and call [WindowManager.removeView]. Returns true if the
-     *  view was registered (and thus removed). Returns false if the view was
-     *  never registered — callers that fall back to a direct removeView for
-     *  windows added before a host existed rely on this.
+    /** Unregister and remove. Returns true if the view was registered (and
+     *  thus removed). Returns false if the view was never registered — callers
+     *  that fall back to a direct removeView for windows added before a host
+     *  existed rely on this.
      *
-     *  [immediate] tears the window's surface down synchronously
-     *  ([WindowManager.removeViewImmediate]) instead of queuing an async
-     *  removeView whose surface lingers a frame or two — so a clean capture
-     *  started right after the removal can't race the leftover surface (e.g. the
-     *  floating menu's dim/hint landing in live mode's first frame). */
+     *  Removal is routed through [WindowChurnGate]: the window is defused
+     *  synchronously (window alpha 0 — invisible to eyes AND captures by the
+     *  same SurfaceFlinger mechanism clean-capture blanking trusts —
+     *  untouchable, unfocusable) and its surface destroyed in the next
+     *  add-quiet gap, keeping our surface releases away from our surface
+     *  creations (the Thor firmware crash — see the gate's docs).
+     *
+     *  [immediate] used to mean [WindowManager.removeViewImmediate] so a
+     *  clean capture started right after couldn't race the leftover visible
+     *  surface (the floating menu's dim/hint in live mode's first frame).
+     *  That guarantee is now structural instead: a defused ghost arms
+     *  [OverlayState.awaitRepaint] until its alpha-0 has provably composited
+     *  ([WindowChurnGate.hasUncompositedGhostOn]), so the capture paths wait
+     *  for a post-defuse frame instead of relying on synchronous teardown.
+     *  Both variants defuse identically; the flag is vestigial. */
     fun removeOverlayWindow(view: View, immediate: Boolean = false): Boolean {
         val handle = overlayWindows.firstOrNull { it.view === view } ?: return false
         overlayWindows -= handle
-        try {
-            if (immediate) handle.wm.removeViewImmediate(view) else handle.wm.removeView(view)
-        } catch (_: Exception) {}
+        // Log BEFORE the gate: its defuse sets NOT_FOCUSABLE on these params,
+        // which would make every removal read as non-focusable and silence
+        // the focusable paper trail.
         logFocusableOverlay("remove", view, handle.params, handle.displayId)
+        WindowChurnGate.removeWindow(view, handle.wm, handle.params, handle.displayId)
         return true
     }
 
@@ -267,7 +384,7 @@ class OverlayHost(
         val display = context.getSystemService(DisplayManager::class.java)
             ?.getDisplay(displayId) ?: return
         val displayContext = context.createDisplayContext(display)
-        val wm = displayContext.getSystemService(WindowManager::class.java) ?: return
+        val wm = OwnWindows.manager(displayContext) ?: return
         val view = View(displayContext)
         view.setOnTouchListener { _, event ->
             if (event.actionMasked == MotionEvent.ACTION_OUTSIDE) onOutsideTouch()
@@ -330,15 +447,52 @@ class OverlayHost(
                 handle.params.alpha = originalAlpha
             }
         }
-        return OverlayState(saved)
+        val state = OverlayState(
+            displayId,
+            saved,
+            blankedAnything = saved.isNotEmpty(),
+            uncompositedGhost = WindowChurnGate.hasUncompositedGhostOn(displayId),
+        )
+        capturesInFlight.getOrPut(displayId) { mutableListOf() } += state
+        return state
     }
 
     /** Restores blanked overlays to the alpha they had before
-     *  [prepareForCleanCapture] blanked them. Most overlays were at α=1.0
-     *  and come back there; the MediaProjection live-pinhole window is the
-     *  only current exception (returns to the system obscuring cap). */
+     *  [prepareForCleanCapture] blanked them, and those added while the
+     *  capture was in flight to the alpha they were added with. Most
+     *  overlays were at α=1.0 and come back there; the MediaProjection
+     *  live-pinhole window is the only current exception (returns to the
+     *  system obscuring cap). Safe to call twice (the capture sites restore
+     *  early and again in a `finally`). */
     fun restoreAfterCapture(state: OverlayState) {
+        capturesInFlight[state.displayId]?.let { inFlight ->
+            inFlight.remove(state)
+            if (inFlight.isEmpty()) capturesInFlight.remove(state.displayId)
+        }
         for (saved in state.saved) {
+            // A window removed between prepare and restore is a defused ghost
+            // lingering in [WindowChurnGate] — still ATTACHED, so the
+            // updateViewLayout below would succeed and resurrect a dead
+            // overlay at full alpha. Don't touch its SCREEN state — but its
+            // BOOKKEEPING must still be restored (the old code did this
+            // implicitly: the params write preceded the try, so a detached
+            // window's throw still left the object corrected). Two writes,
+            // both required: the in-memory params.alpha, and the gate ghost's
+            // own restore-snapshot — defused mid-blank, it captured our 0,
+            // and the deferred destroy writes it back into this same params
+            // object LAST, so correcting only the object here would be
+            // clobbered. Without both, a later re-add reusing the params
+            // object (icon bring-to-front) attaches invisible.
+            // Matched by VIEW, not handle identity: a same-view re-add
+            // registers a fresh handle whose window would still need its
+            // blanked alpha restored on screen below. (No current caller
+            // re-adds a removed view — the icon re-raise replaces instead —
+            // but the guard must stay correct if one appears.)
+            if (overlayWindows.none { it.view === saved.handle.view }) {
+                saved.handle.params.alpha = saved.originalAlpha
+                WindowChurnGate.correctSnapshotAlpha(saved.handle.view, saved.originalAlpha)
+                continue
+            }
             saved.handle.params.alpha = saved.originalAlpha
             try {
                 saved.handle.wm.updateViewLayout(saved.handle.view, saved.handle.params)
@@ -353,7 +507,7 @@ class OverlayHost(
         overlayWindows.clear()
         touchSentinels.clear()
         for (h in handles) {
-            try { h.wm.removeView(h.view) } catch (_: Exception) {}
+            WindowChurnGate.removeWindow(h.view, h.wm, h.params, h.displayId)
         }
     }
 
@@ -378,6 +532,108 @@ class OverlayHost(
          * Idempotent. Honors callers that explicitly set a non-DEFAULT cutout
          * mode — only the DEFAULT case is upgraded.
          */
+        /** Per-type mask of the system bars currently hidden, read from
+         *  [view]'s last-received window insets. Private on purpose: valid
+         *  ONLY for a window that sits BELOW the system bars in Z order — an
+         *  Activity's decor, via [hiddenSystemBarsOfActivity] — because from
+         *  Android 12 a window's insets carry only the sources of the windows
+         *  above it (see [hiddenSystemBarsOnDisplay]); read from one of our
+         *  overlays it answers "both hidden" whatever the game does. [view]
+         *  must be attached AND have traversed once: between addView and the
+         *  first traversal a root has no attach info and reports null insets
+         *  (there is no parent fallback, unlike
+         *  [View.getWindowInsetsController]). Null pre-R; see
+         *  [hiddenSystemBarsOnDisplay] for why pre-R stays null. */
+        private fun hiddenSystemBars(view: View): Int? {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+            val insets = view.rootWindowInsets ?: return null
+            return hiddenBarsMask(insets)
+        }
+
+        /** [insets] → [WindowInsets.Type] mask of the bar types that are not
+         *  visible. A type with no source in [insets] reads as not visible
+         *  ([WindowInsets.isVisible] is false for an absent type): right for
+         *  a display that has no such bar, and the trap [hiddenSystemBars]
+         *  documents for a window layered above the bars. */
+        @RequiresApi(Build.VERSION_CODES.R)
+        fun hiddenBarsMask(insets: WindowInsets): Int {
+            var hidden = 0
+            if (!insets.isVisible(WindowInsets.Type.statusBars())) {
+                hidden = hidden or WindowInsets.Type.statusBars()
+            }
+            if (!insets.isVisible(WindowInsets.Type.navigationBars())) {
+                hidden = hidden or WindowInsets.Type.navigationBars()
+            }
+            return hidden
+        }
+
+        /** The bars the Activity hosting [ctx] keeps hidden — the mirror
+         *  source for a window attached to an activity token (the in-app
+         *  lens and dictionary popup), read from the activity's decor, which
+         *  has been attached far longer than any window we add. [ctx] is
+         *  resolved through the ContextWrapper chain, not a bare cast: the
+         *  activity-hosted capture sheet hands its lens a themed wrapper
+         *  (CaptureResultOverlay wraps its context in overlayThemedContext),
+         *  and `as? Activity` on that is null — read as "no activity, arm
+         *  nothing" (a Codex find). Null when no Activity hosts [ctx], or
+         *  pre-R. */
+        fun hiddenSystemBarsOfActivity(ctx: Context): Int? =
+            hostingActivity(ctx)?.window?.decorView?.let { hiddenSystemBars(it) }
+
+        /** The Activity beneath [ctx]'s wrapper chain, if any. */
+        fun hostingActivity(ctx: Context): Activity? {
+            var c: Context? = ctx
+            while (c != null) {
+                if (c is Activity) return c
+                c = (c as? ContextWrapper)?.baseContext
+            }
+            return null
+        }
+
+        /**
+         * Arm [view]'s window with the same system-bar visibility the app
+         * beneath maintains ([hiddenTypes], from [hiddenSystemBarsOnDisplay] /
+         * [hiddenSystemBarsOfActivity]) so the window can take input focus —
+         * and with it the bar control — without flashing the nav pill or
+         * status bar over an immersive game. Call on an ATTACHED window,
+         * BEFORE the focus grant lands (right after addView, or before the
+         * updateViewLayout that clears FLAG_NOT_FOCUSABLE): requested
+         * visibility is per-window state the system applies when the window
+         * becomes the control target.
+         *
+         * [hiddenTypes] == null (state unknowable) leaves the window's
+         * default request, bars visible. Pre-R that is policy and silent;
+         * on R+ it is a miss and is logged, because the device-pass probes
+         * grep this tag and a silent no-op is exactly the failure they
+         * cannot see. Bars the app shows are explicitly show()n so a re-arm
+         * can clear a stale hide.
+         */
+        fun mirrorSystemBars(view: View, hiddenTypes: Int?) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+            if (hiddenTypes == null) {
+                Log.w(
+                    TAG,
+                    "[BarMirror] ${view.javaClass.simpleName} unknowable, default request stands"
+                )
+                return
+            }
+            val controller = view.windowInsetsController ?: return
+            val allBars = WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars()
+            val showTypes = allBars and hiddenTypes.inv()
+            if (hiddenTypes != 0) {
+                // The game's own semantics: hidden bars stay swipeable, and a
+                // swipe reveals them transiently rather than re-showing them.
+                controller.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.hide(hiddenTypes)
+            }
+            if (showTypes != 0) controller.show(showTypes)
+            Log.i(
+                TAG,
+                "[BarMirror] ${view.javaClass.simpleName} hidden=0x${hiddenTypes.toString(16)}"
+            )
+        }
+
         fun applyFullScreenOverlayDefaults(params: WindowManager.LayoutParams) {
             val fullScreen =
                 params.width == WindowManager.LayoutParams.MATCH_PARENT &&

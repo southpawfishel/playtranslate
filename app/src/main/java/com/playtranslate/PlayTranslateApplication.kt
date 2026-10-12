@@ -8,8 +8,10 @@ import android.os.Bundle
 import com.playtranslate.capture.CaptureBackendResolver
 import com.playtranslate.diagnostics.CrashHandler
 import android.content.Context
+import android.util.Log
 import com.playtranslate.region.RegionPolicy
 import com.playtranslate.translation.GemmaE2BMnnBackend
+import com.playtranslate.translation.HyMt2Backend
 import com.playtranslate.translation.HyMtBackend
 import com.playtranslate.translation.BergamotBackend
 import com.playtranslate.translation.MlKitBackend
@@ -19,6 +21,7 @@ import com.playtranslate.translation.QwenMnnBackend
 import com.playtranslate.translation.Qwen35Mnn2bBackend
 import com.playtranslate.translation.TranslationBackendRegistry
 import com.playtranslate.translation.mnn.MnnTranslator
+import com.playtranslate.overlay.OwnWindows
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,6 +42,10 @@ class PlayTranslateApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         CrashHandler.install(this)
+        // Translation-waterfall forensics (failure ring + connectivity
+        // summary for the log-export header). Before the registry init so
+        // the first waterfall pass can already record.
+        com.playtranslate.diagnostics.TranslationDiag.init(this)
         // Collect Anki screenshot pins orphaned by a crash/process death
         // (their send's finally never ran). Also swept opportunistically on
         // every pin; this catches the "never sends again" tail. Off-main:
@@ -47,6 +54,11 @@ class PlayTranslateApplication : Application() {
         // History capture images orphaned by FIFO prune / row deletes /
         // process death mid-copy — reconciled against surviving rows.
         com.playtranslate.translationlog.HistoryImageStore.sweepAsync(this)
+        // Hidden words for the current source language: load off-main now so
+        // the first results list and sentence card draw their stubs on the
+        // first pass. Structural fallback for every other language (and a
+        // load that lands late): the hosts collect HiddenWordsStore.revision.
+        com.playtranslate.vocab.HiddenWordsStore.warm(this, Prefs(this).sourceLangId)
         // Push the persisted grouping-debug flag into the process-wide
         // OcrManager singleton before any OCR can run. The SettingsRenderer
         // toggle also writes this on change, so the in-memory copy stays in
@@ -72,6 +84,9 @@ class PlayTranslateApplication : Application() {
                     com.playtranslate.ocr.core.OcrBox.ANGLE_LEGACY_GATE_DEG
             }
         }
+        // Furigana filter: a user setting, mirrored into the OCR gate like the
+        // debug toggles above (ocr.core can't read Prefs itself).
+        OcrManager.instance.filterFuriganaEnabled = Prefs(this).filterFurigana
         // Push the "Use MangaOCR" toggle + installed-pack state into the OCR gate
         // (same Context-free reason as above — the refiner can't resolve the pack itself).
         com.playtranslate.ocr.mangaocr.MangaOcrProvisioning.refresh(applicationContext)
@@ -129,6 +144,13 @@ class PlayTranslateApplication : Application() {
                             !RegionPolicy.isHunyuanRestricted(this)
                     },
                 ),
+                HyMt2Backend(
+                    // No region AND-gate here, unlike the 1.5 backend above:
+                    // Hy-MT2 is Apache-2.0 with no Territory restriction, so
+                    // the only gate is the user's own toggle.
+                    context         = this,
+                    enabledProvider = { Prefs(this).hyMt2Enabled },
+                ),
                 QwenMnnBackend(
                     context         = this,
                     enabledProvider = { Prefs(this).qwenMnnEnabled },
@@ -145,16 +167,46 @@ class PlayTranslateApplication : Application() {
             )
         )
         TranslationBackendRegistry.setOrder(OnlineServiceStore.all().map { it.id })
+        // A regained network (airplane mode off, wifi back) drops every
+        // "Connection failed" cooldown: those were recorded against the
+        // device being offline, not against the provider, and the user
+        // expects online services to work the moment connectivity is back.
+        // After the registry init on purpose — registration replays the
+        // current network at once, and the replay must find the backends.
+        com.playtranslate.net.NetworkConnectivity.install(this) {
+            TranslationBackendRegistry.onConnectivityRestored()
+        }
+        // Online translation failures surface as a pill on the game display
+        // (the registry reports every pass; the tracker decides; the active
+        // capture backend's overlay controller draws).
+        com.playtranslate.translation.TranslationErrors.install(
+            this, com.playtranslate.ui.ActiveOverlayErrorPills,
+        )
 
         // Launch-time cleanup: drop in-flight download partials for any
         // deprecated model (generic — driven by CatalogEntry.deprecated), so a
         // retired model can't resume a stale partial download. No-op for live
         // models and for fully-installed deprecated models (their install is
-        // kept; only the .partial / .tmp staging artifacts are removed). File
-        // unlinks are O(1), so this is negligible on cold start.
-        TranslationBackendRegistry.orderedBackends()
+        // kept; only the .partial / .tmp staging artifacts are removed).
+        //
+        // The unlinks run on [appScope] (IO), not here: a directory-mode model
+        // stages its verified parts in `<model>.tmp`, so an interrupted
+        // MultiFile download can leave up to a model's worth of bytes to free
+        // (Hunyuan-MT 1.5 is ~1 GB across five files), and how long that takes
+        // is entirely a property of the device's storage. Nothing downstream
+        // orders against it — a deprecated model's row is hidden unless it is
+        // fully installed, so the stale partial this deletes cannot be resumed
+        // by the user in the meantime. Backends are resolved on the main
+        // thread, where the registry was just initialized; only the deletes
+        // are deferred.
+        val deprecatedCleanup = TranslationBackendRegistry.orderedBackends()
             .filterIsInstance<com.playtranslate.translation.llm.OnDeviceLlmBackend>()
-            .forEach { it.cleanupPartialsIfDeprecated() }
+        appScope.launch {
+            deprecatedCleanup.forEach {
+                runCatching { it.cleanupPartialsIfDeprecated() }
+                    .onFailure { e -> Log.w(TAG, "deprecated partial cleanup failed: $e") }
+            }
+        }
         // Same launch-time-cleanup rationale for game-audio snapshots: the
         // in-session sweep runs only when a NEW snapshot is taken, so a
         // ~16 MB zombie from a killed-and-never-restored card flow would
@@ -189,9 +241,20 @@ class PlayTranslateApplication : Application() {
         // Right-stick scrolling on every in-app page — one Window.Callback
         // wrap per activity, so no page implements it.
         com.playtranslate.ui.ActivityStickScroll.install(this)
+        // Keep our own activity windows out of captured frames (the
+        // FLAG_SECURE replacement) — tracks started opaque activities so the
+        // capture sources can mask them at serve time.
+        com.playtranslate.capture.OwnWindowMask.install(this)
+        // Timestamp every window event of ours (activity transitions here;
+        // overlay adds, removes and blanks at their funnels) so the
+        // MediaProjection session creates its VirtualDisplay only in a
+        // window-quiet moment — the Thor display-service deadlock guard.
+        com.playtranslate.overlay.OwnWindowClock.install(this)
     }
 
     companion object {
+        private const val TAG = "PlayTranslateApp"
+
         /** Single-slot tracker for the currently-resumed PlayTranslate
          *  activity. Treats "PlayTranslate is on display X" as a 1-element
          *  set, which is correct for our usage: MainActivity launches
@@ -213,7 +276,7 @@ class PlayTranslateApplication : Application() {
         fun foregroundDisplayId(): Int? {
             val act = resumedActivity?.get() ?: return null
             return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) act.display?.displayId
-            else @Suppress("DEPRECATION") act.windowManager.defaultDisplay.displayId
+            else @Suppress("DEPRECATION") OwnWindows.managerOf(act).defaultDisplay.displayId
         }
 
         /** Simple class name of the currently-resumed PlayTranslate activity,

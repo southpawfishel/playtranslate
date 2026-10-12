@@ -291,6 +291,9 @@
     <string name="note_mlkit_no_internet">⚠ Нет подключения к интернету — показан офлайн-перевод (более низкое качество).</string>
 
     <string name="note_mlkit_service_unavailable">⚠ Сервис перевода недоступен — показан офлайн-перевод (более низкое качество).</string>
+    <string name="note_mlkit_service_cooldown">⚠ Сервис перевода временно недоступен. Показан офлайн-перевод (более низкое качество) до <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>.</string>
+    <string name="note_mlkit_quota_exhausted">⚠ Квота перевода исчерпана. Показан офлайн-перевод (более низкое качество) до <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>.</string>
+    <string name="note_mlkit_account_issue">⚠ Проблема с аккаунтом сервиса перевода (оплата или баланс). Показан офлайн-перевод (более низкое качество). Проверьте сервис в настройках.</string>
 
     <string name="note_low_memory_fallback">⚠ Недостаточно памяти — показан офлайн-перевод (более низкое качество).</string>
 
@@ -405,6 +408,7 @@
     <string name="audio_recording_row_start">Начать запись звука</string>
 
     <string name="audio_recording_row_active">Идёт запись звука</string>
+    <string name="audio_recording_row_failed">Ошибка записи звука</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          MEDIAPROJECTION OVERLAY-PERMISSION DIALOG
@@ -417,14 +421,38 @@
     <string name="mp_overlay_permission_button">Открыть настройки</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
-         FLOATING-ICON GESTURE HINTS
+         FLOATING-ICON GESTURES
          ═══════════════════════════════════════════════════════════════ -->
 
-    <string name="overlay_icon_gesture_drag"><b>Проведите</b> по словам для быстрых определений</string>
+    <string name="icon_gesture_drag">Перетаскивание</string>
 
-    <string name="overlay_icon_gesture_hold"><b>Удерживайте</b> для предпросмотра перевода</string>
+    <string name="icon_gesture_hold">Удержание</string>
 
-    <string name="overlay_icon_gesture_tap"><b>Нажмите</b>, чтобы открыть быстрое меню</string>
+    <string name="icon_gesture_tap">Нажатие</string>
+
+    <string name="icon_action_lookup_words">Показать определение слова при наведении</string>
+
+    <string name="icon_action_show_translations">Показать перевод на экране</string>
+
+    <string name="icon_action_open_quick_menu">Открыть быстрое меню</string>
+
+    <string name="icon_action_capture_screen">Захватить экран</string>
+
+    <string name="icon_action_toggle_auto_translate">Запустить/остановить автоперевод</string>
+
+    <string name="icon_action_swap_furigana">Переключаться между переводом и фуриганой</string>
+
+    <string name="icon_action_swap_pinyin">Переключаться между переводом и пиньинем</string>
+
+    <string name="icon_action_change_game_language">Изменить язык игры</string>
+
+    <string name="icon_action_translating_from">Язык игры: <xliff:g id="language" example="Japanese">%1$s</xliff:g></string>
+
+    <string name="icon_gestures_no_menu_title">Ни один жест не открывает быстрое меню</string>
+
+    <string name="icon_gestures_no_menu_message">Быстрое меню нельзя будет открыть с плавающего значка. Чтобы оно оставалось доступным, назначьте действие «Открыть быстрое меню» жесту «Удержание» или «Нажатие».</string>
+
+    <string name="icon_gestures_no_menu_confirm">Понятно</string>
 
     <string name="overlay_icon_a11y_required_title">Требуются специальные возможности</string>
 
@@ -468,6 +496,7 @@
     <string name="anki_deck_picker_empty">Колоды не найдены</string>
 
     <string name="anki_deck_picker_loading">Загрузка колод…</string>
+    <string name="anki_deck_picker_title">Выбор колоды Anki</string>
 
     <string name="anki_card_type_picker_loading">Загрузка типов карточек…</string>
 
@@ -503,6 +532,16 @@
 
     <string name="anki_send_failed_message"><xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> не принял карточку. Убедитесь, что <xliff:g id="brand_ankidroid2" example="AnkiDroid">AnkiDroid</xliff:g> запущен, и повторите попытку.</string>
 
+    <string name="anki_card_too_large_title">Карточка слишком большая</string>
+
+    <string name="anki_card_too_large_prompt">Словарные определения этой карточки слишком велики для отправки в <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g>. Сохранить упрощённую карточку с определениями в виде простого текста?</string>
+
+    <string name="anki_card_too_large_simplify">Сохранить в упрощённом виде</string>
+
+    <string name="anki_card_too_large_failed">Эта карточка слишком велика для <xliff:g id="brand_ankidroid" example="AnkiDroid">AnkiDroid</xliff:g> даже с упрощёнными определениями. Попробуйте убрать несколько слов или сократить предложение.</string>
+
+    <string name="anki_added_simplified">Добавлено в <xliff:g id="brand_anki" example="Anki">Anki</xliff:g> (определения упрощены, чтобы поместиться)</string>
+
     <string name="anki_mode_sentence">Предложение</string>
 
     <string name="anki_mode_word">Слово</string>
@@ -531,17 +570,22 @@
 
     <string name="anki_group_screenshot">Снимок экрана</string>
 
-    <string name="anki_words_helper">Эти слова будут включены в карточку <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>. Нажмите на слово, чтобы выделить его на карточке. Нажмите ×, чтобы убрать его с карточки.</string>
+    <string name="anki_words_helper_hide">Эти слова будут включены в карточку <xliff:g id="brand_anki" example="Anki">Anki</xliff:g>. Нажмите на слово, чтобы выделить его. Нажмите <xliff:g id="hide_icon" example="👁">%1$s</xliff:g>, чтобы исключить его из карточки.</string>
 
     <string name="anki_translation_error">Не удалось перевести</string>
 
     <string name="anki_word_remove_content_description">Убрать с карточки</string>
+    <string name="hidden_word_hide_content_description">Скрыть слово</string>
+    <string name="hidden_word_show_content_description">Показать слово</string>
+    <string name="hidden_word_save_failed">Не удалось сохранить. Попробуйте ещё раз</string>
 
     <string name="anki_screenshot_remove_content_description">Убрать снимок экрана</string>
 
     <string name="anki_group_audio">Аудио</string>
 
     <string name="anki_audio_preview_content_description">Прослушать аудио</string>
+
+    <string name="anki_word_audio_row_title">Добавить аудио</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          GAME-AUDIO RECORDING (Settings → Anki → Audio; trim editor)
@@ -754,6 +798,7 @@
     <string name="llm_backend_invalid_key_alert_title">Не удалось проверить API-ключ</string>
 
     <string name="llm_backend_invalid_key_alert_message_fmt"><xliff:g id="backend_name" example="OpenAI">%1$s</xliff:g> отклонил введённый ключ. Проверьте его на <xliff:g id="dev_console_url" example="platform.openai.com">%2$s</xliff:g> и повторите попытку.</string>
+    <string name="llm_backend_key_needs_workspace_scope">Этот ключ не привязан к рабочему пространству, поэтому здесь его использовать нельзя. В Claude Console создайте ключ внутри конкретного рабочего пространства и введите его.</string>
 
     <string name="llm_backend_invalid_key_alert_button">ОК</string>
 
@@ -1025,6 +1070,18 @@
 
     <!-- ── Tencent Hunyuan-MT 1.5 1.8B ────────────────────────────── -->
 
+    <string name="hymt2_status_not_downloaded">Требуется <xliff:g id="ram" example="4 GB">%1$s</xliff:g> памяти, <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g> в хранилище</string>
+    <string name="hymt2_status_downloaded_disabled">Скачано, но отключено (<xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g> в хранилище)</string>
+    <string name="hymt2_status_ready">Требуется <xliff:g id="ram" example="4 GB">%1$s</xliff:g> памяти, <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g> в хранилище</string>
+    <string name="hymt2_status_downloading">Скачивание… <xliff:g id="bytes_so_far" example="120 MB">%1$s</xliff:g> из <xliff:g id="bytes_total" example="1.5 GB">%2$s</xliff:g></string>
+    <string name="hymt2_status_verifying">Проверка загрузки…</string>
+    <string name="hymt2_disable_title">Отключить <xliff:g id="brand_hymt2" example="Hy-MT2">Hy-MT2</xliff:g>?</string>
+    <string name="hymt2_disable_message">Модель размером <xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g> установлена. Вы можете оставить её на потом или удалить, чтобы освободить место.</string>
+    <string name="hymt2_download_failed">Ошибка скачивания: <xliff:g id="error_message" example="Network unreachable">%1$s</xliff:g></string>
+    <string name="hymt2_metered_warning_title">Скачать по лимитному подключению?</string>
+    <string name="hymt2_metered_warning_message">Размер <xliff:g id="brand_hymt2" example="Hy-MT2">Hy-MT2</xliff:g> — <xliff:g id="download_size" example="1.5 GB">%1$s</xliff:g>. Это подключение отмечено как лимитное. Продолжить?</string>
+    <string name="hymt2_disable_keep">Только отключить</string>
+    <string name="hymt2_disable_delete">Удалить модель</string>
     <string name="hymt_status_not_downloaded">Требуется <xliff:g id="ram" example="4 GB">%1$s</xliff:g> памяти, <xliff:g id="disk_size" example="1.5 GB">%2$s</xliff:g> в хранилище</string>
 
     <string name="hymt_status_downloaded_disabled">Скачано, но отключено (<xliff:g id="disk_size" example="1.5 GB">%1$s</xliff:g> в хранилище)</string>
@@ -1102,7 +1159,46 @@
          ═══════════════════════════════════════════════════════════════ -->
 
     <string name="degraded_warning_offline">Офлайн — качество перевода снижено</string>
+    <string name="degraded_warning_cooldown">Сервис недоступен до <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>. Качество снижено</string>
+    <string name="degraded_warning_quota">Квота исчерпана до <xliff:g id="retry_time" example="3:42 PM">%1$s</xliff:g>. Качество снижено</string>
+    <string name="degraded_warning_account">Проблема с аккаунтом сервиса. Качество снижено</string>
     <string name="degraded_warning_low_memory">Недостаточно памяти — качество перевода снижено</string>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         TRANSLATION ERROR PILL
+         ═══════════════════════════════════════════════════════════════ -->
+
+    <string name="translation_error_connection">Ошибка подключения</string>
+
+    <string name="translation_error_auth"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: недействительный API-ключ</string>
+
+    <string name="translation_error_billing"><xliff:g id="service" example="Claude">%1$s</xliff:g>: недостаточно средств</string>
+
+    <string name="translation_error_daily_quota"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: достигнут дневной лимит</string>
+
+    <string name="translation_error_monthly_quota"><xliff:g id="service" example="DeepL">%1$s</xliff:g>: месячная квота исчерпана</string>
+
+    <string name="translation_error_rate_limited"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: слишком много запросов</string>
+
+    <string name="translation_error_server"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: ошибка сервера</string>
+
+    <string name="translation_error_rejected_code"><xliff:g id="service" example="OpenAI">%1$s</xliff:g>: запрос отклонён (HTTP <xliff:g id="status_code" example="404">%2$s</xliff:g>)</string>
+
+    <string name="translation_error_rejected"><xliff:g id="service" example="OpenAI">%1$s</xliff:g>: запрос отклонён</string>
+
+    <string name="translation_error_bad_response"><xliff:g id="service" example="Gemini">%1$s</xliff:g>: неожиданный ответ</string>
+
+    <string name="translation_error_timeout"><xliff:g id="service" example="DeepSeek">%1$s</xliff:g>: не отвечает</string>
+
+    <string name="translation_error_unreachable"><xliff:g id="service" example="Lingva">%1$s</xliff:g>: не удаётся подключиться</string>
+
+    <string name="translation_error_discard_card_title">Отказаться от карточки?</string>
+
+    <string name="translation_error_discard_card_message">Если открыть настройки, эта карточка будет потеряна и её придётся заново создать из нового захвата экрана.</string>
+
+    <string name="translation_error_discard_card_confirm">Перейти в настройки</string>
+
+    <string name="hold_translation_failed">Не удалось перевести</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          MAIN SCREEN — bottom-bar and overflow-menu items
@@ -1240,6 +1336,22 @@
 
     <string name="settings_vertical_grow_subtitle">Расширяет узкие рамки вертикального текста, чтобы перевод читался горизонтально. Может перекрывать соседнее содержимое.</string>
 
+    <string name="settings_header_overlay">Наложение</string>
+
+    <string name="settings_overlay_min_text_title">Минимальный размер текста</string>
+
+    <string name="settings_overlay_min_text_subtitle">При изменении этого значения наложения могут стать больше исходного текста.</string>
+
+    <string name="settings_overlay_min_text_warning">ЭКСПЕРИМЕНТАЛЬНО. Наложения автоперевода могут чаще исчезать, особенно в играх с большим количеством анимации</string>
+
+    <string name="settings_overlay_min_text_example">Пример текста</string>
+
+    <string name="settings_filter_furigana_title">Фильтровать фуригану из результата OCR</string>
+
+    <string name="settings_edge_indicator_title">Подсветка краёв экрана</string>
+
+    <string name="settings_edge_indicator_subtitle">Показывает мягкое свечение по краям экрана, пока отображается наложение.</string>
+
     <!-- ═══════════════════════════════════════════════════════════════
          HOTKEY SETUP DIALOG
          ═══════════════════════════════════════════════════════════════ -->
@@ -1258,11 +1370,11 @@
 
     <string name="cd_translation_result_back">Назад</string>
 
-    <string name="cd_copy_translation">Копировать перевод</string>
-
     <string name="cd_toggle_translation_visibility">Показать или скрыть перевод</string>
 
     <string name="cd_toggle_inline_furigana">Включить или выключить встроенную фуригану</string>
+
+    <string name="cd_toggle_inline_pinyin">Включить или выключить встроенный пиньинь</string>
 
     <string name="cd_text_size">Размер текста</string>
 
@@ -1270,9 +1382,17 @@
 
     <string name="cd_edit_original">Изменить исходный текст</string>
 
-    <string name="cd_copy_original">Копировать оригинал</string>
-
     <string name="cd_add_to_anki">Добавить в <xliff:g id="brand_anki" example="Anki">Anki</xliff:g></string>
+
+    <string name="cd_more_actions">Другие действия</string>
+
+    <string name="header_action_furigana">Фуригана</string>
+
+    <string name="header_action_pinyin">Пиньинь</string>
+
+    <string name="header_action_read_aloud">Прочитать вслух</string>
+
+    <string name="header_action_edit">Изменить текст</string>
 
     <string name="cd_toggle_original_visibility">Показать или скрыть оригинал</string>
 
@@ -1825,6 +1945,7 @@
     <string name="tts_voice_picker_title">Голос</string>
 
     <string name="tts_voices_section_header">ГОЛОСА: <xliff:g id="language" example="JAPANESE">%1$s</xliff:g></string>
+    <string name="tts_speed_title">Скорость</string>
 
     <string name="tts_no_engine_dialog_title">Нет синтеза речи</string>
 
@@ -1932,6 +2053,8 @@
     <string name="settings_debug_show_detection_log">Показывать журнал обнаружения</string>
     <string name="settings_debug_log_pinhole">Журналировать метрики pinhole режима реального времени</string>
     <string name="settings_debug_save_ocr_seed">Сохранять захваты OCR как образцы</string>
+    <string name="settings_debug_short_text_routing">Офлайн-маршрутизация коротких текстов</string>
+    <string name="settings_debug_force_mmap_weights">Принудительная загрузка весов через mmap (локальная LLM)</string>
     <string name="settings_debug_log_grouping">Журналировать решения группировки OCR</string>
     <string name="settings_debug_angle_gate">Классический порог угла (10°)</string>
     <string name="settings_debug_log_trace">Записывать трассировку журнала переводов</string>
@@ -2002,6 +2125,9 @@
     <string name="pos_conjunction">Союз</string>
     <string name="pos_interjection">Междометие</string>
     <string name="pos_preposition">Предлог</string>
+    <string name="pos_postposition">Послелог</string>
+    <string name="pos_determiner">Детерминатив</string>
+    <string name="pos_article">Артикль</string>
     <string name="pos_prefix">Приставка</string>
     <string name="pos_suffix">Суффикс</string>
     <string name="pos_counter">Счётное слово</string>

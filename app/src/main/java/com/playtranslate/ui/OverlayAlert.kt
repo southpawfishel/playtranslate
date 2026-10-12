@@ -16,7 +16,6 @@ import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.widget.Button
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -178,6 +177,19 @@ class OverlayAlert private constructor(
             alert.showInDialog(dialog)
             return alert
         }
+
+        /** Shows as an in-window child of [parent] — the floating workspace's
+         *  modal layer ([com.playtranslate.ui.OverlayWorkspace]). In-window
+         *  rather than a sibling overlay window because MediaProjection's QTI
+         *  clamp dims a sibling to ~80% and it steals the host window's taps
+         *  (see [FontSizeRangePopover]). If the parent's window is torn down
+         *  while the alert is up (workspace dismissal), the cancel handler
+         *  fires with [DismissReason.LIFECYCLE_PAUSE]. */
+        fun showInParent(parent: ViewGroup): OverlayAlert {
+            val alert = OverlayAlert(context, title, message, buttons, showAppIcon, onCancel)
+            alert.showInParent(parent)
+            return alert
+        }
     }
 
     private var scrim: FrameLayout? = null
@@ -221,37 +233,17 @@ class OverlayAlert private constructor(
             setOnClickListener { }
         }
 
-        // App icon — larger image centered in a clipped circle (matches FloatingIconMenu).
-        // Shown only when the caller opted in via Builder.showIcon() — off by
-        // default because the app's utility popups don't need the brand mark.
+        // App icon in a circle ([appIconCircle]). Shown only when the caller
+        // opted in via Builder.showIcon() — off by default because the app's
+        // utility popups don't need the brand mark.
         if (showAppIcon) {
             val circleSize = (56 * dp).toInt()
-            val imgSize = (circleSize * 1.5f).toInt()
-            val iconFrame = FrameLayout(context).apply {
+            dialog.addView(appIconCircle(context, circleSize).apply {
                 layoutParams = LinearLayout.LayoutParams(circleSize, circleSize).apply {
                     gravity = Gravity.CENTER_HORIZONTAL
                     bottomMargin = (16 * dp).toInt()
                 }
-                clipToOutline = true
-                outlineProvider = object : android.view.ViewOutlineProvider() {
-                    override fun getOutline(view: View, outline: android.graphics.Outline) {
-                        outline.setOval(0, 0, view.width, view.height)
-                    }
-                }
-            }
-            val icon = ImageView(context).apply {
-                setImageResource(R.mipmap.ic_launcher_img)
-                scaleType = ImageView.ScaleType.FIT_CENTER
-                // The mark is deliberately larger than its circular frame and
-                // bleeds past every edge; Gravity.CENTER states that directly.
-                // The equivalent negative left/top margins it replaces relied on
-                // the default TOP|START gravity, which resolves to RIGHT under
-                // an RTL system locale — there FrameLayout drops leftMargin and
-                // the mark drifts off-centre horizontally.
-                layoutParams = FrameLayout.LayoutParams(imgSize, imgSize, Gravity.CENTER)
-            }
-            iconFrame.addView(icon)
-            dialog.addView(iconFrame)
+            })
         }
 
         // Title
@@ -432,6 +424,20 @@ class OverlayAlert private constructor(
     private fun showInDialog(dialog: Dialog) {
         val decor = dialog.window?.decorView as? ViewGroup ?: return
         attachToDecor(decor)
+    }
+
+    /** Attaches as a child of [parent] (the workspace modal layer). A detach
+     *  of the scrim we didn't initiate — the parent's window tearing down —
+     *  dispatches LIFECYCLE_PAUSE, mirroring [attachToForeground]'s listener;
+     *  our own removeView is guarded by [dismissed] in [detachAndDispatch]. */
+    private fun showInParent(parent: ViewGroup) {
+        attachToDecor(parent)
+        scrim?.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {}
+            override fun onViewDetachedFromWindow(v: View) {
+                detachAndDispatch(DismissReason.LIFECYCLE_PAUSE)
+            }
+        })
     }
 
     private fun attachToDecor(decor: ViewGroup) {

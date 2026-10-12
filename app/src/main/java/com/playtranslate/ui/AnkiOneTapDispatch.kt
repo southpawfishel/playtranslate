@@ -9,7 +9,9 @@ import androidx.lifecycle.withStarted
 import com.playtranslate.CaptureService
 import com.playtranslate.Prefs
 import com.playtranslate.R
+import com.playtranslate.language.DefinitionResult
 import com.playtranslate.language.SourceLangId
+import com.playtranslate.model.DictionaryEntry
 import com.playtranslate.model.FrequencyTag
 import com.playtranslate.model.PendingTranslation
 import kotlinx.coroutines.CancellationException
@@ -128,7 +130,7 @@ fun <T> Fragment.launchOneTapSend(
 /** Failure surface for a send whose exception was contained at the
  *  [launchOneTapSend] boundary: same message the dispatcher uses for a
  *  rejected card, on the app context so it works from any state. */
-private fun oneTapSendFailedToast(appCtx: Context) {
+internal fun oneTapSendFailedToast(appCtx: Context) {
     Toast.makeText(appCtx, R.string.anki_send_failed_message, Toast.LENGTH_LONG).show()
 }
 
@@ -141,7 +143,7 @@ fun ankiAddedSuccessRes(mode: CardMode): Int = when (mode) {
     CardMode.SENTENCE -> R.string.anki_added_sentence_success
 }
 
-private const val ONE_TAP_TAG = "AnkiOneTap"
+internal const val ONE_TAP_TAG = "AnkiOneTap"
 
 /**
  * Result surfacing for a one-tap send whose launching UI is gone by the
@@ -154,7 +156,7 @@ fun oneTapResultToast(appCtx: Context, result: AnkiSendResult, mode: CardMode) {
     when (result) {
         is AnkiSendResult.Success -> Toast.makeText(
             appCtx,
-            result.mediaShortfallRes() ?: ankiAddedSuccessRes(mode),
+            result.shortfallRes() ?: ankiAddedSuccessRes(mode),
             Toast.LENGTH_SHORT,
         ).show()
         is AnkiSendResult.Failed -> Toast.makeText(
@@ -163,6 +165,9 @@ fun oneTapResultToast(appCtx: Context, result: AnkiSendResult, mode: CardMode) {
             Toast.LENGTH_LONG,
         ).show()
         is AnkiSendResult.NeedsMapping -> Unit
+        // Unreachable on one-tap: no oversizePrompt is passed, so the
+        // dispatcher auto-simplifies instead of asking.
+        is AnkiSendResult.Declined -> Unit
     }
 }
 
@@ -266,7 +271,7 @@ suspend fun Context.oneTapSendSentence(
 
     // Match the sheet's defaults exactly:
     //  - With a target word (lens / popup path), select only that
-    //    word. SentenceAnkiContentFragment.kt:228-231 does the same.
+    //    word. SentenceAnkiContentView.handleAudioPick does the same.
     //  - Without a target word (translation-result path), start with
     //    NO words selected. The sheet leaves selectedWords empty and
     //    relies on the user toggling targets via the per-word rows;
@@ -279,7 +284,7 @@ suspend fun Context.oneTapSendSentence(
         else
             emptySet()
     // Per-target-word audio: the sheet seeds each target's audio
-    // toggle from prefs.ankiWordAudioEnabled (SentenceAnkiContentFragment.kt:509-510).
+    // toggle from prefs.ankiWordAudioEnabled (SentenceAnkiContentView.addWordAudioRow).
     // Mirror that — every selected target gets word audio when the
     // pref is on. With selectedWords empty (path A), this is empty
     // too; no extra TTS synthesis.
@@ -306,16 +311,24 @@ suspend fun Context.oneTapSendSentence(
 
 /**
  * Word one-tap. No preloading (the caller already has the resolved
- * dictionary fields — that's the precondition for the Anki button
- * being tappable). Uses the flat fallback definition for both default
- * and structured paths via [WordAnkiHtmlBuilder.wrapFlatDefinitionHtml].
- * If the user wants the richer per-sense definition the sheet renders,
- * they long-press to edit.
+ * [entry] — that's the precondition for the Anki button being tappable).
+ * The Definition field is the same one the review sheet would send for an
+ * unedited entry: [WordCardDefinition] rendered by the pipeline, imported
+ * groups styled through their structured glossaries when the dictionary
+ * carries them. [defResult] is the surface's target-language tier when it
+ * resolved one (the detail page); null keeps the pack's own glosses, and
+ * [fallbackDefinition] is the flat text used only when the entry has no
+ * renderable senses. [entries] is every entry the lookup returned
+ * ([entry] first): the surfaces' sense rows flatten across POS-split
+ * entries, and the card must match what they showed.
  */
 suspend fun Context.oneTapSendWord(
     word: String,
     reading: String,
     pos: String,
+    entry: DictionaryEntry,
+    entries: List<DictionaryEntry>,
+    defResult: DefinitionResult?,
     fallbackDefinition: String,
     freqScore: Int,
     pitch: List<Int>,
@@ -325,9 +338,6 @@ suspend fun Context.oneTapSendWord(
 ): AnkiSendResult {
     val ctx = this
     val prefs = Prefs(ctx)
-    // Two stylers, one shape: the default model's CSS defines the gl-*
-    // classes, the structured path inlines them.
-    val definitionsHeader = ctx.getString(R.string.anki_group_definitions)
     val input = WordSendInput(
         word = word,
         reading = reading,
@@ -340,11 +350,13 @@ suspend fun Context.oneTapSendWord(
         includeWordAudio = prefs.ankiWordAudioEnabled,
         // wordSelection stays Auto — saved-voice TTS (Commons-first when
         // enabled), matching the sheet's default cell.
-        defaultDefinitionHtml = WordAnkiHtmlBuilder.wrapFlatDefinitionHtml(
-            fallbackDefinition, classStyler, definitionsHeader),
-        inlineDefinitionHtml = WordAnkiHtmlBuilder.wrapFlatDefinitionHtml(
-            fallbackDefinition, inlineStyler, definitionsHeader),
-        inlineExamplesHtml = "",
+        definition = WordCardDefinition(
+            fallback = fallbackDefinition,
+            entry = entry,
+            entries = entries,
+            defResult = defResult,
+            targetLang = prefs.targetLang,
+        ),
     )
     return ctx.sendWordCard(input, deckId = prefs.ankiDeckId)
 }
@@ -368,6 +380,8 @@ suspend fun Context.oneTapSend(
     word: String,
     reading: String,
     pos: String,
+    entry: DictionaryEntry,
+    entries: List<DictionaryEntry>,
     fallbackDefinition: String,
     freqScore: Int,
     pitch: List<Int>,
@@ -378,6 +392,7 @@ suspend fun Context.oneTapSend(
     screenshotPath: String?,
     sourceLangId: SourceLangId,
     pendingTranslation: PendingTranslation? = null,
+    defResult: DefinitionResult? = null,
 ): Pair<AnkiSendResult, CardMode> =
     if (sentenceIsJustTheWord(sentenceOriginal, word) ||
         Prefs(this).ankiPreferredCardMode == CardMode.WORD) {
@@ -385,6 +400,9 @@ suspend fun Context.oneTapSend(
             word = word,
             reading = reading,
             pos = pos,
+            entry = entry,
+            entries = entries,
+            defResult = defResult,
             fallbackDefinition = fallbackDefinition,
             freqScore = freqScore,
             pitch = pitch,

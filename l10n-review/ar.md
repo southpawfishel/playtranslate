@@ -493,3 +493,194 @@ case), and matches the Yomitan family's own convention anyway (`yomitan_io_error
 delta's hardest spot, an arbitrary Latin-script dictionary title dropped into four Arabic
 sentences, is handled by the القاموس head-noun construction and holds for any title.
 RTL rendering of the four mixed Arabic + Latin + digit strings still wants a device pass.
+
+## Delta review 2026-09-08 (7 keys: oversize-card guard + two debug rows)
+
+Mechanical layer verified programmatically across all 12 locales: all 7 delta names
+present, no extras, no duplicate `name=`; every `<xliff:g>` span byte-identical to EN
+(`id`, `example`, inner brand text); no `%n$s` in this delta; `<b>`, `\n`, `\{ \}`,
+`&lt;/&gt;/&amp;` counts match; no unescaped `'`/`"`; no em/en dashes. Analyzer reports
+`missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD SUCCESSFUL. No
+`<plurals>` in this delta. **No 🛑 build-breaking issues.**
+
+**Render code read before reviewing** (per the 2026-07-14 lesson): the prompt is an
+`OverlayAlert` capped at 280 dp with **full-width, vertically stacked** buttons
+(`OverlayAlert.kt` :306-341) and the debug rows are `settings_row_switch.xml` →
+`Text.PT.RowTitle`, 15 sp, **no `maxLines`, no `ellipsize`**. Nothing in this delta
+clips; long labels wrap. Accuracy was preferred over brevity throughout.
+
+**Source-side finding (EN, applies to all 12 locales) — ❌ fixed in this pass.** The
+comment on `anki_card_too_large_title` claimed the title serves "the oversize-card prompt
+AND the too-large failure alert". It does not: every failure path shows
+`anki_card_too_large_failed` either under `anki_send_failed_title` (`AnkiUiHelper.kt`
+:1060, `TranslationResultFragment.kt` :967, `WordDetailBinder.kt` :691) or with **no title
+at all** as a `LENGTH_LONG` Toast (`AnkiOneTapDispatch.kt` :162,
+`TranslationResultFragment.kt` :1082). The failure string therefore has to name its own
+subject, and was reviewed on that basis in every locale. The EN comment now says so.
+
+### Findings (delta)
+
+Three ⚠️, all applied.
+
+| name | severity | current (was) | applied | note |
+|---|---|---|---|---|
+| anki_card_too_large_prompt | ⚠️ | «بتعريفات نصية عادية» | «تعريفاتها بالنص العادي» | "plain text" is already owned by the file: `yomitan_styling_subtitle` ends «لاستخدام النص العادي دائمًا». The adjectival «نصية عادية» was a fresh coinage for a term that had a committed translation two rows away. The replacement is a nominal relative clause on an indefinite antecedent (no الذي — correct), so it also stops the sentence stacking three adjectives on بطاقة. |
+| anki_card_too_large_simplify | ⚠️ | «حفظ نسخة مبسّطة» | «حفظ بطاقة مبسّطة» | The button introduced a second noun for the object — نسخة (copy) — where the app's word throughout is بطاقة, and where the prompt body one line above already says «حفظ بطاقة مبسّطة». Now the button byte-matches the action its own body offers, which is what the translation contract asks for. |
+| settings_debug_short_text_routing | ⚠️ | «توجيه النصوص القصيرة دون اتصال» | «توجيه دون اتصال للنصوص القصيرة» | The postposed «دون اتصال» landed on النصوص القصيرة, so the row read "routing of short texts that are offline" rather than "offline routing of short texts". This is the exact multi-locale trap recorded in `l10n-updating-locales.md` after "Classic angle threshold" (es/fr/pt-BR/ar simultaneously) — same shape, two nouns and one modifier, and Arabic fell for it again. Moving the modifier next to توجيه fixes the attachment. |
+
+### Clean areas (delta) — checked, no findings
+
+**The failure body stands alone.** «هذه البطاقة أكبر من أن يقبلها AnkiDroid» names its own
+subject, so it survives being shown titleless as a Toast, and reads correctly under
+`anki_send_failed_title` «تعذّرت إضافة البطاقة» in the dialog path.
+
+**Elative construction, not a calque.** Both "too big to…" sentences use أكبر من أن +
+subjunctive («أكبر من أن تُرسَل», «أكبر من أن يقبلها») rather than a literal كبير جدًا لـ.
+The title keeps كبيرة جدًا, which is the idiomatic short form for a heading and matches the
+definite-subject/indefinite-predicate shape of `anki_send_failed_title`.
+
+**No sentence opens on a Latin token**, per the ar parameters: the prompt opens تعريفات,
+the failure هذه, the toast تمت, the mmap row فرض. AnkiDroid and Anki sit mid-sentence in
+all four, and mmap / LLM are trailing inside the debug row.
+
+**Terminology.** بطاقة (card), التعريفات (definitions), القاموس (dictionary),
+«على الجهاز» for on-device — the last taken from `llm_prompt_advisory_too_long`'s
+«النماذج العاملة على الجهاز» rather than coined. «تبسيط / مبسّطة» is one root across all
+four oversize strings.
+
+**Toast shape.** «تمت الإضافة إلى Anki (…)» is byte-identical in its opening to
+`anki_added_no_audio` / `_no_screenshot`, so the simplified toast joins that family
+instead of starting a second one.
+
+### Verdict
+
+**PASS after fixes.** Three ⚠️, all corrected; no ❌ in the Arabic itself. RTL rendering of
+the two strings that mix Arabic with Latin brand names, and of the mmap row's trailing
+`mmap` + `LLM` inside parentheses, still wants a device pass.
+
+## Delta review 2026-09-23 (6 keys: the results headers' ⋯ overflow menu)
+
+Mechanical layer verified programmatically across all 12 locales: all 6 delta names
+present once, no extras; no `<xliff:g>`, placeholders, `<plurals>`, quotes or
+apostrophes, and no em/en dashes in this delta. The two orphans `cd_copy_original` /
+`cd_copy_translation` (the headers' copy buttons, removed with this change) are deleted.
+For this delta's keys the analyzer reports nothing missing and nothing orphaned; the
+remaining `missing=14 orphan=1` belong to other, not-yet-synced features (icon gestures,
+edge indicator, the Anki words helper). `:app:processDebugResources` BUILD SUCCESSFUL.
+**No 🛑 build-breaking issues.**
+
+**Render code read before reviewing.** The four `header_action_*` names, like the reused
+`cd_add_to_anki`, `cd_text_size` and `capture_show_on_screen`, are the rows of
+`ActionOverflowMenu`: 15 sp medium, `maxLines=1` + `ellipsize=end`, in a card 160 to 280
+dp wide less 72 dp of icon and padding, so up to about 208 dp of label. `cd_more_actions`
+is spoken only (the ⋯ button's description and the menu's pane title);
+`cd_toggle_inline_pinyin` is the furigana button's spoken name when the source is Chinese
+(it replaces a hardcoded English "Toggle inline pinyin").
+
+### Findings (delta)
+
+None.
+
+### Clean areas (delta) — checked, no findings
+
+**Siblings, one term swapped.** «تبديل بينيين المضمّن» mirrors «تبديل فوريغانا المضمّنة»,
+with masculine agreement for بينيين (a writing system, نظام).
+
+**The ⋯.** «مزيد من الإجراءات» parallels `capture_sliver_expand_hint` «اضغط لمزيد من الخيارات»
+(مزيد من + plural), with الإجراءات for actions.
+
+**Row names and RTL.** «قراءة بصوت عالٍ» and «تعديل النص» are the verbal nouns of
+`cd_read_original_aloud` and `cd_edit_original`. The row's icon sits at the start (the
+right under RTL), before the label; no delta string starts with a Latin token.
+
+### Verdict
+
+**PASS.** Every delta string reuses the locale's own committed wording for its sibling
+(the furigana toggle, the read-aloud and edit descriptions, the parked sheet's "more"
+hint), so the menu reads in the same voice as the buttons it replaces.
+
+## Delta review 2026-09-29 (39 keys + 1 orphan: floating-icon gestures and the no-menu alert, "Change game language", the translation error pill and its discard confirm, the hold failure pill, the Overlay card rows, the Anki words helper)
+
+Mechanical layer verified programmatically across all 12 locales: all 39 delta names
+present once, the orphan `anki_words_helper` deleted (its replacement
+`anki_words_helper_hide` was translated afresh, as its commit asked), no duplicate `name=`;
+every `<xliff:g>` span byte-identical to EN (`id`, `example`, inner text); `%1$s`/`%2$s`
+parity; `<b>`, `\n`, `\{ \}`, `&lt;/&gt;/&amp;` counts match; no unescaped `'`/`"`; each file
+parses. Analyzer reports `missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD
+SUCCESSFUL. No `<plurals>` in this delta. `settings_filter_furigana_title` (already
+translated) was moved from its old Debug position to its English position between the new
+Overlay rows, text unchanged, so the file stays diffable against English. **No 🛑
+build-breaking issues.**
+
+**Render code read before reviewing.**
+- `icon_gesture_*` are bold 15 sp in the Settings cell's `TableLayout`; only the action
+  column shrinks (`shrinkColumns="2"`), so the longest gesture word sets the width left for
+  all three action titles. They are also the picker page's section headers
+  (`Text.PT.GroupHeader`, ALL CAPS, 11 sp). Action titles wrap freely in the cell and in the
+  picker's `settings_row_choice` rows (no `maxLines`).
+- `icon_action_translating_from` and `hold_translation_failed` are drawn by
+  `OverlayUiController.showNoTextPill` as ONE line of `Canvas.drawText` in a window sized to
+  the text: no wrapping, so both must stay short. `%1$s` is `SourceLangId.displayName()`,
+  the language name in the UI locale with its first letter capitalized.
+- The error pill (`TranslationErrorPills`) is a 14 sp TextView, `maxLines=2`, ellipsized,
+  spanning most of the display width; every message but the connection one leads with the
+  service name.
+- The no-menu alert and the discard confirm are `OverlayAlert`s with full-width stacked
+  buttons (the confirm in the danger colour, then `btn_cancel`).
+- `anki_words_helper_hide`'s `%1$s` becomes an ImageSpan of the eye glyph
+  (`inlineIconString`).
+- The Overlay card on screen: Overlay Mode, Minimum text size (title, subtitle, warning,
+  value + slider, example), Filter furigana (Japanese only), Widen vertical text, Edge
+  indicator.
+
+**Source-side observations (EN; reported, not changed):**
+1. `settings_overlay_min_text_warning` ends without a period after two sentences; every
+   locale mirrors that.
+2. The comments on `icon_action_translating_from` and `hold_translation_failed` do not say
+   the pill is a single canvas-drawn line that never wraps. A translator who writes a long
+   sentence there gets it drawn past the pill's edge.
+3. The error-pill banner asks every message to start with the service name. In an RTL
+   locale that makes the first strong character Latin, so the pill's TextView resolves an
+   LTR paragraph (see the ar report).
+4. `icon_gesture_*` asks for "short imperative verbs". Several locales label gestures with
+   an infinitive or a noun instead (see each report); the binding constraint is the width
+   one above.
+
+### Findings (delta, round 1)
+
+| name | severity | current | suggested | note |
+|---|---|---|---|---|
+| settings_overlay_min_text_warning | 💬 | …بشكل متكرر أكثر… | …بوتيرة أعلى… | Clumsy comparative. |
+| translation_error_auth … translation_error_unreachable (11 strings) | 💬 (decision) | «خدمة %1$s: …» | — | EN leads with the service name. A Latin first strong character makes the pill's TextView resolve an LTR paragraph (FIRSTSTRONG), left-aligned inside an RTL row; خدمة before the name keeps the paragraph RTL and still shows the name exactly. Kept. |
+
+### Clean areas (delta) — checked, no findings
+
+**Gestures and actions.** Gesture names are verbal nouns (السحب / الضغط المطوّل / الضغط),
+matching the file's اسحب / اضغط مطولاً / اضغط and its existing noun «الضغط المطوّل»
+(`settings_overlay_mode_subtitle`); actions are masdar like the file's other rows.
+
+**Agreement and quotes.** لإبقائها agrees with القائمة, لا تستجيب with خدمة, لاستبعادها with
+الكلمة. « » as in `overlay_hide_controls_message`; the alert's «فتح القائمة السريعة»
+byte-matches the action.
+
+**Terms.** Reused: تغيير لغة اللعبة, التقاط الشاشة, بدء/إيقاف الترجمة التلقائية, تعذّرت الترجمة,
+مفتاح API غير صالح, الحصة, الرصيد, تجريبي., تجاهل (`llm_prompt_discard_title`), التراكب.
+
+**RTL.** «(HTTP 404)» at the end of an Arabic line resolves correctly under UBA bracket
+pairing (both brackets take the Arabic context). The one-line pill «الترجمة الآن من
+اليابانية» shapes correctly through Canvas.drawText. A device pass should still confirm
+the pills and the gesture cell.
+
+### Verdict (round 1)
+
+1 💬 to apply; 1 💬 recorded as a decision.
+
+### Round 2 (2026-09-29), after applying round 1
+
+Round-1 fix present: «…بوتيرة أعلى…». Mechanical layer re-run after the fixes: 0 problems; analyzer `missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD SUCCESSFUL. Every screen of the delta was re-read in full, not only the changed keys.
+
+| name | severity | current | suggested | note |
+|---|---|---|---|---|
+| translation_error_discard_card_message | 💬 | …وسيتعيّن عليك إنشاؤها من جديد من التقاط جديد. | …وسيتعيّن عليك إنشاؤها مرة أخرى من التقاط جديد. | جديد twice (من جديد … جديد). New in round 2; applied at the user's request. |
+
+**Verdict (round 2):** **PASS.** The one 💬 was applied at the user's request; mechanical layer, analyzer and `:app:processDebugResources` re-run clean after it.

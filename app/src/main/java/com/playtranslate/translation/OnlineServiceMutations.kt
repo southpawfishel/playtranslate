@@ -14,6 +14,11 @@ import com.playtranslate.CaptureService
  *   reconcile (and a translation-cache clear when the change can alter
  *   what a given input translates to).
  *
+ * Every mutation of one instance also forgets its translation errors
+ * ([TranslationErrors.forget]): saving its config, toggling it, picking a
+ * model, or deleting it is the user saying "try this again", so a failure
+ * after it shows its pill even if it is the one shown before.
+ *
  * All main-thread, like the registry's other mutators.
  */
 object OnlineServiceMutations {
@@ -37,6 +42,7 @@ object OnlineServiceMutations {
             OnlineBackendFactory.build(context, sharedPrefs(context), instance)
         )
         applyStoreOrder()
+        TranslationErrors.forget(instance.id)
         CaptureService.instance?.clearTranslationCache()
         CaptureService.instance?.reconcileBackendPreference()
     }
@@ -53,9 +59,15 @@ object OnlineServiceMutations {
 
     /** Switch toggle on the services page. Backend closures read the
      *  store per call, so no registry churn — just the cache-identity
-     *  reconcile. */
+     *  reconcile. The flip also drops the instance's cooldown, in either
+     *  direction: off-then-on is the user's "try it again now" gesture,
+     *  and a cooldown on a disabled instance protects nothing. Reset
+     *  before the reconcile so the preferred-backend identity is computed
+     *  against the cleared state. */
     fun setEnabled(id: String, enabled: Boolean) {
         OnlineServiceStore.setEnabled(id, enabled)
+        TranslationBackendRegistry.resetCooldown(id)
+        TranslationErrors.forget(id)
         CaptureService.instance?.reconcileBackendPreference()
     }
 
@@ -63,6 +75,7 @@ object OnlineServiceMutations {
     fun setModel(id: String, model: String) {
         val instance = OnlineServiceStore.byId(id) ?: return
         OnlineServiceStore.update(instance.copy(model = model))
+        TranslationErrors.forget(id)
         CaptureService.instance?.clearTranslationCache()
         CaptureService.instance?.reconcileBackendPreference()
     }
@@ -77,11 +90,15 @@ object OnlineServiceMutations {
     fun delete(context: Context, id: String) {
         OnlineServiceStore.remove(id)
         TranslationBackendRegistry.removeOnlineBackend(id)
-        CooldownState(context, id).recordSuccess(System.currentTimeMillis())
+        // A fresh CooldownState is right HERE (and only here): the live
+        // backend was just deregistered, so the prefs mirror is the only
+        // state left to clean.
+        CooldownState(context, id).resetCooldown()
         sharedPrefs(context).edit {
             remove("usage_${id}_day")
             remove("usage_${id}_tokens")
         }
+        TranslationErrors.forget(id)
         applyStoreOrder()
         CaptureService.instance?.reconcileBackendPreference()
     }

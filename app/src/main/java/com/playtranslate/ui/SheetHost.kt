@@ -8,11 +8,13 @@ import android.view.WindowManager
 import com.playtranslate.overlay.OverlayHost
 
 /**
- * Where a [CaptureResultOverlay] sheet lives: an overlay WINDOW over another
+ * Where a full-screen overlay panel lives: an overlay WINDOW over another
  * app (the floating-icon capture flow) or a plain child view inside an
- * activity (the camera tool's snapshot panel). The sheet's view tree and
+ * activity (the camera tool's snapshot panel). The panel's view tree and
  * behavior are host-agnostic; only attachment, removal, and the focus/IME
- * plumbing (the in-place edit, controller navigation) differ.
+ * plumbing (in-place edits, controller navigation) differ. Consumers:
+ * [CaptureResultOverlay] (the capture sheet) and [OverlayWorkspace] (the
+ * floating workspace).
  */
 interface SheetHost {
     /** Attach the sheet's full-screen [root]. Called once, from show().
@@ -31,6 +33,24 @@ interface SheetHost {
      *  no-op — the activity window is already focusable and owns its own
      *  softInputMode. */
     fun setFocusPolicy(root: View, focusable: Boolean, wantsIme: Boolean)
+
+    /** Convert the dismissed sheet into an invisible key sink so it can
+     *  outlive its UI while a controller key is still held: hidden content,
+     *  untouchable (touches fall through to the app beneath), focusability
+     *  untouched — held keys keep landing here until released (the
+     *  orphaned-UP guard, [WindowKeyPairGuard]). Returns false when the host
+     *  has no window of its own to linger (activity hosting): the activity
+     *  window survives the sheet, so pending keys cannot orphan and the
+     *  caller detaches immediately. */
+    fun beginKeySink(root: View): Boolean
+
+    /** Temporarily park the window while a helper Activity runs above the
+     *  game (the workspace's audio picker): hidden, untouchable, and
+     *  non-focusable so the activity owns the screen and its input. Unpark
+     *  restores visibility and touchability; the caller re-applies its own
+     *  focus policy after ([setFocusPolicy]). Activity hosting is a no-op —
+     *  a launched activity naturally covers the host activity. */
+    fun setParked(root: View, parked: Boolean) {}
 }
 
 /** The over-game host: a full-screen overlay window whose type is stamped by
@@ -43,7 +63,19 @@ class WindowSheetHost(
 
     private var params: WindowManager.LayoutParams? = null
 
+    /** System bars the game had hidden when the sheet attached
+     *  ([OverlayHost.hiddenSystemBarsOnDisplay] mask). Latched ONCE, at attach, and
+     *  re-armed on every later flip to focusable — a fresh read at flip time
+     *  would be poisoned in the unpark flow, where the helper Activity that
+     *  parked us (bars visible) is still on top when the caller restores our
+     *  focus policy. Attach always happens directly over the game, so the
+     *  attach-time read is the clean one. */
+    private var gameHiddenBars: Int? = null
+
     override fun attach(root: View, screenW: Int, screenH: Int, focusable: Boolean) {
+        // Read before our own window exists: once a focusable sheet holds the
+        // bar control, the observable state is our request, not the game's.
+        gameHiddenBars = overlayHost.hiddenSystemBarsOnDisplay(displayId)
         val lp = WindowManager.LayoutParams(
             screenW, screenH,
             0, // type stamped by OverlayHost
@@ -56,6 +88,8 @@ class WindowSheetHost(
         }
         applyPolicy(lp, focusable = focusable, wantsIme = false)
         params = lp
+        // addOverlayWindow itself mirrors the bars onto an attach-time
+        // focusable window; later flips re-arm from the latch below.
         overlayHost.addOverlayWindow(root, wm, lp, displayId)
     }
 
@@ -68,7 +102,46 @@ class WindowSheetHost(
 
     override fun setFocusPolicy(root: View, focusable: Boolean, wantsIme: Boolean) {
         val lp = params ?: return
+        if (focusable) {
+            // Attach's read was unknowable (the metrics query failed): retry
+            // now. Our own root is still non-focusable, so not the bar owner,
+            // and the host reads the display's state, not any window of ours.
+            if (gameHiddenBars == null) gameHiddenBars = overlayHost.hiddenSystemBarsOnDisplay(displayId)
+            // Arm before the flag change so the request is already recorded
+            // when the focus grant makes this window the bar control target.
+            OverlayHost.mirrorSystemBars(root, gameHiddenBars)
+        }
         applyPolicy(lp, focusable, wantsIme)
+        try {
+            wm.updateViewLayout(root, lp)
+        } catch (_: Exception) {
+        }
+    }
+
+    override fun beginKeySink(root: View): Boolean {
+        val lp = params ?: return false
+        root.visibility = View.INVISIBLE
+        lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        return try {
+            wm.updateViewLayout(root, lp)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    override fun setParked(root: View, parked: Boolean) {
+        val lp = params ?: return
+        root.visibility = if (parked) View.INVISIBLE else View.VISIBLE
+        lp.flags = if (parked) {
+            lp.flags or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        } else {
+            // Touchability back on; focus flags are the caller's to restore
+            // via setFocusPolicy (which rewrites the whole flag set anyway).
+            lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        }
         try {
             wm.updateViewLayout(root, lp)
         } catch (_: Exception) {
@@ -136,4 +209,8 @@ class ActivitySheetHost(private val parent: ViewGroup) : SheetHost {
         // Activity windows are always focusable; the IME rides the activity's
         // own softInputMode and the sheet's existing ime-inset lift.
     }
+
+    // The activity window outlives the sheet child — held keys keep landing
+    // in the activity, so there is nothing to linger.
+    override fun beginKeySink(root: View): Boolean = false
 }

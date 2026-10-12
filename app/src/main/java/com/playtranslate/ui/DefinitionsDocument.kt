@@ -1,6 +1,8 @@
 package com.playtranslate.ui
 
 import com.playtranslate.model.ImportedSenseGroup
+import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * Assembles the styled-definitions WebView document: a persistent SHELL
@@ -43,6 +45,26 @@ internal object DefinitionsDocument {
         val baseFontSizePx: Float,
     )
 
+    /**
+     * [argb]'s RGB at [alpha] (0..1), as a CSS color.
+     *
+     * The chip fills are washes of a theme color, which `color-mix(in srgb,
+     * X p%, transparent)` expresses exactly — and which is also exactly X at
+     * p% alpha, so we compute it here instead. That is not a style
+     * preference: a value containing `var()` cannot be validated at PARSE
+     * time, so the declaration wins the cascade and only fails later, at
+     * computed-value time, where an unsupported `color-mix` leaves the
+     * property at its INITIAL value. A second `background:` written above it
+     * as a fallback is never consulted — it lost the cascade before the
+     * failure happened. Field symptom: on the Thor's Chromium 109
+     * (color-mix landed in 111) every meta chip rendered with NO fill at
+     * all, visible the moment a structured dictionary put the panel on the
+     * styled renderer. Same rule as [PtCardTemplates]' glossary CSS: the
+     * page gets concrete colors, never an engine feature.
+     */
+    fun cssAlpha(argb: Int, alpha: Float): String =
+        cssHex(((alpha.coerceIn(0f, 1f) * 255f).roundToInt() shl 24) or (argb and 0xFFFFFF))
+
     /** ARGB Int → CSS color. Alpha-aware: opaque renders #RRGGBB, else
      *  rgba(). */
     fun cssHex(argb: Int): String {
@@ -50,10 +72,17 @@ internal object DefinitionsDocument {
         val r = (argb shr 16) and 0xFF
         val g = (argb shr 8) and 0xFF
         val b = argb and 0xFF
+        // Locale.ROOT is load-bearing, not hygiene: the default-locale
+        // formatter localizes BOTH conversions here — '%.3f' takes a comma
+        // decimal separator (de, fr, ru, pt) and '%d' can take non-Latin
+        // digits (ar). Either turns the value into something the CSS parser
+        // rejects, the declaration drops, and background falls back to
+        // transparent — the same no-fill failure as the color-mix trap
+        // above, reached by a different door and only on some devices.
         return if (a == 0xFF) {
-            "#%02X%02X%02X".format(r, g, b)
+            String.format(Locale.ROOT, "#%02X%02X%02X", r, g, b)
         } else {
-            "rgba(%d,%d,%d,%.3f)".format(r, g, b, a / 255f)
+            String.format(Locale.ROOT, "rgba(%d,%d,%d,%.3f)", r, g, b, a / 255f)
         }
     }
 
@@ -107,19 +136,24 @@ body {
 }
 .meta-chip {
   font-size: .7em; color: var(--pt-secondary);
-  /* rgba fallback first: engines without color-mix (Chromium <111) drop
-     the second declaration and keep this one. */
-  background: rgba(128,128,128,0.16);
-  background: color-mix(in srgb, var(--pt-fg) 10%, transparent);
+  /* Concrete rgba, resolved Android-side — see [cssAlpha]. NEVER color-mix
+     with a var() operand: the fallback declaration above it can't save an
+     engine that lacks the function, and the chip loses its fill entirely. */
+  background: ${cssAlpha(tokens.text, 0.10f)};
   border-radius: 4px; padding: .18em .55em;
 }
 .meta-chip.common {
   color: var(--pt-accent);
-  background: rgba(0,150,170,0.18);
-  background: color-mix(in srgb, var(--pt-accent) 16%, transparent);
+  background: ${cssAlpha(tokens.accent, 0.16f)};
   border-radius: 1em;
 }
 .meta-chip.stars { background: none; padding-left: 0; padding-right: 0; }
+/* Icon-bearing chips only: a text-only chip stays a plain inline box so a
+   long frequency source name can still wrap inside it. */
+.meta-chip.with-icon { display: inline-flex; align-items: center; gap: .35em; }
+/* 1em square, matching the native pill's icon-sized-to-its-text rule
+   ([AnkiDeckBadge.buildPill] bounds the drawable at the text size). */
+.chip-icon { width: 1em; height: 1em; flex: none; }
 .def-row { display: flex; gap: .4em; margin: .18em 0; }
 .def-num { color: var(--pt-hint); font-size: .85em; padding-top: .12em; }
 .def-text { flex: 1; min-width: 0; }
@@ -345,10 +379,22 @@ ruby > rt { font-size: .5em; }
     class MetaChip(
         val text: String,
         val kind: Kind = Kind.NEUTRAL,
-        /** Per-dictionary accent override (ARGB) for a frequency chip. */
-        val accentColor: Int? = null,
+        /** A frequency chip's accent-override colours from [freqChipColors]
+         *  — BOTH halves, so this document can only ever paint the pair the
+         *  native rows paint. Null = no override, and the stylesheet's
+         *  neutral chip treatment stands. */
+        val tint: MetaChipColors? = null,
+        /** Leading glyph, drawn in the chip's own colour. Named, never
+         *  markup: the page's icons stay this document's to author, so a
+         *  chip builder can't inject into it. */
+        val icon: Icon = Icon.NONE,
     ) {
         enum class Kind { NEUTRAL, COMMON, STARS }
+
+        /** Glyphs the meta row can draw. Each has a native counterpart the
+         *  flat renderer draws for the SAME chip — add one only alongside
+         *  the builder that owns both mediums (see [AnkiDeckBadge]). */
+        enum class Icon { NONE, CARD_STACK }
     }
 
     fun contentHtml(
@@ -372,9 +418,12 @@ ruby > rt { font-size: .5em; }
                     MetaChip.Kind.STARS -> "meta-chip stars"
                     MetaChip.Kind.NEUTRAL -> "meta-chip"
                 }
-                val tint = chip.accentColor
-                    ?.let { " style=\"background:${cssHex(it)}\"" }.orEmpty()
-                sb.append("<span class=\"$cls\"$tint>")
+                val tint = chip.tint?.let {
+                    " style=\"background:${cssHex(it.fill)};color:${cssHex(it.text)}\""
+                }.orEmpty()
+                val withIcon = if (chip.icon == MetaChip.Icon.NONE) "" else " with-icon"
+                sb.append("<span class=\"$cls$withIcon\"$tint>")
+                    .append(iconSvg(chip.icon))
                     .append(htmlEscape(chip.text)).append("</span>")
             }
             sb.append("</div>")
@@ -426,6 +475,38 @@ ruby > rt { font-size: .5em; }
         }
         return sb.toString()
     }
+
+    /**
+     * [icon]'s markup: an INLINE `<svg>`, not an `<img>`. The shell's CSP
+     * is `img-src ${YomitanContentHtml.MEDIA_ORIGIN}` — no `data:` — so a
+     * rasterized drawable would be blocked outright and a broken chip is
+     * exactly what an icon-less one already looks like. Inline markup also
+     * takes the chip's own colour through `currentColor`, which is how the
+     * native pill's icon gets tinted to the same ink.
+     *
+     * `aria-hidden`: the glyph is decorative, and the chip's visible text
+     * already names the deck (the native pill's contentDescription has no
+     * dependable span-level counterpart — see [AnkiDeckBadge.metaChip]).
+     */
+    private fun iconSvg(icon: MetaChip.Icon): String = when (icon) {
+        MetaChip.Icon.NONE -> ""
+        MetaChip.Icon.CARD_STACK ->
+            "<svg class=\"chip-icon\" viewBox=\"0 -960 960 960\" aria-hidden=\"true\">" +
+                "<path fill=\"currentColor\" d=\"$CARD_STACK_PATH\"/></svg>"
+    }
+
+    /**
+     * The `cards_stack` glyph, in the Material source SVG's own negative-Y
+     * viewBox — the very geometry `R.drawable.ic_card_stack` carries, which
+     * only has to park it in a translated group because a vector drawable's
+     * viewport must be positive-Y and an SVG's need not be.
+     *
+     * Copied rather than shared because nothing can hand one path to both
+     * `res/` and a page string at build time; `DefinitionsDocumentIconTest`
+     * fails the build if the drawable and this constant ever drift.
+     */
+    internal const val CARD_STACK_PATH =
+        "M130,-189 81,-546q-5,-32 15.5,-58t52.5,-31l61,435 283,-40h267q-8,21 -24.5,35.5T695,-187l-477,66q-33,5 -58,-15t-30,-53Zm190,-127q-33,0 -56.5,-23.5T240,-396v-364q0,-33 23.5,-56.5T320,-840h480q33,0 56.5,23.5T880,-760v364q0,33 -23.5,56.5T800,-316H320Zm0,-80h480v-364H320v364Zm0,0v-364 364ZM210,-200Zm190,-400h320v-80H400v80Zm0,120h200v-80H400v80Z"
 
     /** Whether [data] warrants the styled path at all: at least one
      *  imported sense with a fetchable structured glossary. */

@@ -50,6 +50,7 @@ class SettingsBottomSheet : DialogFragment() {
 
     // ── External callbacks (set by the host) ────────────────────────────
     var onSourceLangChanged: (() -> Unit)? = null
+    var onTargetLangChanged: (() -> Unit)? = null
     var onScreenModeChanged: (() -> Unit)? = null
     var onClose: (() -> Unit)? = null
 
@@ -75,6 +76,17 @@ class SettingsBottomSheet : DialogFragment() {
      *  callback instead. */
     private var teardownController: com.playtranslate.capture.MediaProjectionController? = null
     private val onProjectionTeardown: () -> Unit = { renderer?.refreshOverlayIconState() }
+
+    /** Same shape for the game-audio recorder's health: the audio row's
+     *  FAILED state ("Audio recording failed", tap = retry) must arrive
+     *  push-style when the reader dies while this sheet is open, exactly as
+     *  consent loss does above, or the row would keep claiming "Recording
+     *  audio" and route its tap to Anki settings until the sheet's next own
+     *  refresh. Registered on the recorder itself (realized if needed — its
+     *  construction allocates nothing; the ring waits for the first start),
+     *  the way the teardown listener realizes the controller. */
+    private var healthRecorder: com.playtranslate.capture.GameAudioRecorder? = null
+    private val onGameAudioHealthChanged: () -> Unit = { renderer?.refreshOverlayIconState() }
 
     private val requestAnkiPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -201,6 +213,10 @@ class SettingsBottomSheet : DialogFragment() {
             com.playtranslate.CaptureService.instance?.mediaProjectionController?.also {
                 it.addTeardownListener(onProjectionTeardown)
             }
+        healthRecorder =
+            com.playtranslate.CaptureService.instance?.gameAudioRecorder?.also {
+                it.addHealthListener(onGameAudioHealthChanged)
+            }
         renderer?.startCaptureButtonShimmer()
         // Re-poll the system-state cells (Anki permission, TTS engine) that can
         // change while Settings is backgrounded — the VM has no pref to observe
@@ -220,6 +236,8 @@ class SettingsBottomSheet : DialogFragment() {
         super.onPause()
         teardownController?.removeTeardownListener(onProjectionTeardown)
         teardownController = null
+        healthRecorder?.removeHealthListener(onGameAudioHealthChanged)
+        healthRecorder = null
         renderer?.stopCaptureButtonShimmer()
     }
 
@@ -301,6 +319,11 @@ class SettingsBottomSheet : DialogFragment() {
                         android.content.Intent(requireContext(), HotkeysSettingsActivity::class.java)
                     )
                 }
+                override fun openIconGesturesSettings() {
+                    startActivity(
+                        android.content.Intent(requireContext(), IconGesturesSettingsActivity::class.java)
+                    )
+                }
                 override fun openCaptureOverlaySettings() {
                     startActivity(
                         android.content.Intent(requireContext(), CaptureOverlaySettingsActivity::class.java)
@@ -356,6 +379,14 @@ class SettingsBottomSheet : DialogFragment() {
                 override fun requestAudioCaptureConsent() {
                     this@SettingsBottomSheet.requestAudioCaptureConsent()
                 }
+                override fun retryGameAudioRecording() {
+                    // The recorder's reconcile IS its retry loop; a user tap
+                    // is a push-point, which also resets the automatic-restart
+                    // budget. Start runs synchronously on main, so the refresh
+                    // below already sees the outcome.
+                    com.playtranslate.CaptureService.instance?.reconcileGameAudio()
+                    renderer?.refreshOverlayIconState()
+                }
                 override fun openAnkiSettings() {
                     openAnkiSettingsPage()
                 }
@@ -381,7 +412,7 @@ class SettingsBottomSheet : DialogFragment() {
                 onSourceLangChanged?.invoke()
             }
             override fun onTargetSelectionDone(targetCode: String) {
-                onSourceLangChanged?.invoke()
+                onTargetLangChanged?.invoke()
             }
         }
     }

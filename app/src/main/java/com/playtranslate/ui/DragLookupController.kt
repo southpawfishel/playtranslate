@@ -13,6 +13,7 @@ import android.util.TypedValue
 import com.playtranslate.AnkiManager
 import com.playtranslate.bunpro.BunproGrammarLookup
 import com.playtranslate.bunpro.BunproLookup
+import com.playtranslate.bunpro.GrammarMatch
 import com.playtranslate.CaptureService
 import com.playtranslate.R
 import com.playtranslate.capture.CaptureBackendResolver
@@ -58,6 +59,11 @@ class DragLookupController(
      *  activity flow may not hold. Null = the over-game defaults. */
     private val ttsAlertTarget: TtsAlertTarget? = null,
     private val showAnkiNotInstalled: (() -> Unit)? = null,
+    /** How the lens's open/Anki actions reach the floating workspace (see
+     *  [SourceLensActions]): a fresh workspace over the game by default;
+     *  [WorkspaceRoute.None] keeps in-activity hosts (the camera's
+     *  frozen-frame lookup) on their Activity routing. */
+    private val route: WorkspaceRoute = WorkspaceRoute.OpenNew(displayId),
 ) {
     /** Fires once per drag, on the main thread, when no popup will surface
      *  from this drag (release with no OCR / no hit / async lookup miss) or
@@ -83,6 +89,10 @@ class DragLookupController(
     private var lastWord: String? = null
     /** Current dictionary entry shown in the popup. */
     private var currentEntry: DictionaryEntry? = null
+    /** Every entry the release lookup resolved (POS-split packs return
+     *  several) — the Anki card's pack senses span all of them, like the
+     *  popup's sense rows. */
+    private var currentEntries: List<DictionaryEntry> = emptyList()
     /** Reading shown in the lens for [lastWord] — the occurrence reading
      *  (明日 → あす), stored so the Speak chip pronounces what's displayed
      *  rather than re-deriving the entry's primary headword reading (あした). */
@@ -100,15 +110,41 @@ class DragLookupController(
     private var lastSentSentence: String? = null
     private var wordLookupJob: Job? = null
 
+    /** The related units' popup data for the current lens — the containing
+     *  multi-word expression (Latin) or a fused expression's member words
+     *  (JA) the release lookup resolved — driving the split secondary
+     *  sections' open actions by index. Overwritten by every release lookup
+     *  (empty when the released word has no related units). */
+    private var currentSecondaryPopups: List<PopupData> = emptyList()
+
     /** Open-detail + Anki chip actions, shared with the capture overlay. Reads
      *  this controller's live word/entry/sentence/screenshot at tap time. */
     private val lensActions = SourceLensActions(
         context, displayId, overlayHost, magnifier,
         showAnkiNotInstalled = showAnkiNotInstalled,
+        route = route,
+        // The drag flow's detail is the Sentence/word lookup page: over the
+        // game, nothing else shows the sentence the word came from (the
+        // capture sheet's lens keeps the word page alone — its sheet already
+        // does).
+        detailPage = { WorkspaceLookupPage(it) },
+        // Secondary-section drill-in: same open-sentence route with the
+        // related unit as the word context. An out-of-range index (stale
+        // lens) is a no-op.
+        currentSecondary = { i ->
+            currentSecondaryPopups.getOrNull(i)?.let { p ->
+                LensActionContext(
+                    p.word, p.reading, p.entry, currentSentence, screenshotPath,
+                    audioAnchorMs = dragCapturedAtMs,
+                    entries = p.entries,
+                )
+            }
+        },
     ) {
         LensActionContext(
             lastWord, lastReading, currentEntry, currentSentence, screenshotPath,
             audioAnchorMs = dragCapturedAtMs,
+            entries = currentEntries,
         )
     }
 
@@ -134,15 +170,18 @@ class DragLookupController(
     private var lensRevealed = false
 
     /** Cached per-line token info for the magnifier label readout. We store
-     *  the visible surface (for hit-testing), the dictionary form (the
-     *  word shown in the lens left panel), the reading (furigana/pinyin
-     *  shown above the word), and the token's character offset within the
-     *  line text — the offset disambiguates duplicate surfaces in the same
-     *  line, which can resolve to different lemmas in context. Filled on
-     *  the OCR coroutine after recognition completes because
-     *  [engine.tokenize] is suspend; per-frame label detection then reads
-     *  this map synchronously. */
-    private data class LabelToken(
+     *  the visible surface (hit-testing AND the label text: the pill shows
+     *  what is under the finger, exactly as OCR read it), the dictionary
+     *  form (lookup identity only; it replaces the label once the
+     *  definitions land), the reading (the occurrence reading, shown above
+     *  the surface only when it adds information), and the token's
+     *  character offset within the line text — the offset disambiguates
+     *  duplicate surfaces in the same line, which can resolve to different
+     *  lemmas in context. Filled on the OCR coroutine after recognition
+     *  completes because [engine.tokenize] is suspend; per-frame label
+     *  detection then reads this map synchronously. Built by
+     *  [labelTokenFrom]. */
+    internal data class LabelToken(
         val surface: String,
         val lookupForm: String,
         val reading: String?,
@@ -174,7 +213,7 @@ class DragLookupController(
     private var dwellAnchorToken: TokenHit? = null
     private var dwellScheduled = false
     private var dwellLookupJob: Job? = null
-    private var dwellResult: Pair<DwellKey, PopupData>? = null
+    private var dwellResult: Pair<DwellKey, LookupResolution>? = null
     private val dwellTolerancePx = TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_DIP,
         DWELL_TOLERANCE_DP,
@@ -215,6 +254,7 @@ class DragLookupController(
         magnifier.onDismiss = {
             lastWord = null
             currentEntry = null
+            currentEntries = emptyList()
             lastReading = null
             // Cancel a pending speak and stop any in-progress speech when
             // the lens goes away.
@@ -258,6 +298,46 @@ class DragLookupController(
         private fun hasKanji(s: String): Boolean = s.any { c ->
             val code = c.code
             code in 0x4E00..0x9FFF || code in 0x3400..0x4DBF
+        }
+
+        /** True when [reading] adds information beyond [word] — non-blank,
+         *  not redundant, and the word actually contains kanji that the
+         *  reading clarifies. Mirrors the popup's intent (`reading != word`
+         *  on the TextView side) and the cache's hasKanji gate so both
+         *  paths converge on the same display rule. */
+        internal fun readingAddsInfo(word: String, reading: String): Boolean =
+            reading.isNotBlank() && reading != word && hasKanji(word)
+
+        /** The drag label for one annotated span, or null when the span is
+         *  not a content word (no lemma and no resolved word) or carries no
+         *  offset (lexical-tier spans).
+         *
+         *  The LABEL is the span's SURFACE — the text as OCR read it — with
+         *  the occurrence reading beneath when [readingAddsInfo] says it
+         *  helps. It is deliberately NOT the dictionary form the annotation
+         *  resolved: that form is canonical JMdict spelling with no kana
+         *  collapse (the annotation resolves through the senses-less
+         *  readings-only path, so it cannot know a word is usually kana),
+         *  and labelling with it showed 其れとも for an on-screen それとも
+         *  until the definitions replaced the pill (Thor, 2026-09-02). The
+         *  surface is what the user is pointing at, is already in hand, and
+         *  costs nothing; the dictionary form still rides along as
+         *  [LabelToken.lookupForm] for lookup identity and takes over the
+         *  pill when the definitions land. A kana surface therefore labels
+         *  as kana with no reading line, and an inflected kanji surface
+         *  (食べていた) labels as written with its own reading (たべていた),
+         *  flipping to the lemma (食べる) on release — the same flip the
+         *  pill already made for readings. Non-JA languages follow: a Latin
+         *  surface previews inflected; ZH surface and lemma coincide. */
+        internal fun labelTokenFrom(span: com.playtranslate.language.AnnotatedSpan): LabelToken? {
+            if (span.start < 0) return null
+            val form = span.word ?: span.lookupForm ?: return null
+            return LabelToken(
+                surface = span.surface,
+                lookupForm = form,
+                reading = span.reading?.takeIf { readingAddsInfo(span.surface, it) },
+                charOffset = span.start,
+            )
         }
 
         /** Expansion around the line bounds for hit-testing (3 tiers, tight
@@ -389,16 +469,19 @@ class DragLookupController(
      * popup is committed at release ([onDragEnd]).
      */
     fun onDragStart(existingScreenshotPath: String? = null) {
-        // Pre-pay the first-WebView-in-process provider init while the user
-        // is still dragging toward a word, so the first styled panel doesn't
-        // stall on it. Gated on styling actually being live; warmUp itself
-        // is once-per-process.
+        // Pre-pay the styled renderer's startup while the user is still
+        // dragging toward a word: the once-per-process provider init
+        // (warmUp) AND this window's shell-page load (prewarm) — a bind
+        // against a loaded shell is what lets the lens reveal styled
+        // directly instead of flashing flat-then-styled. Gated on styling
+        // actually being live.
         scope.launch {
             if (YomitanDataStore.stylingFor(
                     context, Prefs(context).sourceLangId.yomitanConsumingLang(),
                 ).stylingActive
             ) {
                 YomitanDefinitionsView.warmUp(context)
+                magnifier.prewarmStyledRenderer()
             }
         }
         // Tear down everything left over from the previous drag. Previous
@@ -620,7 +703,7 @@ class DragLookupController(
     private fun refreshLabelAndDwell() {
         if (!dragInProgress) return
         val currentHit = detectLabelTokenAt(lastX.toInt(), lastY.toInt())
-        magnifier.setLabel(currentHit?.token?.lookupForm, currentHit?.token?.reading)
+        magnifier.setLabel(currentHit?.token?.surface, currentHit?.token?.reading)
 
         // Dwell tracking: reset on movement past tolerance OR when the
         // token under the finger changes (rare — different word at the
@@ -683,9 +766,8 @@ class DragLookupController(
                             it.token.charOffset == anchor.token.charOffset
                     } == true
                     if (!stillHere) return@withContext
-                    val (popupData, label) = resolved
-                    dwellResult = key to popupData
-                    magnifier.setDefinitions(popupData.toLensData(), label)
+                    dwellResult = key to resolved
+                    publishLensDefinitions(resolved)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -758,10 +840,12 @@ class DragLookupController(
      *  after recognition completes.
      *
      *  One FULL-depth annotation per line (the same single analysis every
-     *  other reading surface projects from): spans arrive with canonical
-     *  written forms, occurrence-validated readings, and real offsets, so
-     *  labels are correct at first paint — the old two-phase
+     *  other reading surface projects from): spans arrive with their
+     *  surfaces, occurrence-validated readings, lookup forms and real
+     *  offsets, so labels are correct at first paint — the old two-phase
      *  tokenize-then-patch pass (and its mid-drag label upgrades) is gone.
+     *  The label shows the surface, not the resolved dictionary form; see
+     *  [labelTokenFrom] for why.
      *  Homograph disambiguation rides the annotator's per-occurrence
      *  resolution (人 → ひと vs にん by context hint), and the engine's
      *  annotation LRU makes repeat drags over an unchanged screen
@@ -777,8 +861,8 @@ class DragLookupController(
         val engine = SourceLanguageEngines.get(context, Prefs(context).sourceLangId)
         val cache = mutableMapOf<String, List<LabelToken>>()
 
-        // One FULL-depth annotation per line: spans arrive with canonical
-        // written forms and occurrence-validated readings already resolved,
+        // One FULL-depth annotation per line: spans arrive with surfaces,
+        // occurrence-validated readings and lookup forms already resolved,
         // so the label is correct at FIRST paint — no patch-in-place upgrade
         // pass, no mid-drag label flicker. The engine's annotation LRU makes
         // repeat drags over the same screen near-free. Offsets come from the
@@ -789,18 +873,7 @@ class DragLookupController(
                 val ann = engine.annotate(line.text)
                 val labels = mutableListOf<LabelToken>()
                 for (s in ann.spans) {
-                    if (s.start < 0) continue
-                    val form = s.word ?: s.lookupForm ?: continue
-                    // Same "show reading when it adds info" gate the popup
-                    // applies internally: drop blanks, drop reading equal
-                    // to the word, drop readings for kanji-free words.
-                    val reading = s.reading?.takeIf { readingAddsInfo(form, it) }
-                    labels += LabelToken(
-                        surface = s.surface,
-                        lookupForm = form,
-                        reading = reading,
-                        charOffset = s.start,
-                    )
+                    labels += labelTokenFrom(s) ?: continue
                 }
                 cache[line.text] = labels
             } catch (e: CancellationException) {
@@ -819,14 +892,6 @@ class DragLookupController(
             refreshLabelAndDwell()
         }
     }
-
-    /** True when [reading] adds information beyond [word] — non-blank,
-     *  not redundant, and the word actually contains kanji that the
-     *  reading clarifies. Mirrors the popup's intent (`reading != word`
-     *  on the TextView side) and the cache's hasKanji gate so both
-     *  paths converge on the same display rule. */
-    private fun readingAddsInfo(word: String, reading: String): Boolean =
-        reading.isNotBlank() && reading != word && hasKanji(word)
 
     /** Called on ACTION_UP. Returns true if the icon should restore to its
      *  saved position (the lens is about to settle into sticky mode with
@@ -887,7 +952,7 @@ class DragLookupController(
         // a flash of LOADING would be visually noisy.
         if (cachedData == null) {
             magnifier.setLoading(
-                releaseHit?.token?.lookupForm,
+                releaseHit?.token?.surface,
                 releaseHit?.token?.reading,
             )
         }
@@ -896,11 +961,8 @@ class DragLookupController(
             "line: ${hitLine.text}, cached=${cachedData != null}")
         lookupJob = scope.launch {
             try {
-                val resolved = if (cachedData != null) {
-                    cachedData to cachedData.machineTranslatedLabel()
-                } else {
-                    resolveLookupData(lastX.toInt(), lastY.toInt(), lines, isDwell = false)
-                }
+                val resolved = cachedData
+                    ?: resolveLookupData(lastX.toInt(), lastY.toInt(), lines, isDwell = false)
                 if (resolved == null) {
                     withContext(Dispatchers.Main) {
                         magnifier.dismiss()
@@ -908,11 +970,13 @@ class DragLookupController(
                     }
                     return@launch
                 }
-                val (popupData, label) = resolved
+                val popupData = resolved.word
                 // Release-only side effects (only when lookup succeeded).
                 lastWord = popupData.word
                 currentEntry = popupData.entry
+                currentEntries = popupData.entries
                 lastReading = popupData.reading
+                currentSecondaryPopups = resolved.phrase?.let { listOf(it) } ?: resolved.members
                 var sentenceToRecord: String? = null
                 currentSentence?.let { sent ->
                     if (sent != lastSentSentence) {
@@ -923,7 +987,7 @@ class DragLookupController(
                 }
                 withContext(Dispatchers.Main) {
                     sentenceToRecord?.let { recordLookupSentence(it) }
-                    magnifier.setDefinitions(popupData.toLensData(), label)
+                    publishLensDefinitions(resolved)
                     magnifier.makeInteractive()
                     // Lens is now in DEFINITIONS mode — the zoom no longer
                     // renders, so the bitmap can be released.
@@ -944,9 +1008,7 @@ class DragLookupController(
                             anki.decksByWord(listOf(popupData.word))[popupData.word].orEmpty()
                         }
                         if (decks.isNotEmpty()) withContext(Dispatchers.Main) {
-                            magnifier.setDefinitions(
-                                popupData.toLensData().copy(ankiDecks = decks), label,
-                            )
+                            publishLensDefinitions(resolved, ankiDecks = decks)
                         }
                     }
                 } catch (e: CancellationException) {
@@ -969,10 +1031,8 @@ class DragLookupController(
                         .orEmpty()
                     if (outcome != BunproLookup.Outcome.Unavailable || grammar.isNotEmpty()) {
                         withContext(Dispatchers.Main) {
-                            magnifier.setDefinitions(
-                                popupData.toLensData()
-                                    .copy(ankiDecks = decks, bunpro = outcome, grammar = grammar),
-                                label,
+                            publishLensDefinitions(
+                                resolved, ankiDecks = decks, bunpro = outcome, grammar = grammar,
                             )
                         }
                     }
@@ -1092,8 +1152,15 @@ class DragLookupController(
     private suspend fun captureAndOcr() {
         Log.d(TAG, "Taking screenshot for full-screen OCR...")
 
+        // maskOwnWindows = false: the lens looks up words wherever the
+        // finger is, our own pages included, so this frame must carry our
+        // UI's real pixels. The saved screenshot below therefore contains
+        // them too, by design. Live mode is already stopped for the drag
+        // (OverlayUiController's onDragStart), so no translate-path frame
+        // can be served from this capture.
         val bitmap = withTimeoutOrNull(3000L) {
-            CaptureBackendResolver.active().captureSource?.requestClean(displayId)?.bitmap
+            CaptureBackendResolver.active().captureSource
+                ?.requestClean(displayId, maskOwnWindows = false)?.bitmap
         }
         // The clean frame was captured with the lens off-screen — now it's
         // safe to bring the lens up (capture-before-reveal). Reveal even on
@@ -1138,22 +1205,22 @@ class DragLookupController(
 
     /**
      * Tokenizes the line under (fingerX, fingerY), runs the dictionary
-     * lookup, and returns a (PopupData, label) pair ready to feed into
-     * the lens — or null if no word can be resolved.
+     * lookup, and returns a [LookupResolution] ready to feed into the lens
+     * — or null if no word can be resolved.
      *
      * Idempotent side effects (`prefetchWordLookups`, `currentSentence`
      * write) run in both dwell and release branches. Release-only side
-     * effects (`lastWord`, `currentEntry`, `sendLineToMainApp`) live in
-     * the [onDragEnd] caller, NOT here — running them on dwell would push
-     * sentence intents to MainActivity before the user committed by
-     * releasing.
+     * effects (`lastWord`, `currentEntry`, `currentPhrasePopup`,
+     * `sendLineToMainApp`) live in the [onDragEnd] caller, NOT here —
+     * running them on dwell would push sentence intents to MainActivity
+     * before the user committed by releasing.
      */
     private suspend fun resolveLookupData(
         fingerX: Int,
         fingerY: Int,
         lines: List<OcrManager.OcrLine>,
         @Suppress("UNUSED_PARAMETER") isDwell: Boolean,
-    ): Pair<PopupData, String?>? {
+    ): LookupResolution? {
         // Find the line the finger is over
         val hitLine = findLineAt(fingerX, fingerY, lines)
 
@@ -1220,7 +1287,14 @@ class DragLookupController(
             }
             null
         }
+        // Phrase-aware, word-first: the popup's identity is the dragged
+        // word; the longest dictionary expression CONTAINING it rides along
+        // as the lens's phrase section — the same split the tap surfaces
+        // get via [SourceWordLookup.resolveAt]. [matchedIdx] is the matched
+        // surface's char offset in [lineText].
+        val phraseKey = withContext(Dispatchers.IO) { engine.longestPhraseAt(lineText, matchedIdx) }
         val lookupForm = matchedToken?.lookupForm ?: matchedSurface
+        val readingHint = matchedToken?.reading
 
         // Dictionary lookup using the base/dictionary form + reading hint
         val prefs = Prefs(context)
@@ -1229,7 +1303,7 @@ class DragLookupController(
             OfflineFallbackTranslators.forPair(engine.profile.translationCode, prefs.targetLang), prefs.targetLang,
             OfflineFallbackTranslators.forTarget(prefs.targetLang),
             ChineseScriptConverter.forTarget(prefs.targetLang, prefs.targetChineseVariant))
-        val defResult = withContext(Dispatchers.IO) { resolver.lookup(lookupForm, matchedToken?.reading) }
+        val defResult = withContext(Dispatchers.IO) { resolver.lookup(lookupForm, readingHint) }
         val response = defResult?.response
         val entries = response?.entries.orEmpty()
         val entry = entries.firstOrNull()
@@ -1241,11 +1315,12 @@ class DragLookupController(
         // Wiktionary's per-POS entry split doesn't lose senses). This
         // replaced a hand-rolled copy of that cascade — the last one
         // outside the shared builder.
-        val reading = matchedToken?.reading
+        val reading = readingHint
+        val displaySurface = matchedSurface
         val popupData: PopupData = if (entry != null && defResult != null) {
             val display = entry.headwordDisplay(
-                entry.selectHeadword(matchedSurface, lookupForm, matchedToken?.reading),
-                matchedSurface,
+                entry.selectHeadword(displaySurface, lookupForm, readingHint),
+                displaySurface,
             )
             PopupData(
                 word = display.written,
@@ -1254,6 +1329,7 @@ class DragLookupController(
                 freqScore = entry.freqScore,
                 isCommon = entry.isCommon == true,
                 entry = entry,
+                entries = entries,
                 // The MT badge marks tiers whose TEXT came through a
                 // translator: all of MachineTranslated, and EnglishFallback
                 // only when it carries translated definitions — the same
@@ -1293,10 +1369,121 @@ class DragLookupController(
         currentSentence = sentence
         prefetchWordLookups(sentence)
 
+        // Phrase section: the expression's own lookup, kept only when it
+        // lands a real entry (the membership gates make a miss unlikely,
+        // but an empty phrase section would be pure noise). Carries its
+        // styled payload like the primary — split sections render styled
+        // per section.
+        val phrasePopup: PopupData? = phraseKey?.let { key ->
+            relatedPopupData(resolver, prefs.targetLang, key, key, null, excludeSlug = null)
+        }
+
+        // JA inverse: the dragged token may itself be an engine-fused unit —
+        // offer ALL its qualifying member words as secondary sections
+        // (position-independent; an unresolvable member — 手当たり has no
+        // JMdict entry — simply doesn't appear). The engine's policy sets
+        // the strictness by class: phrases (exp-tagged or glue-bearing)
+        // loose — 気になる → 気, 瞬く間に → 瞬く and 間; transparent
+        // compounds (放送番組/ペース配分) need every unit accounted for —
+        // kanji words render, katakana words and particles are excused —
+        // so 図書館 stays whole. The display reading rides along so the
+        // members' hints align with it.
+        val memberPopups: List<PopupData> = if (phraseKey == null && entry != null) {
+            withContext(Dispatchers.IO) {
+                engine.memberWordsOf(
+                    popupData.word, expressionClass = entry.isExpression, headwordReading = popupData.reading,
+                )
+            }
+                .mapNotNull { m ->
+                    relatedPopupData(
+                        resolver, prefs.targetLang, m.lookupForm, m.surface, m.reading,
+                        excludeSlug = entry.slug,
+                    )
+                }
+                .distinctBy { it.word }
+        } else {
+            emptyList()
+        }
+
         // The "already in Anki" deck badge is filled in AFTER the definitions
         // render (see onDragEnd), so the dictionary lookup is never delayed by
         // the Anki content-provider query.
-        return popupData to popupData.machineTranslatedLabel()
+        return LookupResolution(word = popupData, phrase = phrasePopup, members = memberPopups)
+    }
+
+    /** Resolve one related-unit key (phrase or member) into the section
+     *  shape [resolveLookupData] returns — null when no real entry lands,
+     *  or when it lands back on [excludeSlug]'s own entry. */
+    private suspend fun relatedPopupData(
+        resolver: com.playtranslate.language.DefinitionResolver,
+        targetLang: String,
+        lookupForm: String,
+        surface: String,
+        readingHint: String?,
+        excludeSlug: String?,
+    ): PopupData? {
+        val result = withContext(Dispatchers.IO) { resolver.lookup(lookupForm, readingHint) }
+        val entries = result?.response?.entries.orEmpty()
+        val entry = entries.firstOrNull() ?: return null
+        if (excludeSlug != null && entry.slug == excludeSlug) return null
+        val display = entry.headwordDisplay(
+            entry.selectHeadword(surface, lookupForm, readingHint), surface,
+        )
+        return PopupData(
+            word = display.written,
+            reading = display.reading,
+            senses = buildSenseDisplays(result!!, entries, targetLang),
+            freqScore = entry.freqScore,
+            isCommon = entry.isCommon == true,
+            entry = entry,
+            entries = entries,
+            machineTranslated = result is DefinitionResult.MachineTranslated ||
+                (result is DefinitionResult.EnglishFallback &&
+                    result.translatedDefinitions != null),
+            pitch = display.pitch,
+            frequencies = display.frequencies,
+            importedGroups = entry.importedSenses,
+            styled = fetchYomitanStyledData(
+                context, Prefs(context).sourceLangId.yomitanConsumingLang(), entry.importedSenses,
+            ),
+        )
+    }
+
+    /** [resolveLookupData]'s result: the word under the finger, plus its
+     *  related units — the containing multi-word expression ([phrase],
+     *  Latin) or a fused expression's member words ([members], JA) — for
+     *  the lens's split secondary sections. At most one of the two is
+     *  populated. */
+    private data class LookupResolution(
+        val word: PopupData,
+        val phrase: PopupData?,
+        val members: List<PopupData> = emptyList(),
+    )
+
+    /** Bind [res] into the lens: split body when related units resolved —
+     *  phrase above the word (Latin), member words below the expression
+     *  (JA) — the single-unit body otherwise. [ankiDecks] rides the
+     *  PRIMARY section — the deck badge back-fill rebinds through here so
+     *  it can't collapse a split lens. */
+    private fun publishLensDefinitions(
+        res: LookupResolution,
+        ankiDecks: List<String> = emptyList(),
+        bunpro: BunproLookup.Outcome = BunproLookup.Outcome.Unavailable,
+        grammar: List<GrammarMatch> = emptyList(),
+    ) {
+        val wordData = res.word.toLensData()
+            .copy(ankiDecks = ankiDecks, bunpro = bunpro, grammar = grammar)
+        val wordLabel = res.word.machineTranslatedLabel()
+        val secondaries = res.phrase?.let { listOf(it) } ?: res.members
+        if (secondaries.isNotEmpty()) {
+            magnifier.setSplitDefinitions(
+                LensSection(wordData, wordLabel, opens = true),
+                secondaries.map { LensSection(it.toLensData(), it.machineTranslatedLabel(), opens = true) },
+                secondariesOnTop = res.phrase != null,
+            )
+        } else {
+            magnifier.setDefinitions(wordData, wordLabel)
+        }
     }
 
     /** Convert the controller's popup-shaped data into the lens's data
@@ -1330,6 +1517,9 @@ class DragLookupController(
         val freqScore: Int,
         val isCommon: Boolean,
         val entry: DictionaryEntry?,
+        /** Every entry the lookup returned ([entry] first); the sense rows
+         *  flatten across them, and so must an Anki card built from here. */
+        val entries: List<DictionaryEntry> = listOfNotNull(entry),
         val machineTranslated: Boolean = false,
         /** Pitch-accent downsteps from the displayed headword, for the pill. */
         val pitch: List<Int> = emptyList(),

@@ -6,16 +6,20 @@ import android.hardware.display.DisplayManager
 import com.playtranslate.BuildConfig
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.playtranslate.language.ChineseScriptVariant
+import com.playtranslate.language.HintTextKind
 import com.playtranslate.language.SourceLangId
+import com.playtranslate.language.SourceLanguageProfiles
 import com.playtranslate.model.TranslationLangContext
 import com.playtranslate.security.SecretCipher
 import com.playtranslate.security.SecretCodec
 import com.playtranslate.ui.AccentColor
 import com.playtranslate.ui.CaptureResultGeometry
 import com.playtranslate.ui.CardMode
+import com.playtranslate.ui.LookupView
 import com.playtranslate.ui.ThemeMode
 import org.json.JSONArray
 import org.json.JSONObject
+import androidx.annotation.StringRes
 import androidx.annotation.VisibleForTesting
 import androidx.core.content.edit
 import kotlinx.coroutines.channels.awaitClose
@@ -29,9 +33,20 @@ import kotlinx.coroutines.flow.callbackFlow
  * the old ordinal-based `auto_translation_mode` pref is handled in
  * [Prefs.migrateLegacyPrefs].
  */
-enum class OverlayMode(@androidx.annotation.StringRes val displayNameRes: Int) {
-    TRANSLATION(R.string.overlay_mode_option_translation),
-    FURIGANA(R.string.overlay_mode_option_furigana);
+enum class OverlayMode {
+    TRANSLATION,
+    FURIGANA;
+
+    /** This mode's name on a source language whose reading hint is [hint]. The
+     *  hint mode draws whichever hint the language has, so it has no name of its
+     *  own: Pinyin on a Pinyin language, Furigana on every other kind. */
+    @StringRes
+    fun labelRes(hint: HintTextKind): Int = when (this) {
+        TRANSLATION -> R.string.overlay_mode_option_translation
+        FURIGANA ->
+            if (hint == HintTextKind.PINYIN) R.string.overlay_mode_option_pinyin
+            else R.string.overlay_mode_option_furigana
+    }
 
     companion object {
         fun fromStorageName(name: String?): OverlayMode =
@@ -90,6 +105,14 @@ data class IconPosition(val edge: Int, val fraction: Float) {
 class Prefs internal constructor(
     context: Context,
     private val codec: SecretCodec,
+    /** Whether debug-only overrides may take effect. Debug and release builds
+     *  share an applicationId (and, here, a signing key), so a release install
+     *  over a debug one inherits every pref the debug build wrote. An override
+     *  that changes production behaviour must therefore read as OFF outside
+     *  debug builds regardless of what is stored; see [debugForceMmapWeights],
+     *  [debugShortTextRouting] and [debugLogTrace].
+     *  Seam for JVM tests; production always passes [BuildConfig.DEBUG]. */
+    private val debugBuild: Boolean = BuildConfig.DEBUG,
 ) {
 
     /** Production constructor — always the AndroidKeyStore-backed [SecretCipher].
@@ -133,6 +156,13 @@ class Prefs internal constructor(
         trySend(Unit) // seed with the current state
         awaitClose { sp.unregisterOnSharedPreferenceChangeListener(listener) }
     }
+
+    /** Read an enum stored under [key] by [Enum.name]; unset or unknown reads
+     *  as [default], so a constant retired in a later build degrades to the
+     *  default rather than a crash. */
+    private fun <E : Enum<E>> enumPref(key: String, entries: List<E>, default: E): E =
+        sp.getString(key, null)?.let { stored -> entries.firstOrNull { it.name == stored } }
+            ?: default
 
     var sourceLang: String
         get() = sp.getString(KEY_SOURCE_LANG, TranslateLanguage.JAPANESE) ?: TranslateLanguage.JAPANESE
@@ -237,6 +267,26 @@ class Prefs internal constructor(
         }
     }
 
+    /** Global TTS speech rate (0.5..2.0, 1.0 = normal), or null while the
+     *  user has never moved the speed slider. Applied by
+     *  [com.playtranslate.tts.TtsEngine] to every utterance — auditions,
+     *  speak buttons, and the Anki audio synthesized to WAV alike — so the
+     *  slider is the one app-wide speed, for every language. While null,
+     *  nothing is applied and the engine's own default rate stands (it
+     *  tracks the system-wide accessibility speech rate); the setter never
+     *  removes the key, so a cached engine can't be left holding a stale
+     *  rate after the slider returns to the 1x centre. */
+    val ttsSpeechRate: Float?
+        get() = if (sp.contains("tts_speech_rate")) {
+            sp.getFloat("tts_speech_rate", 1f)
+        } else {
+            null
+        }
+
+    fun setTtsSpeechRate(rate: Float) {
+        sp.edit { putFloat("tts_speech_rate", rate) }
+    }
+
     /**
      * Set of displays the user has selected to translate. Insertion order
      * is preserved (LinkedHashSet) so "primary" disambiguators (hotkey
@@ -269,7 +319,10 @@ class Prefs internal constructor(
      *  can't distinguish "user picked display 0" from "no selection ever made."
      *  This key-presence check is the clean signal for the auto-detect gate
      *  in `MainActivity.ensureConfigured`: only seed an auto-detected display
-     *  when there's no persisted selection to clobber.
+     *  when there's no persisted selection to clobber, and only once the
+     *  active backend is permission-backed (see
+     *  `capture.DisplaySelectionSeed`) — an unseeded getter reads as the
+     *  default display, which is exactly what MediaProjection can capture.
      *
      *  Pre-multi-display upgrade users get this set to true by
      *  [migrateLegacyPrefs], which writes [KEY_DISPLAY_IDS] from the legacy
@@ -656,6 +709,16 @@ class Prefs internal constructor(
         get() = sp.getBoolean(KEY_HYMT_ENABLED, false)
         set(v) = sp.edit { putBoolean(KEY_HYMT_ENABLED, v) }
 
+    /** User-controlled toggle for the MNN-backed Hy-MT2 1.8B — the
+     *  translation-specialist tier that replaces the retired Hunyuan-MT 1.5
+     *  ([hyMtEnabled]). Apache-2.0, so there is no region gate and no legal
+     *  attestation on this path. Default false; same enable/disable semantics
+     *  as [qwenMnnEnabled]. File existence checked via
+     *  [com.playtranslate.translation.hymt.HyMt2Model.isInstalled]. */
+    var hyMt2Enabled: Boolean
+        get() = sp.getBoolean(KEY_HYMT2_ENABLED, false)
+        set(v) = sp.edit { putBoolean(KEY_HYMT2_ENABLED, v) }
+
     /** Persisted acknowledgement of the Hunyuan-MT 1.5 click-through legal
      *  attestation dialog. Set to true after the user taps "Agree" the first
      *  time they enable [hyMtEnabled]; subsequent enables skip the dialog.
@@ -789,10 +852,19 @@ class Prefs internal constructor(
      *  behavior; deliberately no Settings UI. Word-only contexts (no
      *  meaningful sentence) ignore it and stay word. */
     var ankiPreferredCardMode: CardMode
-        get() = sp.getString(KEY_ANKI_CARD_MODE, null)
-            ?.let { stored -> CardMode.entries.firstOrNull { it.name == stored } }
-            ?: CardMode.SENTENCE
+        get() = enumPref(KEY_ANKI_CARD_MODE, CardMode.entries, CardMode.SENTENCE)
         set(v) = sp.edit { putString(KEY_ANKI_CARD_MODE, v.name) }
+
+    /** Which side of the lens detail's Sentence/word toggle opens first: the
+     *  looked-up word's detail page or the sentence's results page. Written
+     *  by every toggle tap on that surface (the floating workspace's lookup
+     *  page and the results activity's drag-word tabs), so the last choice is
+     *  the next default. Same last-used-state rule as [ankiPreferredCardMode];
+     *  deliberately no Settings UI. First-ever default is the word: the user
+     *  tapped a specific word to get there. */
+    var lookupPreferredView: LookupView
+        get() = enumPref(KEY_LOOKUP_PREFERRED_VIEW, LookupView.entries, LookupView.WORD)
+        set(v) = sp.edit { putString(KEY_LOOKUP_PREFERRED_VIEW, v.name) }
 
     /** Opt-in: keep a rolling recording of the game's audio (AudioPlaybackCapture
      *  on the MediaProjection session) so sentence cards can attach the real
@@ -933,6 +1005,15 @@ class Prefs internal constructor(
         get() = sp.getBoolean("capture_boxes_enabled", true)
         set(v) = sp.edit { putBoolean("capture_boxes_enabled", v) }
 
+    /** The accent glow around the display edges while the result panel is up
+     *  or parked in its sliver ([com.playtranslate.ui.EdgeIndicatorView]);
+     *  the camera and image-import review panels share it. Default ON. A
+     *  showing panel watches [KEY_EDGE_INDICATOR_ENABLED] through [observe],
+     *  so a flip lands on it live. */
+    var edgeIndicatorEnabled: Boolean
+        get() = sp.getBoolean(KEY_EDGE_INDICATOR_ENABLED, true)
+        set(v) = sp.edit { putBoolean(KEY_EDGE_INDICATOR_ENABLED, v) }
+
     /** Over-game capture: the panel posture the last dismissal left behind, so
      *  the next capture opens there. */
     var capturePanelPosture: Float
@@ -1028,6 +1109,30 @@ class Prefs internal constructor(
     var verticalTextGrow: Boolean
         get() = sp.getBoolean("vertical_text_grow", true)
         set(v) = sp.edit { putBoolean("vertical_text_grow", v) }
+
+    /** Smallest size, in sp, an on-screen translation overlay aims its text
+     *  at. The default reproduces the renderer's historical autosize floor, so
+     *  an untouched install lays overlays out exactly as before; above it, a
+     *  box whose text doesn't fit grows into free space inside the capture
+     *  region, and shrinks below the value only when there's no room left.
+     *  Read when the overlay view is created, so the settings row stops live
+     *  mode to apply it. */
+    var overlayMinTextSp: Int
+        get() = sp.getInt(KEY_OVERLAY_MIN_TEXT_SP, OVERLAY_MIN_TEXT_SP_DEFAULT)
+            .coerceIn(OVERLAY_MIN_TEXT_SP_DEFAULT, OVERLAY_MIN_TEXT_SP_MAX)
+        set(v) = sp.edit {
+            putInt(KEY_OVERLAY_MIN_TEXT_SP, v.coerceIn(OVERLAY_MIN_TEXT_SP_DEFAULT, OVERLAY_MIN_TEXT_SP_MAX))
+        }
+
+    /** Drop furigana (ruby) regions from Japanese OCR before grouping, so
+     *  readings printed beside kanji are neither translated nor overlaid. See
+     *  [com.playtranslate.ocr.core.RubyFilter] for the rule and its census.
+     *  Default ON; pushed into [OcrManager.filterFuriganaEnabled] at start
+     *  and by the Capture and overlay screen's row, which shows only on a
+     *  Japanese source. */
+    var filterFurigana: Boolean
+        get() = sp.getBoolean(KEY_FILTER_FURIGANA, true)
+        set(v) = sp.edit { putBoolean(KEY_FILTER_FURIGANA, v) }
 
     /** Opt-in manga-ocr refinement for Japanese OCR — high quality, slow; OFF by
      *  default. Runtime-gated further to Japanese + arm64 + installed pack; the value
@@ -1312,6 +1417,12 @@ class Prefs internal constructor(
         get() = sp.getString(KEY_HOTKEY_CAPTURE_TAP, "") ?: ""
         set(v) = sp.edit { putString(KEY_HOTKEY_CAPTURE_TAP, v) }
 
+    /** Hotkey combo for "Change game language", the floating icon's gesture of
+     *  that name. Empty = not set. Format: keyCodes joined by "+". */
+    var hotkeyChangeGameLanguageTap: String
+        get() = sp.getString(KEY_HOTKEY_CHANGE_GAME_LANGUAGE_TAP, "") ?: ""
+        set(v) = sp.edit { putString(KEY_HOTKEY_CHANGE_GAME_LANGUAGE_TAP, v) }
+
     /** Capture interval for live mode in seconds. */
     var captureIntervalSec: Float
         get() = sp.getFloat(KEY_CAPTURE_INTERVAL_SEC, DEFAULT_CAPTURE_INTERVAL_SEC).coerceAtLeast(MIN_CAPTURE_INTERVAL_SEC)
@@ -1329,6 +1440,40 @@ class Prefs internal constructor(
     var showOverlayIcon: Boolean
         get() = sp.getBoolean(KEY_SHOW_OVERLAY_ICON, true)
         set(v) = sp.edit { putBoolean(KEY_SHOW_OVERLAY_ICON, v) }
+
+    // ── Floating icon gesture bindings ────────────────────────────────
+
+    /** What the icon's drag / hold / tap gestures do; see [IconGestureBindings].
+     *  Each is stored by enum name and reads as its gesture's default when
+     *  unset or unknown, or when the current source language doesn't offer
+     *  it (the swap without a reading hint), the stored choice kept for a
+     *  language that does. The icon's dispatch reads these per gesture, so a
+     *  change on the picker page, or of the source language, applies to the
+     *  next touch of the icon already on screen; the Settings cell reads
+     *  them on resume. */
+    var iconDragAction: DragAction
+        get() = iconGestureBindings().drag
+        set(v) = sp.edit { putString(KEY_ICON_DRAG_ACTION, v.name) }
+
+    var iconHoldAction: HoldAction
+        get() = iconGestureBindings().hold
+        set(v) = sp.edit { putString(KEY_ICON_HOLD_ACTION, v.name) }
+
+    var iconTapAction: TapAction
+        get() = iconGestureBindings().tap
+        set(v) = sp.edit { putString(KEY_ICON_TAP_ACTION, v.name) }
+
+    /** The three bindings as they act on the current source language, with
+     *  its reading hint, as one snapshot: what the Settings cell and the
+     *  picker page render, and where the quick-menu reachability check
+     *  lives. The single read path, so no reader can skip the language
+     *  rule ([IconGestureBindings.resolve]). */
+    fun iconGestureBindings(): IconGestureBindings = IconGestureBindings.resolve(
+        drag = enumPref(KEY_ICON_DRAG_ACTION, DragAction.entries, DragAction.DEFAULT),
+        hold = enumPref(KEY_ICON_HOLD_ACTION, HoldAction.entries, HoldAction.DEFAULT),
+        tap = enumPref(KEY_ICON_TAP_ACTION, TapAction.entries, TapAction.DEFAULT),
+        hint = SourceLanguageProfiles[sourceLangId].hintTextKind,
+    )
 
     /** Set to true once StatusBarManager.requestAddTileService reports the
      *  PlayTranslate tile is added (or already added). Drives whether the
@@ -1357,6 +1502,37 @@ class Prefs internal constructor(
     var debugLiveMode: Boolean
         get() = sp.getBoolean(KEY_DEBUG_LIVE_MODE, false)
         set(v) = sp.edit { putBoolean(KEY_DEBUG_LIVE_MODE, v) }
+
+    /** Debug-only: enables short-text offline routing (≤2-content-word OCR
+     *  groups served by Bergamot/ML Kit instead of the online waterfall —
+     *  see [com.playtranslate.translation.ShortTextOfflineRoute]). Default
+     *  OFF per the 2026-09-02 device verdict: the 2★ tier's output on real
+     *  game shorts was bad even for ordinary phrases. The row exists so the
+     *  routing can be A/B'd on device without a rebuild.
+     *
+     *  Reads as false outside debug builds even when the stored value is true
+     *  (see [debugBuild]): a stale `true` carried into a release install would
+     *  otherwise send every short text to the rejected 2★ tier, with no
+     *  Settings row to turn it off. */
+    var debugShortTextRouting: Boolean
+        get() = debugBuild && sp.getBoolean(KEY_DEBUG_SHORT_TEXT_ROUTING, false)
+        set(v) = sp.edit { putBoolean(KEY_DEBUG_SHORT_TEXT_ROUTING, v) }
+
+    /** Debug-only: forces the on-device LLM tier to load weights through the
+     *  mmap (reclaimable, file-backed) path regardless of live availMem, as if
+     *  the device were below the model's resident floor. The mmap path is
+     *  otherwise exercised only on constrained devices, never on a 16 GB dev
+     *  device, which is how the cache-prefix collision fixed in
+     *  [com.playtranslate.mnn.MmapWeightCache] shipped unnoticed. Read by
+     *  [com.playtranslate.translation.mnn.MnnTranslator].
+     *
+     *  Reads as false outside debug builds even when the stored value is true:
+     *  the Settings row only exists in debug builds, so a stale `true` carried
+     *  into a release install would otherwise force every on-device LLM load
+     *  onto the slower mmap path with no UI to turn it off. */
+    var debugForceMmapWeights: Boolean
+        get() = debugBuild && sp.getBoolean(KEY_DEBUG_FORCE_MMAP_WEIGHTS, false)
+        set(v) = sp.edit { putBoolean(KEY_DEBUG_FORCE_MMAP_WEIGHTS, v) }
 
     /** Debug-only: when on, [com.playtranslate.OcrSeedWriter] writes the
      *  bitmap that was fed to OCR plus a transcription of the result to
@@ -1387,9 +1563,14 @@ class Prefs internal constructor(
      *  (post-TypewriterGate `toTranslate`) to a JSONL trace under
      *  external-files/log-traces/ — the offline feed for validating the
      *  translation-log write gate on real sessions. See
-     *  [com.playtranslate.translationlog.LogTraceRecorder]. */
+     *  [com.playtranslate.translationlog.LogTraceRecorder].
+     *
+     *  Reads as false outside debug builds even when the stored value is true
+     *  (see [debugBuild]): the trace carries OCR text, and a stale `true`
+     *  would keep writing one file per live session on a release install
+     *  with no Settings row to stop it. */
     var debugLogTrace: Boolean
-        get() = sp.getBoolean(KEY_DEBUG_LOG_TRACE, false)
+        get() = debugBuild && sp.getBoolean(KEY_DEBUG_LOG_TRACE, false)
         set(v) = sp.edit { putBoolean(KEY_DEBUG_LOG_TRACE, v) }
 
     /** Set to true after the user dismisses the target-pack migration dialog. */
@@ -1528,6 +1709,12 @@ class Prefs internal constructor(
         const val DEFAULT_RESULTS_FONT_MIN_SP = 16
         const val DEFAULT_RESULTS_FONT_MAX_SP = 24
 
+        /** Selectable bounds of [overlayMinTextSp], in sp. The default is also
+         *  the range's low end: it is the overlay autosize floor, so the
+         *  slider's resting position means "overlays as they always were". */
+        const val OVERLAY_MIN_TEXT_SP_DEFAULT = 6
+        const val OVERLAY_MIN_TEXT_SP_MAX = 20
+
         const val KEY_SOURCE_LANG    = "source_lang"
         const val KEY_TARGET_LANG    = "target_lang"
         const val KEY_TARGET_CHINESE_VARIANT = "target_chinese_variant"
@@ -1554,6 +1741,7 @@ class Prefs internal constructor(
         private const val KEY_ANKI_FIELD_MAPPINGS  = "anki_field_mappings"   // JSON
         private const val KEY_ANKI_WORD_AUDIO      = "anki_word_audio_enabled"
         private const val KEY_ANKI_CARD_MODE       = "anki_default_card_mode"
+        private const val KEY_LOOKUP_PREFERRED_VIEW = "lookup_preferred_view"
         private const val KEY_ANKI_SENTENCE_AUDIO  = "anki_sentence_audio_enabled"
         private const val KEY_ANKI_GAME_AUDIO      = "anki_game_audio_enabled"
         private const val KEY_ANKI_AUDIO_MAPPING_MIGRATED = "anki_audio_mapping_migrated"
@@ -1573,6 +1761,7 @@ class Prefs internal constructor(
         const val KEY_QWEN35_MNN_2B_ENABLED = "qwen35_mnn_2b_enabled"
         const val KEY_GEMMA_E2B_ENABLED  = "gemma_e2b_enabled"
         const val KEY_HYMT_ENABLED          = "hymt_enabled"
+        const val KEY_HYMT2_ENABLED         = "hymt2_enabled"
         const val KEY_HYMT_LEGAL_ACCEPTED   = "hymt_legal_accepted"
         const val KEY_GEMINI_KEY                    = "gemini_api_key"
         const val KEY_GEMINI_ENABLED                = "gemini_enabled"
@@ -1636,6 +1825,13 @@ class Prefs internal constructor(
         // same small/fast/cheap tier we default to on Gemini, and holds up
         // on CJK short text far better than the cheaper open models.
         const val DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash-lite"
+        /** Claude's fast tier, matching every other preset's default (flash,
+         *  small, lite). Haiku 4.5 needs no thinking switch and did the Thor's
+         *  test screens in 1.9-3.1 s where Sonnet 5 with thinking took 5-23 s
+         *  (2026-09-06). The dated id is the one the native /v1/models lists,
+         *  so a fresh instance shows as selected in the picker rather than as
+         *  a custom entry. */
+        const val DEFAULT_CLAUDE_MODEL    = "claude-haiku-4-5-20251001"
         private const val KEY_LEGACY_THEME_INDEX    = "theme_index"
         const val KEY_THEME_MODE                    = "theme_mode"
         const val KEY_ACCENT_NAME                   = "accent_name"
@@ -1644,6 +1840,14 @@ class Prefs internal constructor(
         private const val KEY_OVERLAY_MODE               = "overlay_mode"
         private const val KEY_SETTINGS_SCROLL_Y        = "settings_scroll_y"
         const val KEY_SHOW_OVERLAY_ICON       = "show_overlay_icon"
+        const val KEY_ICON_DRAG_ACTION        = "icon_drag_action"
+        const val KEY_ICON_HOLD_ACTION        = "icon_hold_action"
+        const val KEY_ICON_TAP_ACTION         = "icon_tap_action"
+        /** Every key [iconGestureBindings] reads, for [observe]: the three
+         *  bindings, and the source language, whose reading hint decides
+         *  whether the swap is offered and names it. */
+        val KEYS_ICON_GESTURE_ACTIONS =
+            arrayOf(KEY_ICON_DRAG_ACTION, KEY_ICON_HOLD_ACTION, KEY_ICON_TAP_ACTION, KEY_SOURCE_LANG)
         private const val KEY_OVERLAY_ICON_EDGE      = "overlay_icon_edge"
         private const val KEY_OVERLAY_ICON_FRACTION  = "overlay_icon_fraction"
         private const val KEY_SUPPRESS_TRANSITION            = "suppress_next_transition"
@@ -1660,6 +1864,8 @@ class Prefs internal constructor(
         private const val KEY_DEBUG_SHOW_DETECTION_LOG      = "debug_show_detection_log"
         private const val KEY_DEBUG_LIVE_MODE                = "debug_live_mode"
         private const val KEY_DEBUG_SAVE_OCR_SEED            = "debug_save_ocr_seed"
+        private const val KEY_DEBUG_SHORT_TEXT_ROUTING       = "debug_short_text_routing"
+        private const val KEY_DEBUG_FORCE_MMAP_WEIGHTS       = "debug_force_mmap_weights"
         private const val KEY_DEBUG_LOG_GROUPING             = "debug_log_grouping"
         private const val KEY_DEBUG_ANGLE_GATE_TARGET        = "debug_angle_gate_target"
         private const val KEY_DEBUG_LOG_TRACE                = "debug_log_trace"
@@ -1668,10 +1874,15 @@ class Prefs internal constructor(
         const val KEY_HOTKEY_TRANSLATION_TAP               = "hotkey_translation_tap"
         const val KEY_HOTKEY_FURIGANA_TAP                  = "hotkey_furigana_tap"
         const val KEY_HOTKEY_CAPTURE_TAP                   = "hotkey_capture_tap"
+        const val KEY_HOTKEY_CHANGE_GAME_LANGUAGE_TAP      = "hotkey_change_game_language_tap"
         const val KEY_QUICK_TILE_ADDED                     = "quick_tile_added"
         /** Public so the in-app result header's "Show on screen" toggle can
          *  [observe] it and stay in sync with the Settings row. */
         const val KEY_HIDE_GAME_OVERLAYS                   = "hide_game_overlays"
+        /** Public so a showing result panel can [observe] it. */
+        const val KEY_EDGE_INDICATOR_ENABLED               = "edge_indicator_enabled"
+        private const val KEY_OVERLAY_MIN_TEXT_SP          = "overlay_min_text_sp"
+        private const val KEY_FILTER_FURIGANA              = "filter_furigana"
         private const val KEY_LAST_UPDATE_CHECK            = "last_update_check"
         private const val KEY_LAST_YOMITAN_UPDATE_CHECK    = "last_yomitan_update_check"
         private const val KEY_YOMITAN_UPDATE_BACKFILL_DONE = "yomitan_update_backfill_done"

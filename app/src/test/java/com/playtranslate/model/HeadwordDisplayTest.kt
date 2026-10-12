@@ -9,8 +9,8 @@ import org.junit.Test
 /**
  * Tests for [DictionaryEntry.isKanaOnly] and [DictionaryEntry.headwordDisplay],
  * the two pieces that decide whether to render the kanji or kana form of an
- * entry. Regression-driven: 決まる / 何故 / 此処 / 茜 are the canonical cases
- * that the implementation has to get right.
+ * entry. Regression-driven: 決まる / 何故 / 此処 / 沢山 / 駄目 are the canonical
+ * cases that the implementation has to get right.
  *
  * Pure JUnit — no SQLite or Android dependency.
  */
@@ -50,6 +50,9 @@ class HeadwordDisplayTest {
         headwords = headwords,
         senses = senses,
         freqScore = 0,
+        // Production sets this once in DictionaryManager.buildEntry; the
+        // helper mirrors it so the rule tests below read like entries.
+        isKanaOnly = kanaOnlyFrom(senses),
     )
 
     // ── isKanaOnly ─────────────────────────────────────────────────────
@@ -62,7 +65,7 @@ class HeadwordDisplayTest {
         assertFalse(e.isKanaOnly)
     }
 
-    @Test fun `isKanaOnly is true when kanji has no priority and a sense is uk-tagged`() {
+    @Test fun `isKanaOnly is true when the first sense is uk-tagged`() {
         // 何故 (entry 1577120) — single uk-tagged sense, no ke_pri on the kanji.
         val e = entry(
             headwords = listOf(Headword("何故", "なぜ", hasPriority = false)),
@@ -71,31 +74,48 @@ class HeadwordDisplayTest {
         assertTrue(e.isKanaOnly)
     }
 
-    @Test fun `isKanaOnly is false when kanji has priority even if a minor sense is uk-tagged`() {
-        // 決まる (entry 1591420) — six normal senses + one slang uk-tagged sense.
-        // The kanji form carries ichi1+news1+nf14, so the natural display is
-        // kanji. Old `senses.any { uk }` mis-classified this as kana-only.
-        val e = entry(
-            headwords = listOf(Headword("決まる", "きまる", hasPriority = true)),
-            senses = listOf(
-                plainSense("to be decided"),
-                plainSense("to be unchanging"),
-                plainSense("to be a fixed rule"),
-                plainSense("to be well executed"),
-                plainSense("to look good"),
-                plainSense("to be struck and held"),
-                ukSense("to get high (on drugs)"),
-            ),
-        )
-        assertFalse(
-            "Priority kanji + minor uk sense should NOT be kana-only",
-            e.isKanaOnly,
-        )
+    @Test fun `isKanaOnly is true when every sense is uk even though the kanji carries a priority tag`() {
+        // 沢山 (entry 1415870) — three uk-tagged senses; the kanji form carries
+        // ichi1+news2+nf43, the SAME tags as the reading たくさん. ke_pri is
+        // word frequency stamped on both elements, not a spelling signal. The
+        // retired priority veto rendered and Anki-saved this word as 沢山.
+        val e = takusan()
+        assertTrue("Priority on the kanji must not veto kana display", e.isKanaOnly)
     }
 
-    @Test fun `isKanaOnly is false when at least one of several kanji headwords has priority`() {
-        // 決まる + 極まる variants — only the first carries priority. The check
-        // is `any` because high-priority secondary kanji are still kanji.
+    @Test fun `isKanaOnly is true when only the first sense is uk and the kanji has priority`() {
+        // 駄目 — senses 1-3 uk, sense 4 (the go term) not, sense 5 uk; the
+        // kanji carries ichi1+news1. Sense 1 is what a reader most likely met.
+        val e = entry(
+            headwords = listOf(Headword("駄目", "だめ", hasPriority = true)),
+            senses = listOf(
+                ukSense("no good"), ukSense("hopeless"), ukSense("cannot"),
+                plainSense("neutral point (go)"), ukSense("no!"),
+            ),
+        )
+        assertTrue(e.isKanaOnly)
+    }
+
+    @Test fun `isKanaOnly is false when only a later sense is uk-tagged`() {
+        // 決まる (entry 1591420) — six everyday senses written in kanji + one
+        // slang uk-tagged sense. Sense ORDER keeps this in kanji; the kanji's
+        // priority tag is irrelevant, asserted both ways.
+        val senses = listOf(
+            plainSense("to be decided"),
+            plainSense("to be unchanging"),
+            plainSense("to be a fixed rule"),
+            plainSense("to be well executed"),
+            plainSense("to look good"),
+            plainSense("to be struck and held"),
+            ukSense("to get high (on drugs)"),
+        )
+        assertFalse(entry(listOf(Headword("決まる", "きまる", hasPriority = true)), senses).isKanaOnly)
+        assertFalse(entry(listOf(Headword("決まる", "きまる", hasPriority = false)), senses).isKanaOnly)
+    }
+
+    @Test fun `isKanaOnly ignores the priority of secondary kanji headwords`() {
+        // 決まる + 極まる variants — only the first carries priority. Neither
+        // matters: the first sense is plain, so the entry stays kanji.
         val e = entry(
             headwords = listOf(
                 Headword("決まる", "きまる", hasPriority = true),
@@ -106,13 +126,158 @@ class HeadwordDisplayTest {
         assertFalse(e.isKanaOnly)
     }
 
-    @Test fun `isKanaOnly is true when no kanji headword has priority and any sense is uk`() {
+    @Test fun `isKanaOnly is true for a uk entry whose kanji has no priority`() {
         // 此処 (entry 1288810) — kanji form has no priority, uk-tagged.
         val e = entry(
             headwords = listOf(Headword("此処", "ここ", hasPriority = false)),
             senses = listOf(ukSense("here")),
         )
         assertTrue(e.isKanaOnly)
+    }
+
+    @Test fun `isKanaOnly is false for an entry with no senses`() {
+        val e = entry(
+            headwords = listOf(Headword("沢山", "たくさん", hasPriority = true)),
+            senses = emptyList(),
+        )
+        assertFalse(e.isKanaOnly)
+    }
+
+    @Test fun `kana-only verdict survives the senses being stripped`() {
+        // Yomitan single-dictionary mode hands every surface the pack entry
+        // with senses = emptyList() when an imported group wins (see
+        // YomitanEnrichment.mergeImportedTerms). The verdict is carried on the
+        // entry, so the lens pill still collapses: それとも, not 其れとも.
+        val stripped = takusan().copy(senses = emptyList())
+        assertTrue(stripped.isKanaOnly)
+        val display = stripped.headwordDisplay(
+            stripped.selectHeadword("たくさん", "たくさん", "たくさん"), "たくさん",
+        )
+        assertEquals("たくさん", display.written)
+        assertNull(display.reading)
+    }
+
+    // ── ke_inf: search-only and rare spellings (ja-v5 packs) ───────────
+
+    @Test fun `kana lookup skips a search-only spelling listed first`() {
+        // JMdict lists 141 entries with a search-only form FIRST. Its kana
+        // must land on the everyday spelling, not the lookup-key stub.
+        val e = entry(
+            headwords = listOf(
+                Headword("其れから", "それから", isSearchOnly = true),
+                Headword("其から", "それから"),
+            ),
+            senses = listOf(plainSense("and then")),
+        )
+        assertEquals("其から", e.headwordFor("それから")?.written)
+        assertEquals("其から", e.selectHeadword("それから", "それから", "それから")?.written)
+        assertEquals("其から", e.headwords.preferDisplayable()?.written)
+    }
+
+    @Test fun `a search-only spelling the user actually saw still displays`() {
+        // 10ten shows a search-only match with a note rather than swapping the
+        // word out from under the pointer; the seen spelling wins by written match.
+        val e = entry(
+            headwords = listOf(
+                Headword("其から", "それから"),
+                Headword("其れから", "それから", isSearchOnly = true),
+            ),
+            senses = listOf(plainSense("and then")),
+        )
+        assertEquals("其れから", e.selectHeadword("其れから", "其れから", "それから")?.written)
+    }
+
+    @Test fun `kana lookup prefers the everyday spelling over a rare one listed first`() {
+        // 361 common entries list a rare form first; a mixed entry must pick
+        // the non-rare form for a kana lookup.
+        val e = entry(
+            headwords = listOf(
+                Headword("彼処", "あそこ", isRareForm = true),
+                Headword("彼所", "あそこ"),
+            ),
+            senses = listOf(plainSense("there")),
+        )
+        assertEquals("彼所", e.headwordFor("あそこ")?.written)
+        assertEquals("彼所", e.headwords.preferDisplayable()?.written)
+    }
+
+    @Test fun `rare beats search-only when nothing better exists`() {
+        val e = entry(
+            headwords = listOf(
+                Headword("A", "x", isSearchOnly = true),
+                Headword("B", "x", isRareForm = true),
+            ),
+            senses = listOf(plainSense("def")),
+        )
+        assertEquals("B", e.headwords.preferDisplayable()?.written)
+        // All search-only: still never empty — the first is the anchor.
+        val allSk = entry(
+            headwords = listOf(Headword("A", "x", isSearchOnly = true)),
+            senses = listOf(plainSense("def")),
+        )
+        assertEquals("A", allSk.headwords.preferDisplayable()?.written)
+    }
+
+    // ── per-reading uk scope (reading.uk_applicable on the Headword) ───
+
+    /** 新: さら is the usually-kana reading (sense 1 uk, stagr さら); にい is a
+     *  kanji reading the uk sense does not cover. Entry verdict: kana-only. */
+    private fun sara() = entry(
+        headwords = listOf(
+            Headword("新", "さら", ukApplicable = true),
+            Headword("新", "にい", ukApplicable = false),
+        ),
+        senses = listOf(ukSense("new"), plainSense("new (prefix)")),
+    )
+
+    @Test fun `a reading the uk sense covers collapses to kana`() {
+        val e = sara()
+        val display = e.headwordDisplay(e.selectHeadword("さら", "さら", "さら"), "さら")
+        assertEquals("さら", display.written)
+        assertNull(display.reading)
+    }
+
+    @Test fun `a reading the uk sense excludes keeps the kanji`() {
+        // The Codex adversarial find on the entry-wide verdict: にい was
+        // collapsing because the entry as a whole is kana-only.
+        val e = sara()
+        val display = e.headwordDisplay(e.selectHeadword("にい", "にい", "にい"), "にい")
+        assertEquals("新", display.written)
+        assertEquals("にい", display.reading)
+    }
+
+    @Test fun `packs without the column keep the entry-wide collapse`() {
+        // Headword.ukApplicable defaults true: ja-v4 behaviour is unchanged.
+        val e = entry(
+            headwords = listOf(Headword("新", "さら"), Headword("新", "にい")),
+            senses = listOf(ukSense("new")),
+        )
+        assertEquals("にい", e.headwordDisplay(e.selectHeadword("にい", "にい", "にい"), "にい").written)
+    }
+
+    // ── headwordDisplay: the reported たくさん case ─────────────────────
+
+    /** 沢山 (entry 1415870) as the ja-v2+ pack builds it: priority kanji, all uk. */
+    private fun takusan() = entry(
+        headwords = listOf(Headword("沢山", "たくさん", hasPriority = true)),
+        senses = listOf(ukSense("a lot"), ukSense("enough"), ukSense("too many")),
+    )
+
+    @Test fun `pure-kana surface for a priority-kanji uk entry collapses to kana`() {
+        // OCR'd たくさん resolved to 沢山. Display, and the Anki Expression that
+        // every send site takes from this display, are たくさん.
+        val e = takusan()
+        val display = e.headwordDisplay(e.selectHeadword("たくさん", "たくさん", "たくさん"), "たくさん")
+        assertEquals("たくさん", display.written)
+        assertNull(display.reading)
+    }
+
+    @Test fun `kanji surface for a priority-kanji uk entry keeps the kanji`() {
+        // A game that prints 沢山 in kanji still shows 沢山 with the kana beneath.
+        val e = takusan()
+        val display = e.headwordDisplay(e.selectHeadword("沢山", "沢山", "たくさん"), "沢山")
+        assertEquals("沢山", display.written)
+        assertEquals("たくさん", display.reading)
     }
 
     // ── headwordDisplay: surface detection ─────────────────────────────

@@ -28,6 +28,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.playtranslate.capture.CaptureBackendResolver
 import com.playtranslate.overlay.OverlayHost
+import com.playtranslate.overlay.WindowChurnGate
 import com.playtranslate.ui.DimController
 import com.playtranslate.ui.OverlayAlert
 import com.playtranslate.ui.DragLookupController
@@ -40,6 +41,7 @@ import com.playtranslate.ui.OcrDebugOverlayView
 import com.playtranslate.ui.RegionDragView
 import com.playtranslate.ui.TranslationOverlayView
 import com.playtranslate.ui.WordLookupPopup
+import com.playtranslate.overlay.OwnWindows
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -138,11 +140,13 @@ class PlayTranslateAccessibilityService : AccessibilityService() {
      *  HOLD combos drive the momentary hold-to-preview on [CaptureService];
      *  TAP combos are routed by [fireTapOnMain] — the auto/live toggle for the
      *  translation/furigana taps, a one-shot Capture for [HotkeyAssignment
-     *  .CAPTURE_TAP] — through the active [OverlayUiController] (single- vs
-     *  dual-screen / InAppOnly) just like the floating menu's buttons. The
-     *  release leg only matters for HOLD (end the preview); a TAP already did
-     *  its work on activation, except that a quick release of a hold sharing
-     *  the tap's keys fires that tap too (one key = preview + action). */
+     *  .CAPTURE_TAP], the game-language change for [HotkeyAssignment
+     *  .CHANGE_GAME_LANGUAGE_TAP] — through the active [OverlayUiController]
+     *  (single- vs dual-screen / InAppOnly) just like the floating menu's
+     *  buttons and the floating icon's gestures. The release leg only matters
+     *  for HOLD (end the preview); a TAP already did its work on activation,
+     *  except that a quick release of a hold sharing the tap's keys fires that
+     *  tap too (one key = preview + action). */
     fun registerHotkeyCallbacks() {
         val svc = CaptureService.instance ?: return
         onHotkeyActivated = { assignment ->
@@ -178,13 +182,21 @@ class PlayTranslateAccessibilityService : AccessibilityService() {
     /**
      * Route a TAP-triggered [assignment] to its action. [HotkeyAssignment
      * .CAPTURE_TAP] runs a one-shot Capture (toggle-dismissing a showing
-     * capture result); every other tap toggles that mode's auto/live session.
-     * Shared by on-press activation and the hold's quick-release tap so the
-     * capture binding is honored on both paths.
+     * capture result); [HotkeyAssignment.CHANGE_GAME_LANGUAGE_TAP] runs the
+     * floating icon's "Change game language"; the translation and furigana
+     * taps toggle that mode's auto/live session. Shared by on-press activation
+     * and the hold's quick-release tap so every tap binding is honored on both
+     * paths. Exhaustive, so a new assignment cannot compile until it is routed
+     * here; both callers pass taps only, so the holds never arrive.
      */
     private fun fireTapOnMain(assignment: HotkeyAssignment) {
-        if (assignment == HotkeyAssignment.CAPTURE_TAP) captureScreenOnMain()
-        else toggleAutoModeOnMain(assignment.mode)
+        when (assignment) {
+            HotkeyAssignment.TRANSLATION_TAP, HotkeyAssignment.FURIGANA_TAP ->
+                toggleAutoModeOnMain(assignment.mode)
+            HotkeyAssignment.CAPTURE_TAP -> captureScreenOnMain()
+            HotkeyAssignment.CHANGE_GAME_LANGUAGE_TAP -> changeGameLanguageOnMain()
+            HotkeyAssignment.TRANSLATION_HOLD, HotkeyAssignment.FURIGANA_HOLD -> Unit
+        }
     }
 
     /**
@@ -224,6 +236,24 @@ class PlayTranslateAccessibilityService : AccessibilityService() {
         val displayId = CaptureService.instance?.primaryGameDisplayId() ?: Display.DEFAULT_DISPLAY
         (CaptureBackendResolver.activeOverlayUi ?: overlayUiController)
             .toggleCaptureScreenForDisplay(displayId)
+    }
+
+    /**
+     * Run the "Change game language" hotkey on the main thread: the floating
+     * icon's gesture of that name, on the display [captureScreenOnMain]
+     * targets (the primary game display), which gets its pill, or its picker
+     * when that opens over the game. Main thread and the [isUserReachable]
+     * re-check for the same reasons as [captureScreenOnMain].
+     */
+    private fun changeGameLanguageOnMain() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            debugHandler.post { changeGameLanguageOnMain() }
+            return
+        }
+        if (!isUserReachable()) return
+        val displayId = CaptureService.instance?.primaryGameDisplayId() ?: Display.DEFAULT_DISPLAY
+        (CaptureBackendResolver.activeOverlayUi ?: overlayUiController)
+            .changeGameLanguageForDisplay(displayId)
     }
 
     /**
@@ -413,7 +443,7 @@ class PlayTranslateAccessibilityService : AccessibilityService() {
         screenshotW: Int, screenshotH: Int
     ) {
         hideDebugOverlay()
-        val wm = createDisplayContext(display).getSystemService(WindowManager::class.java) ?: return
+        val wm = OwnWindows.manager(createDisplayContext(display)) ?: return
         val view = OcrDebugOverlayView(this).apply {
             setBoxes(boxes, cropLeft, cropTop, screenshotW, screenshotH)
         }
@@ -652,6 +682,7 @@ class PlayTranslateAccessibilityService : AccessibilityService() {
             translationTap = prefs.hotkeyTranslationTap,
             furiganaTap = prefs.hotkeyFuriganaTap,
             captureTap = prefs.hotkeyCaptureTap,
+            changeGameLanguageTap = prefs.hotkeyChangeGameLanguageTap,
             hasReadingHint = SourceLanguageProfiles[prefs.sourceLangId].hintTextKind != HintTextKind.NONE,
         )
     }
@@ -880,7 +911,7 @@ class PlayTranslateAccessibilityService : AccessibilityService() {
         fun disable(ctx: Context, reason: String) {
             Prefs(ctx).showOverlayIcon = false
             CaptureService.instance?.let { if (it.isLive) it.stopLive() }
-            CaptureBackendResolver.activeOverlayUi?.hideFloatingIcon(reason)
+            CaptureBackendResolver.activeOverlayUi?.hideFloatingIcon(reason, endsCapture = true)
             PlayTranslateTileService.TileSync.refresh(ctx)
         }
 
@@ -903,22 +934,39 @@ class PlayTranslateAccessibilityService : AccessibilityService() {
             displayId: Int,
         ): Boolean {
             instance?.let { return it.overlayHost.addOverlayWindow(view, wm, params, displayId) }
+            WindowChurnGate.flushPendingFor(view)
             OverlayHost.applyFullScreenOverlayDefaults(params)
             // No host to stamp it: same hardware-acceleration rule as
             // OverlayHost.addOverlayWindow.
             params.flags = params.flags or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
-            return try { wm.addView(view, params); true } catch (_: Exception) { false }
+            return try {
+                wm.addView(view, params)
+                true
+            } catch (_: Exception) { false }
         }
 
         fun removeOverlay(view: View, wm: WindowManager) {
             // If the service is connected and the view is in the registry,
-            // removeOverlayWindow handles both unregister + removeView. If
-            // the view was added via the no-service fallback path of
-            // [addOverlay] (service connected later), it's not in the
-            // registry — fall through to a direct removeView so the window
-            // doesn't leak.
+            // removeOverlayWindow handles both unregister + removeView (gated
+            // through WindowChurnGate). If the view was added via the
+            // no-service fallback path of [addOverlay] (service connected
+            // later), it's not in the registry — fall through to a direct
+            // removal so the window doesn't leak, gated when the live params
+            // are recoverable. WindowManagerGlobal.addView stores the params
+            // as the root view's layoutParams, so this cast holds for any
+            // window actually attached; a null/foreign value means there is
+            // nothing attached to defer, and the plain removeView (whose
+            // failure is caught) matches today's behavior.
             if (instance?.overlayHost?.removeOverlayWindow(view) == true) return
-            try { wm.removeView(view) } catch (_: Exception) {}
+            val lp = view.layoutParams as? WindowManager.LayoutParams
+            if (lp != null) {
+                // No registry handle to read the display from — UNKNOWN makes
+                // the ghost conservatively arm OverlayState.uncompositedGhost
+                // on every display.
+                WindowChurnGate.removeWindow(view, wm, lp, WindowChurnGate.DISPLAY_UNKNOWN)
+            } else {
+                try { wm.removeView(view) } catch (_: Exception) {}
+            }
         }
     }
 }

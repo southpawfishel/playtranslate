@@ -19,11 +19,11 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.materialswitch.MaterialSwitch
+import com.playtranslate.OverlayMode
 import com.playtranslate.PlayTranslateAccessibilityService
 import com.playtranslate.PlayTranslateTileService
 import com.playtranslate.R
 import com.playtranslate.themeColor
-import com.playtranslate.language.HintTextKind
 import kotlinx.coroutines.launch
 
 /**
@@ -49,6 +49,7 @@ class HotkeysSettingsActivity : SettingsSubPageActivity() {
     private lateinit var rowHotkeyTranslation: View
     private lateinit var rowHotkeyTranslationTap: View
     private lateinit var rowHotkeyCaptureTap: View
+    private lateinit var rowHotkeyChangeGameLanguageTap: View
     private lateinit var sectionFurigana: View
     private lateinit var headerFurigana: View
     private lateinit var rowHotkeyFurigana: View
@@ -61,6 +62,7 @@ class HotkeysSettingsActivity : SettingsSubPageActivity() {
         rowHotkeyTranslation = findViewById(R.id.rowHotkeyTranslation)
         rowHotkeyTranslationTap = findViewById(R.id.rowHotkeyTranslationTap)
         rowHotkeyCaptureTap = findViewById(R.id.rowHotkeyCaptureTap)
+        rowHotkeyChangeGameLanguageTap = findViewById(R.id.rowHotkeyChangeGameLanguageTap)
         sectionFurigana = findViewById(R.id.sectionFurigana)
         headerFurigana = findViewById(R.id.headerFurigana)
         rowHotkeyFurigana = findViewById(R.id.rowHotkeyFurigana)
@@ -105,13 +107,19 @@ class HotkeysSettingsActivity : SettingsSubPageActivity() {
             onSet = vm::setCaptureTapHotkey,
             onClear = vm::clearCaptureTapHotkey,
         )
+        // The floating icon's "Change game language" gesture, under its title.
+        renderHotkeyRow(
+            row = rowHotkeyChangeGameLanguageTap,
+            title = getString(R.string.icon_action_change_game_language),
+            hotkey = state.changeGameLanguageTapHotkey,
+            dialogTitle = getString(R.string.icon_action_change_game_language),
+            onSet = vm::setChangeGameLanguageTapHotkey,
+            onClear = vm::clearChangeGameLanguageTapHotkey,
+        )
 
         sectionFurigana.isVisible = state.showFuriganaSection
         if (state.showFuriganaSection) {
-            val hintLabel = when (state.hintKind) {
-                HintTextKind.PINYIN -> getString(R.string.overlay_mode_option_pinyin)
-                else -> getString(R.string.overlay_mode_option_furigana)
-            }
+            val hintLabel = getString(OverlayMode.FURIGANA.labelRes(state.hintKind))
             headerFurigana.findViewById<TextView>(R.id.tvGroupTitle).text = hintLabel
             renderHotkeyRow(
                 row = rowHotkeyFurigana,

@@ -522,3 +522,188 @@ this round.
 **PASS.** No 🛑/❌/⚠️, one 💬 recorded as a decision. Chinese has no gender, case or
 agreement contact with the dictionary-title placeholder; the only real risk in this delta
 was pangu spacing around the Latin-script fills, and it holds throughout.
+
+## Delta review 2026-09-08 (7 keys: oversize-card guard + two debug rows)
+
+Mechanical layer verified programmatically across all 12 locales: all 7 delta names
+present, no extras, no duplicate `name=`; every `<xliff:g>` span byte-identical to EN
+(`id`, `example`, inner brand text); no `%n$s` in this delta; `<b>`, `\n`, `\{ \}`,
+`&lt;/&gt;/&amp;` counts match; no unescaped `'`/`"`; no em/en dashes. Analyzer reports
+`missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD SUCCESSFUL. No
+`<plurals>` in this delta. **No 🛑 build-breaking issues.**
+
+**Render code read before reviewing** (per the 2026-07-14 lesson): the prompt is an
+`OverlayAlert` capped at 280 dp with **full-width, vertically stacked** buttons
+(`OverlayAlert.kt` :306-341) and the debug rows are `settings_row_switch.xml` →
+`Text.PT.RowTitle`, 15 sp, **no `maxLines`, no `ellipsize`**. Nothing in this delta
+clips; long labels wrap. Accuracy was preferred over brevity throughout.
+
+**Source-side finding (EN, applies to all 12 locales) — ❌ fixed in this pass.** The
+comment on `anki_card_too_large_title` claimed the title serves "the oversize-card prompt
+AND the too-large failure alert". It does not: every failure path shows
+`anki_card_too_large_failed` either under `anki_send_failed_title` (`AnkiUiHelper.kt`
+:1060, `TranslationResultFragment.kt` :967, `WordDetailBinder.kt` :691) or with **no title
+at all** as a `LENGTH_LONG` Toast (`AnkiOneTapDispatch.kt` :162,
+`TranslationResultFragment.kt` :1082). The failure string therefore has to name its own
+subject, and was reviewed on that basis in every locale. The EN comment now says so.
+
+### Findings (delta)
+
+One 💬, applied.
+
+| name | severity | current (was) | applied | note |
+|---|---|---|---|---|
+| anki_added_simplified | 💬 | 「已添加到 Anki（已简化释义以适应大小）」 | 「已添加到 Anki（释义已简化以适应大小）」 | Two 已 in one short toast, the second immediately after the first clause's own. Moving 释义 to the front makes the parenthetical a topic-comment clause, which is how the sibling toasts read, and drops the stutter without changing meaning. |
+
+### Clean areas (delta) — checked, no findings
+
+**Pangu spacing holds in all four mixed strings.** A space before each Latin run
+(「发送到 AnkiDroid」, 「已添加到 Anki」, 「强制使用 mmap 加载权重」, 「设备端 LLM」), **no** space
+before full-width punctuation (「AnkiDroid。」, 「Anki（」), and **no** space where a Han run
+meets a Han run. In `anki_card_too_large_failed` the span is preceded by 「，」 with no space
+and followed by a space — matching `anki_send_failed_message`'s own 「AnkiDroid 未接受该卡片」.
+
+**释义 not 定义.** The Anki and word-detail surfaces both label this field 释义
+(`anki_group_definitions`, `word_detail_group_definitions`, `yomitan_single_dict_title`), so
+all four oversize strings use 释义. 纯文本 comes from `yomitan_styling_subtitle`'s
+「关闭后始终使用纯文本」.
+
+**单词 / 句子** in the advice match `anki_mode_word` and `anki_mode_sentence`.
+
+**Register.** Casual 你 register is not exercised (no second-person in this delta); 请 opens
+the advice sentence as it does in `anki_send_failed_message` 「请确保…」. Simplified
+characters only; full-width （）、。？ throughout.
+
+**Debug rows.** 「强制使用 mmap 加载权重」 follows `settings_debug_force_single_screen` 「强制单屏」;
+设备端 for on-device is `llm_prompt_row_system_subtitle`'s 「云端和设备端 LLM 翻译器」 rather than a
+新 coinage. 「短文本离线路由」 is a four-term noun stack, kept because the mode rows in this
+block are noun stacks too (「经典角度阈值（10°）」).
+
+### Verdict
+
+**PASS after fix.** One 💬, applied. The spacing rule — this locale's standing hazard —
+was verified character by character on every string that mixes scripts.
+
+## Delta review 2026-09-23 (6 keys: the results headers' ⋯ overflow menu)
+
+Mechanical layer verified programmatically across all 12 locales: all 6 delta names
+present once, no extras; no `<xliff:g>`, placeholders, `<plurals>`, quotes or
+apostrophes, and no em/en dashes in this delta. The two orphans `cd_copy_original` /
+`cd_copy_translation` (the headers' copy buttons, removed with this change) are deleted.
+For this delta's keys the analyzer reports nothing missing and nothing orphaned; the
+remaining `missing=14 orphan=1` belong to other, not-yet-synced features (icon gestures,
+edge indicator, the Anki words helper). `:app:processDebugResources` BUILD SUCCESSFUL.
+**No 🛑 build-breaking issues.**
+
+**Render code read before reviewing.** The four `header_action_*` names, like the reused
+`cd_add_to_anki`, `cd_text_size` and `capture_show_on_screen`, are the rows of
+`ActionOverflowMenu`: 15 sp medium, `maxLines=1` + `ellipsize=end`, in a card 160 to 280
+dp wide less 72 dp of icon and padding, so up to about 208 dp of label. `cd_more_actions`
+is spoken only (the ⋯ button's description and the menu's pane title);
+`cd_toggle_inline_pinyin` is the furigana button's spoken name when the source is Chinese
+(it replaces a hardcoded English "Toggle inline pinyin").
+
+### Findings (delta)
+
+None.
+
+### Clean areas (delta) — checked, no findings
+
+**Siblings, one term swapped.** 「切换内嵌拼音」 mirrors `cd_toggle_inline_furigana`
+「切换内嵌假名注音」; 拼音 is the glossary term.
+
+**Actions, not options.** 「更多操作」: the parked sheet's hint says 更多选项 for "more
+options", but this English names actions, and 操作 is the word for them.
+
+**Row names.** 「假名注音」「拼音」 are `overlay_mode_option_*`; 「朗读」 is the verb of
+`cd_read_original_aloud` 「朗读原文」; 「编辑文字」 uses 文字, the file's dominant word for text
+(32 uses against 11 for 文本; `cd_text_size` 「文字大小」). No Latin runs in the delta, so the
+Pangu spacing rule does not arise.
+
+### Verdict
+
+**PASS.** Every delta string reuses the locale's own committed wording for its sibling
+(the furigana toggle, the read-aloud and edit descriptions, the parked sheet's "more"
+hint), so the menu reads in the same voice as the buttons it replaces.
+
+## Delta review 2026-09-29 (39 keys + 1 orphan: floating-icon gestures and the no-menu alert, "Change game language", the translation error pill and its discard confirm, the hold failure pill, the Overlay card rows, the Anki words helper)
+
+Mechanical layer verified programmatically across all 12 locales: all 39 delta names
+present once, the orphan `anki_words_helper` deleted (its replacement
+`anki_words_helper_hide` was translated afresh, as its commit asked), no duplicate `name=`;
+every `<xliff:g>` span byte-identical to EN (`id`, `example`, inner text); `%1$s`/`%2$s`
+parity; `<b>`, `\n`, `\{ \}`, `&lt;/&gt;/&amp;` counts match; no unescaped `'`/`"`; each file
+parses. Analyzer reports `missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD
+SUCCESSFUL. No `<plurals>` in this delta. `settings_filter_furigana_title` (already
+translated) was moved from its old Debug position to its English position between the new
+Overlay rows, text unchanged, so the file stays diffable against English. **No 🛑
+build-breaking issues.**
+
+**Render code read before reviewing.**
+- `icon_gesture_*` are bold 15 sp in the Settings cell's `TableLayout`; only the action
+  column shrinks (`shrinkColumns="2"`), so the longest gesture word sets the width left for
+  all three action titles. They are also the picker page's section headers
+  (`Text.PT.GroupHeader`, ALL CAPS, 11 sp). Action titles wrap freely in the cell and in the
+  picker's `settings_row_choice` rows (no `maxLines`).
+- `icon_action_translating_from` and `hold_translation_failed` are drawn by
+  `OverlayUiController.showNoTextPill` as ONE line of `Canvas.drawText` in a window sized to
+  the text: no wrapping, so both must stay short. `%1$s` is `SourceLangId.displayName()`,
+  the language name in the UI locale with its first letter capitalized.
+- The error pill (`TranslationErrorPills`) is a 14 sp TextView, `maxLines=2`, ellipsized,
+  spanning most of the display width; every message but the connection one leads with the
+  service name.
+- The no-menu alert and the discard confirm are `OverlayAlert`s with full-width stacked
+  buttons (the confirm in the danger colour, then `btn_cancel`).
+- `anki_words_helper_hide`'s `%1$s` becomes an ImageSpan of the eye glyph
+  (`inlineIconString`).
+- The Overlay card on screen: Overlay Mode, Minimum text size (title, subtitle, warning,
+  value + slider, example), Filter furigana (Japanese only), Widen vertical text, Edge
+  indicator.
+
+**Source-side observations (EN; reported, not changed):**
+1. `settings_overlay_min_text_warning` ends without a period after two sentences; every
+   locale mirrors that.
+2. The comments on `icon_action_translating_from` and `hold_translation_failed` do not say
+   the pill is a single canvas-drawn line that never wraps. A translator who writes a long
+   sentence there gets it drawn past the pill's edge.
+3. The error-pill banner asks every message to start with the service name. In an RTL
+   locale that makes the first strong character Latin, so the pill's TextView resolves an
+   LTR paragraph (see the ar report).
+4. `icon_gesture_*` asks for "short imperative verbs". Several locales label gestures with
+   an infinitive or a noun instead (see each report); the binding constraint is the width
+   one above.
+
+### Findings (delta, round 1)
+
+| name | severity | current | suggested | note |
+|---|---|---|---|---|
+| translation_error_discard_card_message | ⚠️ | 打开设置后，这张卡片将会丢失，你需要通过新的截取重新生成。 | 打开设置后，这张卡片将会丢失，需要重新截取屏幕后再次生成。 | 通过新的截取 calques "from a new capture"; 截取 reads as a verb, and 重新生成 has no object. |
+| settings_filter_furigana_title (not in the delta; same card) | ⚠️ | 从 OCR 结果中过滤振假名 | 从 OCR 结果中过滤假名注音 | The file's only 振假名. The Overlay Mode chooser two rows above says 假名注音 (`overlay_mode_option_furigana`), as do eight other strings and this delta's swap action. The row moved onto this card in aae1925d, which put the two words on one screen. The translation guide's "furigana = 振假名" line disagrees with the file; the file wins (parameters doc). |
+| settings_edge_indicator_subtitle | 💬 | 显示叠加层时，在屏幕四周显示柔和的光晕。 | 叠加层显示期间，屏幕四周会出现柔和的光晕。 | 显示 twice in one short line. |
+
+### Clean areas (delta) — checked, no findings
+
+**Terms.** 快捷菜单 matches the removed tap hint and `onboarding_a11y_row_menu_title`;
+拖动 / 长按 / 点按 are that hint set's gestures. Reused verbatim: 更改游戏语言
+(`cd_change_source_language`), 截取屏幕, 启动/停止自动翻译 (the hotkey), 无法翻译
+(`anki_translation_error`), API 密钥无效, 实验性功能。, 叠加层 (the screen title and 叠加层模式).
+The swap names the overlay modes as `overlay_mode_option_*` do (翻译 / 假名注音 / 拼音).
+
+**Spacing.** A Latin service name meets the full-width colon with no space (Gemini：…);
+API 密钥 keeps its space; （HTTP 404） in full-width parentheses; no space around the pill's
+placeholder, which fills with Chinese (正在从日语翻译). 你 register.
+
+**Pills as a set.** 连接错误 (the device) and 无法连接 (one service) stay distinct; 余额不足
+(credits) is kept apart from 本月额度已用完 (quota).
+
+### Verdict (round 1)
+
+2 ⚠️ + 1 💬, all to apply (one ⚠️ is the out-of-delta neighbour).
+
+### Round 2 (2026-09-29), after applying round 1
+
+Round-1 fixes present: the discard body (重新截取屏幕后再次生成), the edge-indicator subtitle (叠加层显示期间…), and the out-of-delta furigana row now 从 OCR 结果中过滤假名注音, so the Overlay card uses 假名注音 throughout. Mechanical layer re-run after the fixes: 0 problems; analyzer `missing=0 orphan=0 modified=0`; `:app:processDebugResources` BUILD SUCCESSFUL. Every screen of the delta was re-read in full, not only the changed keys.
+
+No new findings.
+
+**Verdict (round 2):** **PASS.**

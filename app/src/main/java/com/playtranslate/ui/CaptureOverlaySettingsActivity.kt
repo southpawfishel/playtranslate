@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.Looper
 import android.text.Editable
 import android.text.TextWatcher
+import android.util.TypedValue
 import android.view.Display
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -35,6 +36,7 @@ import androidx.core.widget.TextViewCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.materialswitch.MaterialSwitch
 import com.playtranslate.CaptureService
+import com.playtranslate.OcrManager
 import com.playtranslate.OcrTokenScope
 import com.playtranslate.OverlayMode
 import com.playtranslate.PlayTranslateAccessibilityService
@@ -57,6 +59,7 @@ import com.playtranslate.ocr.registry.selectionToken
 import com.playtranslate.themeColor
 import com.playtranslate.translation.llm.OnDeviceLlmDownloader
 import com.playtranslate.translation.llm.humanSize
+import com.playtranslate.overlay.OwnWindows
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -64,8 +67,9 @@ import kotlinx.coroutines.withContext
 
 /**
  * Capture & overlay sub-page: OCR engine choice, the multi-display capture
- * picker, and the auto-translate controls (enhanced auto-translate, overlay
- * mode, hide-overlays, capture interval).
+ * picker, the auto-translate controls (enhanced auto-translate, hide-overlays,
+ * touches-refresh, capture interval) and the overlay controls (overlay mode,
+ * widen vertical text, edge indicator).
  *
  * Unlike the toggle-only Appearance / Hotkeys pages, this screen renders mostly
  * *live system state* — connected displays + window thumbnails, OCR pack
@@ -87,14 +91,23 @@ class CaptureOverlaySettingsActivity : SettingsSubPageActivity() {
     private lateinit var tvEnhancedAutoTranslateSubtitle: TextView
     private lateinit var switchEnhancedAutoTranslate: MaterialSwitch
     private lateinit var checkEnhancedAutoTranslate: ImageView
-    private lateinit var overlayModeSection: View
-    private lateinit var overlayModeToggleContainer: FrameLayout
     private lateinit var rowHideOverlays: View
     private lateinit var switchHideOverlays: MaterialSwitch
     private lateinit var rowTouchesRefresh: View
     private lateinit var switchTouchesRefresh: MaterialSwitch
+
+    // ── Overlay refs ──────────────────────────────────────────────────────
+    private lateinit var overlayModeSection: View
+    private lateinit var overlayModeToggleContainer: FrameLayout
+    private lateinit var sliderOverlayMinText: SizeSliderView
+    private lateinit var tvOverlayMinTextValue: TextView
+    private lateinit var tvOverlayMinTextExample: TextView
+    private lateinit var rowFilterFurigana: View
+    private lateinit var switchFilterFurigana: MaterialSwitch
     private lateinit var rowVerticalGrow: View
     private lateinit var switchVerticalGrow: MaterialSwitch
+    private lateinit var rowEdgeIndicator: View
+    private lateinit var switchEdgeIndicator: MaterialSwitch
 
     // ── Capture-display refs + state ──────────────────────────────────────
     private lateinit var captureDisplaySection: View
@@ -115,19 +128,28 @@ class CaptureOverlaySettingsActivity : SettingsSubPageActivity() {
             rowEnhancedAutoTranslate.findViewById(R.id.checkEnhancedAutoTranslate)
         overlayModeSection = findViewById(R.id.overlayModeSection)
         overlayModeToggleContainer = findViewById(R.id.overlayModeToggleContainer)
+        sliderOverlayMinText = findViewById(R.id.sliderOverlayMinText)
+        tvOverlayMinTextValue = findViewById(R.id.tvOverlayMinTextValue)
+        tvOverlayMinTextExample = findViewById(R.id.tvOverlayMinTextExample)
         rowHideOverlays = findViewById(R.id.rowHideOverlays)
         switchHideOverlays = rowHideOverlays.findViewById(R.id.switchRowToggle)
         rowTouchesRefresh = findViewById(R.id.rowTouchesRefresh)
         switchTouchesRefresh = rowTouchesRefresh.findViewById(R.id.switchRowToggle)
+        rowFilterFurigana = findViewById(R.id.rowFilterFurigana)
+        switchFilterFurigana = rowFilterFurigana.findViewById(R.id.switchRowToggle)
         rowVerticalGrow = findViewById(R.id.rowVerticalGrow)
         switchVerticalGrow = rowVerticalGrow.findViewById(R.id.switchRowToggle)
+        rowEdgeIndicator = findViewById(R.id.rowEdgeIndicator)
+        switchEdgeIndicator = rowEdgeIndicator.findViewById(R.id.switchRowToggle)
         captureDisplaySection = findViewById(R.id.captureDisplaySection)
         llDisplayOptions = findViewById(R.id.llDisplayOptions)
 
         setGroupHeader(R.id.headerAutoTranslate, R.string.settings_header_auto_translate)
         setGroupHeader(R.id.headerCaptureDisplay, R.string.settings_header_capture_display)
+        setGroupHeader(R.id.headerOverlay, R.string.settings_header_overlay)
 
         setupAutoTranslateSection()
+        setupOverlaySection()
         setupCaptureDisplaySection()
         setupOcrSection()
         setupDisplays()
@@ -143,6 +165,7 @@ class CaptureOverlaySettingsActivity : SettingsSubPageActivity() {
         // The source language can change from another screen (the language
         // picker); rebuild the OCR cells so they track the current language.
         setupOcrSection()
+        refreshFilterFuriganaRow()
         maybeHandleOcrDownloadDeepLink()
     }
 
@@ -191,43 +214,11 @@ class CaptureOverlaySettingsActivity : SettingsSubPageActivity() {
     private fun setupAutoTranslateSection() {
         setupEnhancedAutoTranslateRow()
 
-        val hintKind = SourceLanguageProfiles[prefs.sourceLangId].hintTextKind
-        val hasHintText = hintKind != HintTextKind.NONE
-
-        // -- Overlay mode toggle (Translation / Furigana-Pinyin) --
-        if (hasHintText) {
-            overlayModeSection.isVisible = true
-            val hintLabel = when (hintKind) {
-                HintTextKind.PINYIN -> getString(R.string.overlay_mode_option_pinyin)
-                else -> getString(R.string.overlay_mode_option_furigana)
-            }
-            buildPillToggle(
-                container = overlayModeToggleContainer,
-                options = listOf(
-                    getString(R.string.overlay_mode_option_translation) to OverlayMode.TRANSLATION,
-                    hintLabel to OverlayMode.FURIGANA,
-                ),
-                selected = prefs.overlayMode,
-                onSelect = { mode ->
-                    prefs.overlayMode = mode
-                    if (CaptureService.instance?.isLive == true) {
-                        CaptureService.instance?.stopLive()
-                    }
-                },
-            )
-            findViewById<View>(R.id.dividerOverlayMode)?.visibility = View.VISIBLE
-        } else {
-            overlayModeSection.isGone = true
-            findViewById<View>(R.id.dividerOverlayMode)?.visibility = View.GONE
-            if (prefs.overlayMode == OverlayMode.FURIGANA) {
-                prefs.overlayMode = OverlayMode.TRANSLATION
-            }
-        }
-
         // -- Hide game screen overlays toggle (multi-screen only) --
         val isSingle = Prefs.isSingleScreen(this)
         if (!isSingle) {
             rowHideOverlays.isVisible = true
+            findViewById<View>(R.id.dividerHideOverlays)?.visibility = View.VISIBLE
             rowHideOverlays.findViewById<TextView>(R.id.tvRowTitle).text =
                 getString(R.string.settings_hide_overlays_during_auto_mode)
             val subtitleHide = rowHideOverlays.findViewById<TextView>(R.id.tvRowSubtitle)
@@ -252,7 +243,8 @@ class CaptureOverlaySettingsActivity : SettingsSubPageActivity() {
         // -- Touches refresh translation toggle (always shown) --
         // The capture backends' touch sentinels read this pref at touch-time,
         // so flipping it takes effect immediately — no live-mode restart, just
-        // persist (unlike the overlay-mode / hide-overlays toggles above).
+        // persist (unlike the hide-overlays toggle above, or the overlay-mode
+        // and widen-vertical-text toggles in the overlay section).
         rowTouchesRefresh.findViewById<TextView>(R.id.tvRowTitle).text =
             getString(R.string.settings_touches_refresh_title)
         switchTouchesRefresh.isChecked = prefs.touchesRefreshTranslation
@@ -260,25 +252,6 @@ class CaptureOverlaySettingsActivity : SettingsSubPageActivity() {
             prefs.touchesRefreshTranslation = checked
         }
         rowTouchesRefresh.setOnClickListener { switchTouchesRefresh.toggle() }
-
-        // -- Widen vertical text toggle (always shown) --
-        // Read when the overlay view is built (selects the per-box render path), so a flip
-        // restarts live mode to take effect — like hide-overlays, unlike touches-refresh
-        // which is read at touch-time.
-        rowVerticalGrow.findViewById<TextView>(R.id.tvRowTitle).text =
-            getString(R.string.settings_vertical_grow_title)
-        rowVerticalGrow.findViewById<TextView>(R.id.tvRowSubtitle).apply {
-            text = getString(R.string.settings_vertical_grow_subtitle)
-            isVisible = true
-        }
-        switchVerticalGrow.isChecked = prefs.verticalTextGrow
-        switchVerticalGrow.setOnCheckedChangeListener { _, checked ->
-            prefs.verticalTextGrow = checked
-            if (CaptureService.instance?.isLive == true) {
-                CaptureService.instance?.stopLive()
-            }
-        }
-        rowVerticalGrow.setOnClickListener { switchVerticalGrow.toggle() }
 
         setupCaptureInterval()
     }
@@ -320,6 +293,118 @@ class CaptureOverlaySettingsActivity : SettingsSubPageActivity() {
                 as android.view.inputmethod.InputMethodManager
             imm.showSoftInput(etCaptureInterval, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
         }
+    }
+
+    // ── Overlay ────────────────────────────────────────────────────────────
+
+    private fun setupOverlaySection() {
+        val hintKind = SourceLanguageProfiles[prefs.sourceLangId].hintTextKind
+        val hasHintText = hintKind != HintTextKind.NONE
+
+        // -- Overlay mode toggle (Translation / Furigana-Pinyin) --
+        if (hasHintText) {
+            overlayModeSection.isVisible = true
+            buildPillToggle(
+                container = overlayModeToggleContainer,
+                options = listOf(OverlayMode.TRANSLATION, OverlayMode.FURIGANA)
+                    .map { getString(it.labelRes(hintKind)) to it },
+                selected = prefs.overlayMode,
+                onSelect = { mode ->
+                    prefs.overlayMode = mode
+                    if (CaptureService.instance?.isLive == true) {
+                        CaptureService.instance?.stopLive()
+                    }
+                },
+            )
+            findViewById<View>(R.id.dividerOverlayMode)?.visibility = View.VISIBLE
+        } else {
+            overlayModeSection.isGone = true
+            findViewById<View>(R.id.dividerOverlayMode)?.visibility = View.GONE
+            if (prefs.overlayMode == OverlayMode.FURIGANA) {
+                prefs.overlayMode = OverlayMode.TRANSLATION
+            }
+        }
+
+        // -- Minimum text size slider (always shown) --
+        // Read when the overlay view is built (it shapes the layout), so a
+        // change stops live mode, like the toggles around it. At the lowest
+        // value, where the overlays behave exactly as they always have, the
+        // value cell reads "-" and the example is hidden; above it the cell
+        // shows the number and the example shows the chosen size.
+        fun showOverlayMinText(sp: Int) {
+            val raised = sp > Prefs.OVERLAY_MIN_TEXT_SP_DEFAULT
+            tvOverlayMinTextValue.text = if (raised) sp.toString() else "-"
+            tvOverlayMinTextExample.isVisible = raised
+            if (raised) tvOverlayMinTextExample.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp.toFloat())
+        }
+        sliderOverlayMinText.setRange(Prefs.OVERLAY_MIN_TEXT_SP_DEFAULT, Prefs.OVERLAY_MIN_TEXT_SP_MAX)
+        sliderOverlayMinText.value = prefs.overlayMinTextSp
+        sliderOverlayMinText.contentDescription = getString(R.string.settings_overlay_min_text_title)
+        showOverlayMinText(sliderOverlayMinText.value)
+        sliderOverlayMinText.onValueChange = { sp ->
+            prefs.overlayMinTextSp = sp
+            showOverlayMinText(sp)
+            if (CaptureService.instance?.isLive == true) {
+                CaptureService.instance?.stopLive()
+            }
+        }
+
+        // -- Filter furigana toggle (Japanese source only) --
+        // Drops furigana from Japanese OCR before grouping (RubyFilter). Read
+        // per OCR pass, so it takes effect on the next capture / live cycle
+        // without a live restart; an overlay already on screen keeps its
+        // persistence until its pixels change.
+        rowFilterFurigana.findViewById<TextView>(R.id.tvRowTitle).text =
+            getString(R.string.settings_filter_furigana_title)
+        switchFilterFurigana.setOnCheckedChangeListener { _, checked ->
+            prefs.filterFurigana = checked
+            OcrManager.instance.filterFuriganaEnabled = checked
+        }
+        rowFilterFurigana.setOnClickListener { switchFilterFurigana.toggle() }
+        refreshFilterFuriganaRow()
+
+        // -- Widen vertical text toggle (always shown) --
+        // Read when the overlay view is built (selects the per-box render path), so a flip
+        // restarts live mode to take effect — like overlay mode and hide-overlays, unlike
+        // touches-refresh which is read at touch-time.
+        rowVerticalGrow.findViewById<TextView>(R.id.tvRowTitle).text =
+            getString(R.string.settings_vertical_grow_title)
+        rowVerticalGrow.findViewById<TextView>(R.id.tvRowSubtitle).apply {
+            text = getString(R.string.settings_vertical_grow_subtitle)
+            isVisible = true
+        }
+        switchVerticalGrow.isChecked = prefs.verticalTextGrow
+        switchVerticalGrow.setOnCheckedChangeListener { _, checked ->
+            prefs.verticalTextGrow = checked
+            if (CaptureService.instance?.isLive == true) {
+                CaptureService.instance?.stopLive()
+            }
+        }
+        rowVerticalGrow.setOnClickListener { switchVerticalGrow.toggle() }
+
+        // -- Edge indicator toggle (always shown) --
+        // A showing result panel observes the pref (CaptureResultOverlay), so
+        // the flip lands on it live: just persist.
+        rowEdgeIndicator.findViewById<TextView>(R.id.tvRowTitle).text =
+            getString(R.string.settings_edge_indicator_title)
+        rowEdgeIndicator.findViewById<TextView>(R.id.tvRowSubtitle).apply {
+            text = getString(R.string.settings_edge_indicator_subtitle)
+            isVisible = true
+        }
+        switchEdgeIndicator.isChecked = prefs.edgeIndicatorEnabled
+        switchEdgeIndicator.setOnCheckedChangeListener { _, checked ->
+            prefs.edgeIndicatorEnabled = checked
+        }
+        rowEdgeIndicator.setOnClickListener { switchEdgeIndicator.toggle() }
+    }
+
+    /** The furigana filter only runs on a Japanese source (OcrManager's call
+     *  sites gate it), so the row shows only there. */
+    private fun refreshFilterFuriganaRow() {
+        val shown = prefs.sourceLangId == SourceLangId.JA
+        rowFilterFurigana.isVisible = shown
+        findViewById<View>(R.id.dividerFilterFurigana).isVisible = shown
+        switchFilterFurigana.isChecked = prefs.filterFurigana
     }
 
     // ── Capture display ────────────────────────────────────────────────────
@@ -482,14 +567,19 @@ class CaptureOverlaySettingsActivity : SettingsSubPageActivity() {
         val myDisplayId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             display?.displayId ?: Display.DEFAULT_DISPLAY
         } else {
-            @Suppress("DEPRECATION") windowManager.defaultDisplay.displayId
+            @Suppress("DEPRECATION") OwnWindows.managerOf(this).defaultDisplay.displayId
         }
         val backend = CaptureBackendResolver.active()
         val mgr = backend.captureSource?.takeIf { backend.canCaptureWithoutPrompting }
         displays.forEach { display ->
             if (mgr != null && backend.canCapture(display.displayId)) {
                 lifecycleScope.launch {
-                    val bitmap = mgr.requestClean(display.displayId)?.bitmap
+                    // maskOwnWindows = false: these are thumbnails of what
+                    // each display shows, and this page sits on one of them.
+                    // A masked frame is non-null, so the captureActivityWindow
+                    // fallback below would never fire; the row would show a
+                    // solid black thumbnail instead of this screen.
+                    val bitmap = mgr.requestClean(display.displayId, maskOwnWindows = false)?.bitmap
                     if (bitmap != null) {
                         displayThumbnails[display.displayId] = scaleThumbnail(bitmap)
                         if (!isFinishing) refreshDisplayRows()

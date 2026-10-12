@@ -35,6 +35,29 @@ data class DictionaryEntry(
      *  machine-translation tiers, the per-entry sense cap, or POS
      *  inference. Rendered ahead of [senses] on every surface. */
     val importedSenses: List<ImportedSenseGroup> = emptyList(),
+    /** Whether the entry's natural display is kana even though a kanji form
+     *  exists — [kanaOnlyFrom] over the pack's senses, decided when the entry
+     *  is BUILT and carried from then on. Carried rather than re-derived from
+     *  [senses] because the senses do not survive to render time on every
+     *  path: Yomitan single-dictionary mode strips them off the pack entry
+     *  when an imported group wins (YomitanEnrichment.mergeImportedTerms),
+     *  and a derived check saw the empty list, answered false, and left the
+     *  lens pill on 其れとも for それとも although the entry's only sense is
+     *  uk (Thor, 2026-09-02). `copy` keeps it. Engines without the uk
+     *  concept, and sense-less synthesized entries, leave the default. */
+    val isKanaOnly: Boolean = false,
+    /** Whether the entry is EXPRESSION-class (JMdict exp / phrase / proverb)
+     *  rather than an ordinary word or compound — [expressionFrom] over the
+     *  source dictionary's POS, decided when the entry is BUILT and carried
+     *  from then on, for the same reason as [isKanaOnly]: Yomitan
+     *  single-dictionary mode strips the senses off the pack entry when an
+     *  imported group wins (YomitanEnrichment.mergeImportedTerms), and a
+     *  derived check saw the empty list, answered false, and withheld the
+     *  member-word split from every fused expression carrying a particle or
+     *  a one-character member — 秘密を漏らす showed one body instead of
+     *  秘密 and 漏らす (Thor, 2026-09-07). `copy` keeps it. Sense-less
+     *  synthesized entries leave the default, having no POS to judge. */
+    val isExpression: Boolean = false,
 )
 
 /** One imported term dictionary's definitions for a looked-up word.
@@ -74,11 +97,14 @@ data class ImportedSense(
  * others). Either field may be null: pure-kana Japanese entries have no
  * [written], and Latin entries generally have no [reading].
  *
- * [hasPriority] is true when the source dictionary marks this form as
- * preferred/common. For JMdict this maps to `ke_pri` being non-empty
- * (ichi1/news1/nf01-48/etc.); other engines leave it false. The signal
- * disambiguates entries like 決まる where one minor sense carries `uk`
- * "usually kana" but the kanji form is the standard everyday spelling.
+ * [hasPriority] is true when the source dictionary marks this form with a
+ * frequency-of-use tag. For JMdict this maps to `ke_pri` being non-empty
+ * (ichi1/news1/nf01-48/etc.); other engines leave it false. It is a WORD
+ * frequency signal, not a spelling one: JMdict stamps the same tags on the
+ * kanji element and the reading element (沢山 and たくさん both carry
+ * ichi1,news2,nf43), so it says nothing about whether the kanji is what
+ * people actually write. Informational; no display decision reads it (see
+ * [kanaOnlyFrom] for the rule that used to, and why that was wrong).
  */
 data class Headword(
     val written: String?,
@@ -99,6 +125,23 @@ data class Headword(
      *  the pack predates the column. Orders the reading rows in the word-detail
      *  view; does NOT affect headword order (kept position-ordered). */
     val rankScore: Int = 0,
+    /** JMdict `sK`, search-only kanji form: a spelling kept as a lookup key
+     *  only, never shown as a headword (JMdict applies it at roughly 5% of
+     *  occurrences or below). False on packs predating `headword.ke_inf`
+     *  (ja-v4 and older), which is the prior behaviour: every spelling was
+     *  display-eligible. */
+    val isSearchOnly: Boolean = false,
+    /** JMdict `rK` / `iK` / `oK` / `io` / `ik` on the kanji form: a rare,
+     *  irregular or outdated spelling (rK: under 3% of the common form's
+     *  occurrences). Display-eligible when the user saw it, but last in every
+     *  fallback order so a kana lookup lands on the everyday spelling. False
+     *  on older packs. */
+    val isRareForm: Boolean = false,
+    /** Whether a usually-kana sense of the entry covers THIS reading — the
+     *  pack's stagr-aware `reading.uk_applicable`. True on packs predating
+     *  the column, so the entry-wide [DictionaryEntry.isKanaOnly] verdict
+     *  stands alone there, the prior behaviour. */
+    val ukApplicable: Boolean = true,
 )
 
 /**
@@ -229,6 +272,21 @@ data class HanziDetail(
 ) : CharacterDetail
 
 /**
+ * The entry's display anchor among these headwords: the first that is
+ * neither search-only nor rare, else the first that is not search-only, else
+ * the first. Every fallback that used to take `headwords.firstOrNull()` goes
+ * through here, so a JMdict entry that lists a search-only or rare spelling
+ * first (141 and 361 common entries respectively, 2026-09-02 census: 居らっしゃる
+ * before いらっしゃる, 彼処 before あそこ) anchors on its everyday spelling. On
+ * packs without `headword.ke_inf` every flag is false and this IS
+ * `firstOrNull()`.
+ */
+fun List<Headword>.preferDisplayable(): Headword? =
+    firstOrNull { !it.isSearchOnly && !it.isRareForm }
+        ?: firstOrNull { !it.isSearchOnly }
+        ?: firstOrNull()
+
+/**
  * Returns the headword whose [Headword.written] or [Headword.reading]
  * exactly matches [query], or null when none match. Use when rendering an
  * entry that the user reached by clicking a specific surface — JMdict
@@ -243,10 +301,19 @@ data class HanziDetail(
  * inflected surface that doesn't match any headword surfaces (出逢って vs
  * stored 出逢う) correctly falls through to the next branch instead of
  * silently latching onto the entry's primary form.
+ *
+ * A [query] that IS a written form wins as that form, search-only or rare
+ * included: the user saw that spelling on screen, and hiding it would show a
+ * headword that is not what they pointed at (10ten shows such matches with
+ * a note). A [query] that matches only by reading — the kana lookups — takes
+ * the [preferDisplayable] headword among the matches, so 其れから's kana
+ * lands on the everyday spelling rather than the search-only or rare form
+ * JMdict happens to list first.
  */
 fun DictionaryEntry.headwordFor(query: String?): Headword? {
     if (query.isNullOrEmpty()) return null
-    return headwords.firstOrNull { it.written == query || it.reading == query }
+    val matches = headwords.filter { it.written == query || it.reading == query }
+    return matches.firstOrNull { it.written == query } ?: matches.preferDisplayable()
 }
 
 /**
@@ -282,32 +349,52 @@ fun DictionaryEntry.selectHeadword(
     headwordForReading(surface, reading)
         ?: headwordFor(surface)
         ?: headwordFor(lookupForm)
-        ?: headwords.firstOrNull()
+        ?: headwords.preferDisplayable()
 
 /**
- * True when the entry's natural display is kana even though a kanji form
- * exists. Requires BOTH:
- *  1. At least one sense carries JMdict's "usually written using kana alone"
- *     (uk) tag — surfaced as the friendly "Kana only" string by
- *     build_jmdict.py's MISC_ABBREV map.
- *  2. No kanji headword is marked as a priority/common form
- *     ([Headword.hasPriority]). Entries like 決まる (sense 7's slang "to get
- *     high" is uk-tagged but the kanji form 決まる carries ichi1+news1+nf14)
- *     would mis-classify under the uk-tag check alone.
+ * The kana-only verdict carried as [DictionaryEntry.isKanaOnly], from the
+ * pack's senses in JMdict order: true when the FIRST sense carries JMdict's
+ * "usually written using kana alone" (uk) tag, surfaced as the friendly
+ * "Kana only" string by build_jmdict.py's MISC_ABBREV map. Evaluated once,
+ * where the entry is built (DictionaryManager.buildEntry); the property's
+ * doc says why it is carried instead of re-derived at render time.
  *
- * For v1 packs (no `ke_pri` data, so `hasPriority` is always false), this
- * degrades to the old uk-only behaviour — same misclassification as before,
- * no crashes. v2+ packs get the tighter check.
+ * Why the first sense, and why nothing about the kanji form (decided
+ * 2026-09-02; counts are a census of that day's JMdict_e, entries with a
+ * kanji form):
+ *  - `uk` is the editors' per-sense verdict on spelling, derived from n-gram
+ *    counts, and sense order is JMdict's commonness order, so sense 1 is the
+ *    meaning a reader most likely met. 8,949 entries are uk on every sense
+ *    and 378 more on the first sense only (だめ, なんて, まもなく, たいてい);
+ *    both display as kana. 264 entries are uk only on a LATER sense (決まる:
+ *    six everyday senses written in kanji, one slang sense in kana) and
+ *    display as kanji. An `any { uk }` rule collapsed that last class.
+ *  - The kanji form's priority tag ([Headword.hasPriority]) is NOT a veto.
+ *    The previous rule refused kana whenever a kanji form carried `ke_pri`,
+ *    reading it as "this spelling is common". It is word frequency stamped
+ *    on both elements, and 686 all-senses-uk words carry it on the kanji:
+ *    たくさん, つまり, いつも, ため, うち, ください all rendered, and were
+ *    Anki-saved, as 沢山, 詰まり, 何時も, 為, 家, 下さる. No JMdict consumer
+ *    surveyed (yomitan-import, Jitendex, 10ten) treats priority presence
+ *    as a kanji signal; Jitendex strips priority tags off rare forms as a
+ *    data-integrity fix.
+ *  - The seen surface still wins in [headwordDisplay]: an OCR'd 沢山 shows
+ *    沢山 with たくさん beneath. This verdict only answers the case where
+ *    no kanji was seen.
+ *
+ * Reading scope: `stagr` can confine a uk sense to particular readings (89 of
+ * 11,791 uk senses; 6 entries leave a visible reading uncovered: 梓 し, 何がし
+ * なにぼう, 山鳥 さんちょう, 樺桜 かにわざくら, 新 あら/にい, 螺 つび/つみ). This
+ * verdict is entry-wide; [headwordDisplay] narrows it to the selected reading
+ * through [Headword.ukApplicable], the pack's stagr-aware `reading.uk_applicable`,
+ * so にい keeps 新 while さら collapses. `stagk` (11 entries) is not consulted:
+ * [selectHeadword] takes the first headword carrying the seen reading, which
+ * in every such entry is a form the uk sense covers.
  */
-val DictionaryEntry.isKanaOnly: Boolean
-    get() {
-        val hasUkSense = senses.any { sense ->
-            sense.misc.any { MiscVocabulary.canonical(it) == MiscVocabulary.MiscCode.KANA_ONLY }
-        }
-        if (!hasUkSense) return false
-        val anyPriorityKanji = headwords.any { it.written != null && it.hasPriority }
-        return !anyPriorityKanji
-    }
+fun kanaOnlyFrom(senses: List<Sense>): Boolean =
+    senses.firstOrNull()?.misc?.any {
+        MiscVocabulary.canonical(it) == MiscVocabulary.MiscCode.KANA_ONLY
+    } == true
 
 /**
  * Headword display fields for a dictionary entry, with kana-only suppression
@@ -358,7 +445,11 @@ fun DictionaryEntry.headwordDisplay(
         val kanaHw = form?.takeIf { it.reading?.isNotBlank() == true }
             ?: headwords.firstOrNull { it.reading?.isNotBlank() == true }
         val kana = kanaHw?.reading
-        if (kana != null) {
+        // The entry-wide verdict narrowed to THIS reading: a uk sense JMdict
+        // scopes to other readings (stagr: 新 is さら in kana but にい in kanji)
+        // leaves this occurrence in kanji. Packs without the column answer
+        // true, the entry-wide behaviour.
+        if (kana != null && kanaHw.ukApplicable) {
             return HeadwordDisplay(
                 written = kana,
                 reading = null,
@@ -381,7 +472,7 @@ fun DictionaryEntry.headwordDisplay(
 
 fun DictionaryEntry.headwordDisplay(queriedWord: String? = null): HeadwordDisplay =
     headwordDisplay(
-        form = headwordFor(queriedWord) ?: headwords.firstOrNull(),
+        form = headwordFor(queriedWord) ?: headwords.preferDisplayable(),
         surface = queriedWord,
     )
 

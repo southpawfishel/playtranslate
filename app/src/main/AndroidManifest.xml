@@ -52,7 +52,7 @@
          on a quirky ROM, this flag is the first suspect to strip. -->
     <application
         android:name=".PlayTranslateApplication"
-        android:allowBackup="false"
+        android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:allowAudioPlaybackCapture="false"
@@ -179,6 +179,18 @@
             android:parentActivityName=".MainActivity"
             android:theme="@style/Theme.PlayTranslate" />
 
+        <!-- Translucent trampoline for the RECORD_AUDIO grant, launched from
+             the floating workspace's audio picker page (an overlay window
+             can't run a runtime-permission request; the workspace parks
+             under this while the system dialog is up). -->
+        <activity
+            android:name=".ui.RecordAudioPermissionActivity"
+            android:exported="false"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden" />
+
         <!-- Appearance sub-page (theme + accent), launched from Settings → Configure. -->
         <activity
             android:name=".ui.AppearanceSettingsActivity"
@@ -256,6 +268,14 @@
         <!-- Hotkeys sub-page (QS tile + hotkeys), launched from Settings → Configure. -->
         <activity
             android:name=".ui.HotkeysSettingsActivity"
+            android:exported="false"
+            android:parentActivityName=".MainActivity"
+            android:theme="@style/Theme.PlayTranslate" />
+
+        <!-- Floating-icon gesture picker (drag / hold / tap bindings), launched
+             from the "On the floating icon" cell at the top of Settings. -->
+        <activity
+            android:name=".ui.IconGesturesSettingsActivity"
             android:exported="false"
             android:parentActivityName=".MainActivity"
             android:theme="@style/Theme.PlayTranslate" />

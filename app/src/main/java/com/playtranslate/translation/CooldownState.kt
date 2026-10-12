@@ -14,10 +14,41 @@ import kotlin.time.Duration.Companion.seconds
  * rate-limit/5xx response is a stronger signal than a single network
  * blip, so it earns a longer first cooldown.
  *
+ * Each ladder keeps its OWN rung (see [CooldownState.networkRung]): a
+ * stretch offline describes the device, not the provider, and must not
+ * make the next 429 start an hour up the rate-limit ladder.
+ *
  * See [project_backend_cooldown_plan] in memory for the full design
  * rationale.
  */
 enum class CooldownLadder { RateLimit, Network }
+
+/**
+ * WHY a backend is cooling down — recorded alongside every cooldown and
+ * persisted with it, so user-facing messaging can distinguish states
+ * whose corrective action differs (Codex adversarial find: a bare
+ * timestamp let a billing-exhausted account render as "rate limited").
+ */
+enum class CooldownCause {
+    RATE_LIMITED, SERVER_ERROR, CONNECTION_FAILED, DAILY_QUOTA, MONTHLY_QUOTA, BILLING;
+
+    /** Collapse to the user-facing message class. Users can't act
+     *  differently on a 429 vs a 5xx vs a lingering network-ladder
+     *  cooldown, so those merge into TRANSIENT ("unavailable until X");
+     *  quota and billing keep their own wording because the correct
+     *  user action differs (wait for the reset / fix the account). */
+    val messageClass: CooldownMessageClass
+        get() = when (this) {
+            RATE_LIMITED, SERVER_ERROR, CONNECTION_FAILED -> CooldownMessageClass.TRANSIENT
+            DAILY_QUOTA, MONTHLY_QUOTA -> CooldownMessageClass.QUOTA
+            BILLING -> CooldownMessageClass.ACCOUNT
+        }
+}
+
+/** The three user-facing wordings a cooldown can surface as. ACCOUNT
+ *  deliberately renders WITHOUT a retry time: billing re-probes loop
+ *  every few minutes, so any "until X" there would be a false promise. */
+enum class CooldownMessageClass { TRANSIENT, QUOTA, ACCOUNT }
 
 /**
  * Per-backend state machine implementing the [Cooldownable] capability.
@@ -28,6 +59,16 @@ enum class CooldownLadder { RateLimit, Network }
  * to a dedicated `playtranslate_cooldown` SharedPreferences namespace
  * so cooldowns survive process restarts — avoids burning one wasted
  * call on every cold launch when a backend was already known-down.
+ *
+ * Two kinds of signal live here and are kept apart on purpose:
+ *  - provider health (429 / 5xx / quota / billing), which only a
+ *    waterfall win or an explicit [resetCooldown] clears;
+ *  - device connectivity ([recordNetworkFailure]'s pair tracker, the
+ *    [CooldownLadder.Network] rung, and a `CONNECTION_FAILED` cooldown),
+ *    which [onConnectivityRestored] drops the moment the device regains
+ *    a network — the user coming off airplane mode expects their online
+ *    services to work immediately, not after the cooldown a dead network
+ *    had climbed to.
  *
  * Concurrency: all mutating methods are `@Synchronized` against the
  * instance. The "already in cooldown — ignore concurrent failures"
@@ -55,7 +96,38 @@ class CooldownState(
         sp?.getLong(keyUntil(), 0L)?.takeIf { it > 0L }
     @Volatile private var descriptionText: String? =
         sp?.getString(keyDescription(), null)?.takeIf { it.isNotBlank() }
-    @Volatile private var rung: Int = sp?.getInt(keyRung(), 0) ?: 0
+    /** Ladder position for provider-side failures without a retry signal
+     *  (bare 429, 5xx). Advances once per cooldown cycle, resets only on
+     *  a waterfall win or an explicit reset — natural expiry keeps it. */
+    @Volatile private var rateLimitRung: Int = sp?.getInt(keyRung(CooldownLadder.RateLimit), 0) ?: 0
+    /** Ladder position for connection failures. Separate from
+     *  [rateLimitRung] because it measures the DEVICE's connectivity
+     *  history, not the provider's health; [onConnectivityRestored]
+     *  resets it, so a long stretch offline can't leave the next
+     *  unrelated failure starting hours up the ladder. */
+    @Volatile private var networkRung: Int = sp?.getInt(keyRung(CooldownLadder.Network), 0) ?: 0
+    @Volatile private var causeValue: CooldownCause? = sp?.getString(keyCause(), null)
+        ?.let { raw -> CooldownCause.entries.firstOrNull { it.name == raw } }
+
+    init {
+        // Builds before the per-ladder split persisted ONE rung shared by
+        // both ladders. Its provenance is unknowable (network outage or
+        // real 429s?), so it is dropped rather than migrated — a one-time
+        // return to the bottom rung, which is the safe direction.
+        sp?.takeIf { it.contains(keyLegacyRung()) }?.edit { remove(keyLegacyRung()) }
+        // A cooldown restored from a PREVIOUS process has its cause in
+        // that process's logs, which no logcat export will contain —
+        // announce it here so a launch-time skip is explicable from this
+        // session's log alone.
+        val restored = untilMs
+        if (restored != null && restored > nowMs()) {
+            android.util.Log.i(
+                "CooldownState",
+                "$backendId: restored persisted cooldown, " +
+                    "${(restored - nowMs()) / 1000}s remaining (${descriptionText ?: "?"})"
+            )
+        }
+    }
 
     /** Epoch-ms when the current cooldown was set. Used by [recordSuccess]
      *  to refuse to clear a cooldown that's newer than the success's
@@ -76,7 +148,7 @@ class CooldownState(
     override fun unavailableUntil(): Long? {
         val until = untilMs ?: return null
         if (until <= nowMs()) {
-            // Expired — leave the persisted rung intact (it resets on
+            // Expired — leave the persisted rungs intact (they reset on
             // recordSuccess, not on natural expiry) but null out the
             // timestamp so callers stop seeing this backend as down.
             clearTimestampOnly()
@@ -90,6 +162,11 @@ class CooldownState(
         return descriptionText
     }
 
+    override fun unavailableCause(): CooldownCause? {
+        if (unavailableUntil() == null) return null
+        return causeValue
+    }
+
     /**
      * Cooldown using a retry timestamp we parsed directly from the
      * provider's response (Gemini retryDelay, OpenAI retry-after,
@@ -98,32 +175,108 @@ class CooldownState(
      *
      * No-ops if the backend is already in cooldown, so a batched
      * fan-out where 5 texts each see the same 429 only counts once.
+     *
+     * DELIBERATE first-writer-wins across CAUSES too: at a provider's
+     * state-transition boundary, a transient 429 racing an in-flight
+     * sibling's quota/billing response can record first and keep the
+     * TRANSIENT cause. Accepted as bounded: the wrongly-labeled
+     * cooldown is by construction the short kind (parsed retry delay
+     * or a low ladder rung), and its expiry triggers the retry that
+     * receives the provider's now-stable answer and records the right
+     * cause via this same method. Cause-upgrade semantics were
+     * considered and rejected — they'd need a cause ordering, retryAt
+     * replacement rules, and rung/stale-guard interactions to shave
+     * under two minutes off a rare self-healing mislabel (2026-08-29
+     * Codex adversarial finding, assessed real-but-marginal).
      */
     @Synchronized
-    fun recordParsedFailure(retryAt: Long, description: String) {
+    fun recordParsedFailure(
+        retryAt: Long,
+        description: String,
+        /** Defaults to the transient class, which every wording is safe
+         *  for; pass the real cause at any site where it is known. */
+        cause: CooldownCause = CooldownCause.RATE_LIMITED,
+    ) {
         if (inCooldown()) return
         untilMs = retryAt
         descriptionText = description
+        causeValue = cause
         setAtMs = nowMs()
         persist()
     }
 
     /**
      * Cooldown when the provider gave no parseable retry signal — fall
-     * through to the [ladder] for the current rung, then advance the
-     * rung (so subsequent failures escalate). Capped at the top rung.
+     * through to the [ladder] for its current rung, then advance that
+     * ladder's rung (so subsequent failures of the same kind escalate).
+     * Capped at the top rung.
      *
      * Like [recordParsedFailure], no-ops if already in cooldown.
      */
     @Synchronized
-    fun recordLadderFailure(ladder: CooldownLadder, description: String) {
+    fun recordLadderFailure(
+        ladder: CooldownLadder,
+        description: String,
+        cause: CooldownCause = CooldownCause.RATE_LIMITED,
+    ) {
         if (inCooldown()) return
+        val rung = rungFor(ladder)
         val duration = ladderDuration(ladder, rung)
         untilMs = nowMs() + duration.inWholeMilliseconds
         descriptionText = description
+        causeValue = cause
         setAtMs = nowMs()
-        rung = (rung + 1).coerceAtMost(MAX_RUNG)
+        setRung(ladder, (rung + 1).coerceAtMost(MAX_RUNG))
         persist()
+    }
+
+    /**
+     * Rate-limit / blocked response whose only retry signal is the
+     * standard `Retry-After` header. Both RFC 9110 forms are parsed —
+     * delta-seconds and the IMF-fixdate (RFC 1123) HTTP-date; garbage,
+     * the archaic RFC 850 / asctime date forms, and a date not in the
+     * future all fall through to the [CooldownLadder.RateLimit] ladder
+     * (a past date is "no usable signal", not "retry immediately").
+     * A parsed value is capped at [MAX_PARSED_RETRY_AFTER] (the
+     * ladder's own top rung) so a bogus header or a skewed device
+     * clock can't latch the backend out for days — an unkeyed backend
+     * has no credentials-change path to clear a runaway cooldown.
+     *
+     * Reusable by any HTTP backend without a provider-specific retry
+     * signal; provider-specific parsers (Gemini's `error.details[]`,
+     * OpenAI's `x-ratelimit-reset-*` dialects) stay in their backends
+     * and call [recordParsedFailure] / [recordLadderFailure] directly.
+     */
+    fun recordRetryAfterFailure(retryAfterHeader: String?, description: String) {
+        val retryAt = parseRetryAfterMs(retryAfterHeader)
+        if (retryAt != null) {
+            recordParsedFailure(retryAt, description, CooldownCause.RATE_LIMITED)
+        } else {
+            recordLadderFailure(CooldownLadder.RateLimit, description, CooldownCause.RATE_LIMITED)
+        }
+    }
+
+    /** Epoch-ms retry time from a `Retry-After` header value, or null
+     *  when the header carries no usable future signal. */
+    private fun parseRetryAfterMs(header: String?): Long? {
+        val value = header?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val now = nowMs()
+        val capMs = MAX_PARSED_RETRY_AFTER.inWholeMilliseconds
+        val seconds = value.toLongOrNull()
+        if (seconds != null) {
+            if (seconds <= 0) return null
+            // Duration saturates instead of overflowing on huge inputs.
+            return now + seconds.seconds.coerceAtMost(MAX_PARSED_RETRY_AFTER).inWholeMilliseconds
+        }
+        val dateMs = try {
+            java.time.ZonedDateTime
+                .parse(value, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
+                .toInstant().toEpochMilli()
+        } catch (_: java.time.DateTimeException) {
+            return null
+        }
+        if (dateMs <= now) return null
+        return dateMs.coerceAtMost(now + capMs)
     }
 
     /**
@@ -142,7 +295,7 @@ class CooldownState(
             // First failure (or no recent one): remember and forgive.
             return
         }
-        recordLadderFailure(CooldownLadder.Network, description)
+        recordLadderFailure(CooldownLadder.Network, description, CooldownCause.CONNECTION_FAILED)
     }
 
     @Synchronized
@@ -152,22 +305,74 @@ class CooldownState(
         // the failure. Don't clear — the failure's signal is fresher.
         val set = setAtMs
         if (set != null && set > attemptStartedAtMs) return
+        clearAll()
+    }
 
-        if (untilMs == null && rung == 0 && descriptionText == null &&
-            lastIOExceptionAtMs == null && setAtMs == null) {
-            return
-        }
-        untilMs = null
-        descriptionText = null
-        rung = 0
-        setAtMs = null
+    @Synchronized
+    override fun resetCooldown() {
+        clearAll()
+    }
+
+    /**
+     * The device regained a network. Everything here that measures the
+     * device rather than the provider is stale now: the forgiven-first-
+     * failure tracker, the network ladder's rung, and an active
+     * `CONNECTION_FAILED` cooldown. A cooldown with any other cause
+     * (rate limit, 5xx, quota, billing) is provider-side and stays.
+     *
+     * Fires on every network gain, including the one at process start
+     * when a network is already up — a persisted "Connection failed"
+     * cooldown from a previous offline session is exactly the state
+     * this exists to drop. A provider that is truly unreachable while
+     * the device is online loses its cooldown on a network switch too;
+     * the cost is one forgiven failure plus a bottom-rung cooldown to
+     * relearn it, which is bounded and rare.
+     *
+     * Returns true when an active cooldown was cleared, so the registry
+     * can name the backend in the forensics log.
+     */
+    @Synchronized
+    override fun onConnectivityRestored(): Boolean {
+        var changed = false
         lastIOExceptionAtMs = null
-        persist()
+        if (networkRung != 0) {
+            networkRung = 0
+            changed = true
+        }
+        val clearedActive = inCooldown() && causeValue == CooldownCause.CONNECTION_FAILED
+        if (clearedActive) {
+            untilMs = null
+            descriptionText = null
+            causeValue = null
+            setAtMs = null
+            changed = true
+        }
+        if (changed) persist()
+        return clearedActive
     }
 
     private fun inCooldown(): Boolean {
         val u = untilMs ?: return false
         return u > nowMs()
+    }
+
+    /** Drop every piece of state — the active cooldown, both ladder
+     *  rungs, the pair tracker — and persist. Skips the pref write when
+     *  there is nothing to clear. Callers hold the instance lock. */
+    private fun clearAll() {
+        if (untilMs == null && rateLimitRung == 0 && networkRung == 0 &&
+            descriptionText == null && causeValue == null &&
+            lastIOExceptionAtMs == null && setAtMs == null) {
+            return
+        }
+        untilMs = null
+        descriptionText = null
+        causeValue = null
+        rateLimitRung = 0
+        networkRung = 0
+        setAtMs = null
+        lastIOExceptionAtMs = null
+        persist()
     }
 
     private fun clearTimestampOnly() {
@@ -177,9 +382,23 @@ class CooldownState(
         // call.
         untilMs = null
         descriptionText = null
+        causeValue = null
         sp?.edit {
             remove(keyUntil())
             remove(keyDescription())
+            remove(keyCause())
+        }
+    }
+
+    private fun rungFor(ladder: CooldownLadder): Int = when (ladder) {
+        CooldownLadder.RateLimit -> rateLimitRung
+        CooldownLadder.Network -> networkRung
+    }
+
+    private fun setRung(ladder: CooldownLadder, value: Int) {
+        when (ladder) {
+            CooldownLadder.RateLimit -> rateLimitRung = value
+            CooldownLadder.Network -> networkRung = value
         }
     }
 
@@ -190,20 +409,36 @@ class CooldownState(
             if (u == null) remove(keyUntil()) else putLong(keyUntil(), u)
             val d = descriptionText
             if (d.isNullOrBlank()) remove(keyDescription()) else putString(keyDescription(), d)
-            if (rung == 0) remove(keyRung()) else putInt(keyRung(), rung)
+            val c = causeValue
+            if (c == null) remove(keyCause()) else putString(keyCause(), c.name)
+            for (ladder in CooldownLadder.entries) {
+                val r = rungFor(ladder)
+                if (r == 0) remove(keyRung(ladder)) else putInt(keyRung(ladder), r)
+            }
         }
     }
 
     private fun keyUntil() = "$backendId.until"
     private fun keyDescription() = "$backendId.description"
-    private fun keyRung() = "$backendId.rung"
+    private fun keyCause() = "$backendId.cause"
+    private fun keyRung(ladder: CooldownLadder) = when (ladder) {
+        CooldownLadder.RateLimit -> "$backendId.rung.ratelimit"
+        CooldownLadder.Network -> "$backendId.rung.network"
+    }
+    /** The pre-split single rung; read only to delete it. */
+    private fun keyLegacyRung() = "$backendId.rung"
 
     companion object {
         private const val PREF_FILE = "playtranslate_cooldown"
 
-        /** Cap on the ladder rung — the top tier (4h) stays put forever
-         *  until a [recordSuccess] resets it. */
+        /** Cap on a ladder rung — the top tier (4h) stays put forever
+         *  until a [recordSuccess] / reset brings it back down. */
         private const val MAX_RUNG = 3
+
+        /** Ceiling for a parsed `Retry-After` value — matches the rate-
+         *  limit ladder's top rung so a header-driven cooldown can never
+         *  exceed what repeated unsignaled failures would earn. */
+        private val MAX_PARSED_RETRY_AFTER = 4.hours
 
         /** Two IOExceptions within this window are treated as a real
          *  pattern; an isolated one is forgiven. 60 s is wide enough to
