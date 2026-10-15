@@ -30,8 +30,8 @@ android {
         applicationId = "com.davesies.translate"
         minSdk = 29
         targetSdk = 36
-        versionCode = 20
-        versionName = "3.3.0"
+        versionCode = 23
+        versionName = "3.4.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -166,6 +166,23 @@ kotlin {
     jvmToolchain(17)
 }
 
+// Every release artifact first holds the live pack redirect layer to the
+// catalog: scripts/verify_catalog_urls.py asks packs.playtranslate.com for
+// every langpack_catalog.json URL and expects the 302 scripts/pack_urls.py
+// predicts, then a 206 of the catalog's size from the upstream. The catalog
+// ships inside the APK, so a misrouted rule or a deleted upstream asset has
+// to stop the build here rather than a user's install. A live check, so it
+// is never up to date; debug builds never run it.
+val verifyCatalogUrls = tasks.register<Exec>("verifyCatalogUrls") {
+    group = "verification"
+    description = "Checks the live pack redirect layer against every langpack_catalog.json URL."
+    workingDir = rootDir
+    commandLine("python3", rootProject.file("scripts/verify_catalog_urls.py").path)
+    inputs.file(layout.projectDirectory.file("src/main/assets/langpack_catalog.json"))
+    inputs.files(rootProject.file("scripts/verify_catalog_urls.py"), rootProject.file("scripts/pack_urls.py"))
+    outputs.upToDateWhen { false }
+}
+
 // Every APK this module builds is checked for ARM libraries that define ELF
 // thread-locals (see VerifyNoArmElfTlsTask) before assemble or install
 // completes, whether the library is ours or came in with an AAR.
@@ -179,6 +196,26 @@ androidComponents {
         }
         tasks.matching { it.name == "assemble$variantName" || it.name == "install$variantName" }
             .configureEach { dependsOn(verify) }
+
+        // Every release build leaves its R8 mapping under releases/ (see
+        // ArchiveMappingTask), so a crash log from the field can be retraced.
+        // The archive finalizes the R8 task itself, so each path that makes
+        // the obfuscated build, assemble, install, bundle or the bare minify
+        // task, leaves the mapping behind, up to date or not.
+        if (variant.buildType == "release") {
+            tasks.matching { it.name == "assemble$variantName" || it.name == "bundle$variantName" }
+                .configureEach { dependsOn(verifyCatalogUrls) }
+
+            val output = variant.outputs.first()
+            val archive = tasks.register<ArchiveMappingTask>("archive${variantName}Mapping") {
+                mappingFile.set(variant.artifacts.get(SingleArtifact.OBFUSCATION_MAPPING_FILE))
+                versionName.set(output.versionName.map { it ?: "unversioned" })
+                versionCode.set(output.versionCode.map { it ?: 0 })
+                releasesDir.set(rootProject.layout.projectDirectory.dir("releases"))
+            }
+            tasks.matching { it.name == "minify${variantName}WithR8" }
+                .configureEach { finalizedBy(archive) }
+        }
     }
 }
 
@@ -335,5 +372,48 @@ abstract class VerifyNoArmElfTlsTask : DefaultTask() {
 
     private companion object {
         const val PT_TLS = 7
+    }
+}
+
+/**
+ * Copies a release build's R8 mapping to releases/ as
+ * mapping-<versionName>-<versionCode>-<first 8 of the map id>.txt.
+ *
+ * R8 renames every class and method it ships, so a crash log from a release
+ * build says `i92.onTouchEvent`, and the mapping file is the only way back to
+ * `RegionDragView.onTouchEvent`. Each obfuscated frame carries the build's
+ * map id ("r8-map-id-<hex>"), which is what scripts/retrace.sh matches a log
+ * to its mapping by, and what keeps two release builds of one version from
+ * overwriting each other. The build directory's copy is gone with the next
+ * build, and the 3.3.0 region-editor crash (2026-10-07) had to be retraced
+ * from a rebuild of the tag. The archive is not a task output: it keeps every
+ * build's file and is never cleaned.
+ */
+abstract class ArchiveMappingTask : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val mappingFile: RegularFileProperty
+
+    @get:Input
+    abstract val versionName: Property<String>
+
+    @get:Input
+    abstract val versionCode: Property<Int>
+
+    @get:Internal
+    abstract val releasesDir: DirectoryProperty
+
+    @TaskAction
+    fun archive() {
+        val mapping = mappingFile.get().asFile
+        val id = mapping.useLines { lines ->
+            lines.take(64).map { it.trim() }.firstOrNull { it.startsWith("# pg_map_id:") }
+        }?.substringAfter(':')?.trim()?.takeIf { it.isNotEmpty() }
+            ?: throw GradleException("No pg_map_id header in $mapping")
+        val dir = releasesDir.get().asFile
+        dir.mkdirs()
+        val target = File(dir, "mapping-${versionName.get()}-${versionCode.get()}-${id.take(8)}.txt")
+        mapping.copyTo(target, overwrite = true)
+        logger.lifecycle("R8 mapping archived: $target")
     }
 }

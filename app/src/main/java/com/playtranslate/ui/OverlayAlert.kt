@@ -17,15 +17,19 @@ import android.view.animation.DecelerateInterpolator
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.ComponentDialog
 import androidx.activity.OnBackPressedCallback
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.widget.TextViewCompat
 import com.playtranslate.PlayTranslateApplication
 import com.playtranslate.R
 import com.playtranslate.overlay.OverlayHost
+import com.playtranslate.overlay.OverlayPlacement
 import com.playtranslate.overlayThemedContext
 import com.playtranslate.themeColor
 
@@ -217,28 +221,57 @@ class OverlayAlert private constructor(
         val scrimView = FrameLayout(context).apply {
             setBackgroundColor(Color.argb(160, 0, 0, 0))
             setOnClickListener { detachAndDispatch(DismissReason.USER) }
+            // The scrim spans the whole window, bars included (edge-to-edge
+            // activities, FLAG_LAYOUT_IN_SCREEN overlays), so the room the
+            // card may fill is the window minus the bars and any cutout:
+            // a card at full height would otherwise end under the
+            // navigation bar, buttons first.
+            ViewCompat.setOnApplyWindowInsetsListener(this) { v, insets ->
+                val bars = insets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+                )
+                v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+                insets
+            }
         }
 
-        // Dialog card
-        val dialog = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
+        // Dialog card: a scroll view wearing the card's chrome (surface,
+        // hairline, corners) around one column holding the icon, the
+        // title, the message and the buttons. A card that fits lays out at
+        // its natural size with nothing to scroll; one the window is too
+        // short for (a phone in landscape, a large font, a long message, a
+        // picker's column of buttons) scrolls as a whole, buttons included.
+        // Before this only the part above the buttons scrolled, in a
+        // weighted view inside the column, so a card tall from its buttons
+        // alone still ran off the bottom.
+        val stroke = (1 * dp).toInt()
+        val card = ScrollView(context).apply {
             background = GradientDrawable().apply {
                 setColor(context.themeColor(R.attr.ptSurface))
-                setStroke((1 * dp).toInt(), context.themeColor(R.attr.ptDivider))
+                setStroke(stroke, context.themeColor(R.attr.ptDivider))
                 cornerRadius = 16 * dp
             }
+            // The column scrolls over the background, so it is clipped
+            // just inside the hairline (clipToPadding, the default) rather
+            // than painting a button across it at the top or bottom edge;
+            // the column's own side padding keeps it clear of the corners.
+            setPadding(0, stroke, 0, stroke)
+        }
+        val body = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
             setPadding((24 * dp).toInt(), (24 * dp).toInt(), (24 * dp).toInt(), (16 * dp).toInt())
             gravity = Gravity.CENTER_HORIZONTAL
             // Prevent clicks from passing through to scrim
             setOnClickListener { }
         }
+        card.addView(body, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         // App icon in a circle ([appIconCircle]). Shown only when the caller
         // opted in via Builder.showIcon() — off by default because the app's
         // utility popups don't need the brand mark.
         if (showAppIcon) {
             val circleSize = (56 * dp).toInt()
-            dialog.addView(appIconCircle(context, circleSize).apply {
+            body.addView(appIconCircle(context, circleSize).apply {
                 layoutParams = LinearLayout.LayoutParams(circleSize, circleSize).apply {
                     gravity = Gravity.CENTER_HORIZONTAL
                     bottomMargin = (16 * dp).toInt()
@@ -247,7 +280,7 @@ class OverlayAlert private constructor(
         }
 
         // Title
-        dialog.addView(TextView(context).apply {
+        body.addView(TextView(context).apply {
             text = title
             setTextColor(context.themeColor(R.attr.ptText))
             textSize = 17f
@@ -264,7 +297,7 @@ class OverlayAlert private constructor(
 
         // Message
         if (message != null) {
-            dialog.addView(TextView(context).apply {
+            body.addView(TextView(context).apply {
                 text = message
                 setTextColor(context.themeColor(R.attr.ptTextMuted))
                 textSize = 13f
@@ -315,20 +348,22 @@ class OverlayAlert private constructor(
                     cfg.onClick()
                 }
             }
-            dialog.addView(btn)
+            body.addView(btn)
         }
 
         val maxW = (280 * dp).toInt()
         val dlp = FrameLayout.LayoutParams(maxW, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             gravity = Gravity.CENTER
+            topMargin = (16 * dp).toInt()
+            bottomMargin = (16 * dp).toInt()
         }
-        scrimView.addView(dialog, dlp)
+        scrimView.addView(card, dlp)
 
         // Animate in
-        dialog.alpha = 0f
-        dialog.scaleX = 0.9f
-        dialog.scaleY = 0.9f
-        dialog.animate()
+        card.alpha = 0f
+        card.scaleX = 0.9f
+        card.scaleY = 0.9f
+        card.animate()
             .alpha(1f)
             .scaleX(1f)
             .scaleY(1f)
@@ -350,7 +385,8 @@ class OverlayAlert private constructor(
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         )
-        if (!overlayHost.addOverlayWindow(scrimView, wm, params, displayId)) return
+        if (!overlayHost.addOverlayWindow(scrimView, wm, params, displayId, OverlayPlacement.Content)) return
+        ViewCompat.requestApplyInsets(scrimView)
         scrim = scrimView
         dismissAction = { overlayHost.removeOverlayWindow(scrimView) }
     }
@@ -447,6 +483,7 @@ class OverlayAlert private constructor(
             ViewGroup.LayoutParams.MATCH_PARENT
         )
         decor.addView(scrimView, lp)
+        ViewCompat.requestApplyInsets(scrimView)
         scrim = scrimView
         dismissAction = { try { decor.removeView(scrimView) } catch (_: Exception) {} }
     }

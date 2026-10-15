@@ -11,6 +11,7 @@ import com.playtranslate.ocr.core.OcrBox
 import com.playtranslate.ocr.core.OcrImage
 import com.playtranslate.ocr.core.RecognizedRegion
 import com.playtranslate.ocr.core.RecognizedTextNormalizer
+import com.playtranslate.ocr.core.joinLines
 import com.playtranslate.ocr.mangaocr.MangaOcrBridge
 import kotlin.math.abs
 import kotlinx.coroutines.CancellationException
@@ -194,7 +195,7 @@ object MangaOcrRefiner {
     ): Refined {
         val t0 = System.nanoTime()
         val lineJoin =
-            if (SourceLanguageProfiles.forCode(sourceLang)?.wordsSeparatedByWhitespace == true) " " else ""
+            if (SourceLanguageProfiles.scriptFor(sourceLang)?.wordsSeparatedByWhitespace == true) " " else ""
         val image = OcrImage(processed, sourceLang)
         var attempted = 0
         var decoded = 0
@@ -279,11 +280,12 @@ object MangaOcrRefiner {
                 if (lines.indices.all { lines[it] === group.lines[it] }) {
                     return GroupOutcome(group, decoded = true) // confirming read
                 }
-                // Rebuild group text with the same join the layout used, from the same
-                // line order (aligner output preserves size + order).
-                val text = lines.joinToString(lineJoin) { it.text }.trim()
-                if (logText) Log.d(TAG, "  base=\"${group.text}\" -> manga=\"$text\"")
-                GroupOutcome(group.copy(text = text, lines = lines), decoded = true)
+                // Re-join through the layout's own join, from the same line
+                // order (aligner output preserves size + order), so the lines
+                // stay addressed into the new text.
+                val joined = joinLines(lines, lineJoin)
+                if (logText) Log.d(TAG, "  base=\"${group.text}\" -> manga=\"${joined.text}\"")
+                GroupOutcome(group.copy(text = joined.text, lines = joined.lines), decoded = true)
             }
         }
     }

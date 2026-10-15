@@ -24,6 +24,10 @@ data class LensActionContext(
     /** The occurrence reading the lens displayed (Sudachi pick, e.g. 明日 → あす);
      *  null when none. Drives the open-detail bold + the Anki card reading. */
     val reading: String?,
+    /** The text the word was found as (飲んでいなかった for 飲む), handed to
+     *  the detail page so its header draws the lens's conjugation line;
+     *  null for a phrase or member section, which is a lemma. */
+    val surface: String?,
     val entry: DictionaryEntry?,
     val sentence: String?,
     val screenshotPath: String?,
@@ -35,6 +39,14 @@ data class LensActionContext(
      *  return several, and the lens's sense rows span all of them, so the
      *  Anki card built from here must too. */
     val entries: List<DictionaryEntry> = listOfNotNull(entry),
+    /** The dictionary form the lens resolved [word] under, which the detail
+     *  page must resolve with ([WordDetailBinder.Args.lookupForm]). [word]
+     *  is the display and can differ: a usually-kana entry resolved under
+     *  its kanji form and seen in kana displays as the kana. Null with a
+     *  null [word]. */
+    val lookupForm: String?,
+    /** The reading that narrowed [lookupForm]'s lookup, null when none. */
+    val lookupReading: String?,
 )
 
 /**
@@ -48,6 +60,13 @@ data class LensDetailArgs(
     /** The occurrence reading the lens displayed (when it adds information;
      *  null when none or equal to the word). */
     val reading: String?,
+    /** [LensActionContext.surface], for the detail page's conjugation line. */
+    val surface: String?,
+    /** The key the detail page resolves [word]'s entry with
+     *  ([LensActionContext.lookupForm]). */
+    val lookupForm: String,
+    /** The reading that narrowed [lookupForm]'s lookup, null when none. */
+    val lookupReading: String?,
     val sentence: String,
     val screenshotPath: String?,
     val audioAnchorMs: Long?,
@@ -64,6 +83,9 @@ fun WorkspaceWordDetailPage(args: LensDetailArgs): WorkspaceWordDetailPage =
     WorkspaceWordDetailPage(
         word = args.word,
         reading = args.reading,
+        surface = args.surface,
+        lookupForm = args.lookupForm,
+        lookupReading = args.lookupReading,
         screenshotPath = args.screenshotPath,
         audioAnchorMs = args.audioAnchorMs,
         sentenceContext = { args.sentenceContext },
@@ -191,6 +213,9 @@ class SourceLensActions(
             val args = LensDetailArgs(
                 word = word,
                 reading = reading,
+                surface = cur.surface,
+                lookupForm = cur.lookupForm ?: word,
+                lookupReading = cur.lookupReading,
                 sentence = sentence,
                 screenshotPath = cur.screenshotPath,
                 audioAnchorMs = cur.audioAnchorMs,
@@ -218,10 +243,17 @@ class SourceLensActions(
             putExtra(TranslationResultActivity.EXTRA_SENTENCE_TEXT, sentence)
             putExtra(TranslationResultActivity.EXTRA_SCREENSHOT_PATH, cur.screenshotPath)
             // Word context → the activity surfaces the Sentence/Word toggle.
-            word?.let { putExtra(TranslationResultActivity.EXTRA_DRAG_WORD, it) }
+            // The key rides with the word: the embedded word page resolves
+            // with it.
+            word?.let {
+                putExtra(TranslationResultActivity.EXTRA_DRAG_WORD, it)
+                putExtra(TranslationResultActivity.EXTRA_DRAG_LOOKUP_FORM, cur.lookupForm ?: it)
+                cur.lookupReading?.let { r -> putExtra(TranslationResultActivity.EXTRA_DRAG_LOOKUP_READING, r) }
+            }
             if (!reading.isNullOrEmpty()) {
                 putExtra(TranslationResultActivity.EXTRA_DRAG_READING, reading)
             }
+            cur.surface?.let { putExtra(TranslationResultActivity.EXTRA_DRAG_SURFACE, it) }
             cachedTranslation?.let {
                 putExtra(TranslationResultActivity.EXTRA_DRAG_SENTENCE_TRANSLATION, it)
             }

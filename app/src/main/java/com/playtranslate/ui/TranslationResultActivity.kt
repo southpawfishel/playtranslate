@@ -130,6 +130,9 @@ class TranslationResultActivity :
                     SentenceTranslationFlow.HistoryRow(
                         id,
                         intent.getStringExtra(EXTRA_HISTORY_SOURCE_LANG),
+                        com.playtranslate.language.SourceLangId.fromCode(
+                            intent.getStringExtra(EXTRA_HISTORY_SOURCE_LANG_ID),
+                        ),
                         intent.getStringExtra(EXTRA_HISTORY_TARGET_LANG),
                     )
                 },
@@ -229,18 +232,24 @@ class TranslationResultActivity :
     override fun onWordTapped(
         word: String,
         reading: String?,
+        surface: String?,
         screenshotPath: String?,
         sentenceOriginal: String?,
         sentenceTranslation: String?,
-        wordResults: Map<String, Triple<String, String, Int>>
+        wordResults: Map<String, Triple<String, String, Int>>,
+        lookupForm: String,
+        lookupReading: String?,
     ) {
         WordDetailBottomSheet.newInstance(
             word,
             reading = reading,
+            surface = surface,
             screenshotPath = screenshotPath,
             sentenceOriginal = sentenceOriginal,
             sentenceTranslation = sentenceTranslation,
-            sentenceWordResults = wordResults
+            sentenceWordResults = wordResults,
+            lookupForm = lookupForm,
+            lookupReading = lookupReading,
         ).show(supportFragmentManager, WordDetailBottomSheet.TAG)
     }
 
@@ -324,6 +333,7 @@ class TranslationResultActivity :
     override fun updateResultBoxesOnScreen(boxes: OnScreenBoxes) {}
     override fun hideResultBoxesOnScreen() {}
     override fun liveShowOnScreenState(): Boolean? = null
+    override fun isLiveModeRunning() = false
     override fun setLiveShowOnScreen(on: Boolean) {}
 
     // ── SentenceContextProvider ───────────────────────────────────────────
@@ -438,6 +448,11 @@ class TranslationResultActivity :
     private fun setupDragWordTabs(savedInstanceState: Bundle?) {
         val word = intent.getStringExtra(EXTRA_DRAG_WORD) ?: return
         val reading = intent.getStringExtra(EXTRA_DRAG_READING)
+        val surface = intent.getStringExtra(EXTRA_DRAG_SURFACE)
+        // Absent on a launch from before the key existed; the sheet then
+        // resolves under the display, as it does for any opener with no key.
+        val lookupForm = intent.getStringExtra(EXTRA_DRAG_LOOKUP_FORM)
+        val lookupReading = intent.getStringExtra(EXTRA_DRAG_LOOKUP_READING)
         val screenshotPath = intent.getStringExtra(EXTRA_SCREENSHOT_PATH)
         // Capture launch-time fallbacks for [currentSentenceContext]. The
         // VM is initially Idle and populates only as the fragment's
@@ -505,8 +520,11 @@ class TranslationResultActivity :
                     WordDetailBottomSheet.newInstance(
                         word = word,
                         reading = reading,
+                        surface = surface,
                         screenshotPath = screenshotPath,
                         embedded = true,
+                        lookupForm = lookupForm,
+                        lookupReading = lookupReading,
                     ),
                     TAG_EMBEDDED_WORD_DETAIL,
                 )
@@ -755,6 +773,16 @@ class TranslationResultActivity :
          *  region-capture mode (no pill, top Anki button stays). */
         const val EXTRA_DRAG_WORD = "extra_drag_word"
         const val EXTRA_DRAG_READING = "extra_drag_reading"
+        /** The text the lens's word was found as, for the embedded word
+         *  page's conjugation line; absent when the lens had only a lemma. */
+        const val EXTRA_DRAG_SURFACE = "extra_drag_surface"
+        /** The key the embedded word page resolves its entry with
+         *  ([WordDetailBinder.Args.lookupForm]); written with
+         *  [EXTRA_DRAG_WORD], which is its display. */
+        const val EXTRA_DRAG_LOOKUP_FORM = "extra_drag_lookup_form"
+        /** The reading that narrowed [EXTRA_DRAG_LOOKUP_FORM]'s lookup
+         *  ([WordDetailBinder.Args.lookupReading]); absent when none. */
+        const val EXTRA_DRAG_LOOKUP_READING = "extra_drag_lookup_reading"
         const val EXTRA_DRAG_SENTENCE_TRANSLATION = "extra_drag_sentence_translation"
         /** Display name of the backend that produced [EXTRA_DRAG_SENTENCE_TRANSLATION]
          *  in the lens. Surfaces as "Translated by …" below the cached translation
@@ -771,6 +799,9 @@ class TranslationResultActivity :
          *  row and only under a matching pair (see handleSentenceMode). */
         const val EXTRA_HISTORY_ENTRY_ID = "extra_history_entry_id"
         const val EXTRA_HISTORY_SOURCE_LANG = "extra_history_source_lang"
+        /** The row's exact source language ([SourceLangId.code]); absent for a
+         *  row stored before History schema v2. */
+        const val EXTRA_HISTORY_SOURCE_LANG_ID = "extra_history_source_lang_id"
         const val EXTRA_HISTORY_TARGET_LANG = "extra_history_target_lang"
         /** The tapped row's at_ms (epoch): the sentence's capture moment,
          *  passed on to the Anki flow as its game-audio ring anchor — the

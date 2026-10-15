@@ -57,10 +57,27 @@ internal fun drawScreenSpaceDashes(
  */
 class RegionDragView(context: Context) : View(context) {
 
+    companion object {
+        /** The smallest box a drag leaves on either axis, in dp. It was 5% of
+         *  each axis, which the Thor's short axis (1080 px at 369 dpi, 468 dp)
+         *  makes 24 dp, and that size is frozen: as a fraction, a tablet's
+         *  floor was several times the one-line box a user may want, and a
+         *  portrait phone's width floor was under a fingertip. A box seeded
+         *  smaller is kept until a drag grows it. */
+        const val MIN_EXTENT_DP = 24f
+    }
+
+    // The box, as fractions of the view: edges ordered, inside 0..1. setRegion
+    // and the drag math are its only writers and both keep that; the drags
+    // also keep each axis at MIN_EXTENT_DP once they have touched it.
     var topFraction    = 0.25f
+        private set
     var bottomFraction = 0.75f
+        private set
     var leftFraction   = 0.25f
+        private set
     var rightFraction  = 0.75f
+        private set
 
     /** Called on every drag move with the updated region. */
     var onRegionChanged: ((com.playtranslate.RegionEntry) -> Unit)? = null
@@ -70,6 +87,10 @@ class RegionDragView(context: Context) : View(context) {
     var onDragEnd: (() -> Unit)? = null
 
     private val density get() = resources.displayMetrics.density
+
+    /** [MIN_EXTENT_DP] as a fraction of each axis of this view. */
+    private val minExtentX: Float get() = if (width > 0) MIN_EXTENT_DP * density / width else 0f
+    private val minExtentY: Float get() = if (height > 0) MIN_EXTENT_DP * density / height else 0f
 
     // View(context) constructor stores the raw service context; theme
     // attrs aren't bound on it. Wrap it to resolve pt* tokens the same
@@ -122,13 +143,30 @@ class RegionDragView(context: Context) : View(context) {
     private val touchZone get() = 52f * density
     private val cornerLen get() = 28f * density
 
+    /** Seeds the box as it comes, edges ordered and clamped to the screen. A
+     *  box under [MIN_EXTENT_DP] is kept, not grown: the camera's crop editor
+     *  confirms an untouched box back as a change, and a drag grows the box
+     *  the first time it moves an edge. The icon menu's drag-to-select box
+     *  is only touch-slop wide at its smallest, and a 3.3.0 seed 42 px wide
+     *  at the left edge crashed the first drag in a clamp whose bounds had
+     *  crossed (Galaxy S23+, 2026-10-07). */
     fun setRegion(top: Float, bottom: Float, left: Float = 0.25f, right: Float = 0.75f) {
-        topFraction    = top
-        bottomFraction = bottom
-        leftFraction   = left
-        rightFraction  = right
+        topFraction    = minOf(top, bottom).coerceIn(0f, 1f)
+        bottomFraction = maxOf(top, bottom).coerceIn(0f, 1f)
+        leftFraction   = minOf(left, right).coerceIn(0f, 1f)
+        rightFraction  = maxOf(left, right).coerceIn(0f, 1f)
         invalidate()
     }
+
+    /** An edge moving toward the screen's start, held at 0 and at [limit],
+     *  [MIN_EXTENT_DP] from its opposite. A box seeded under it puts the
+     *  limit past the screen edge, and the screen edge wins; coerceIn
+     *  throws on a crossed range. */
+    private fun heldFromStart(v: Float, limit: Float): Float = v.coerceIn(0f, maxOf(0f, limit))
+
+    /** The mirror: an edge moving toward the screen's end, held at [limit]
+     *  and at 1. */
+    private fun heldToEnd(v: Float, limit: Float): Float = v.coerceIn(minOf(limit, 1f), 1f)
 
     fun getRegion() = Pair(topFraction, bottomFraction)
     fun getFullRegion() = arrayOf(topFraction, bottomFraction, leftFraction, rightFraction)
@@ -220,10 +258,19 @@ class RegionDragView(context: Context) : View(context) {
 
         when (event.action) {
             MotionEvent.ACTION_DOWN -> {
-                val nearTop    = abs(y - t) < tz
-                val nearBottom = abs(y - b) < tz
-                val nearLeft   = abs(x - l) < tz
-                val nearRight  = abs(x - r) < tz
+                // Of two opposite edges both within reach, the finger is on
+                // the nearer one. A box narrower than the touch zone has
+                // every touch within reach of both, and a fixed order gave
+                // its right handle to the left edge, which the minimum-size
+                // rule then held against the screen edge: no drag moved it.
+                val dTop    = abs(y - t)
+                val dBottom = abs(y - b)
+                val dLeft   = abs(x - l)
+                val dRight  = abs(x - r)
+                val nearTop    = dTop < tz && dTop <= dBottom
+                val nearBottom = dBottom < tz && dBottom < dTop
+                val nearLeft   = dLeft < tz && dLeft <= dRight
+                val nearRight  = dRight < tz && dRight < dLeft
 
                 dragging = when {
                     // Corners first (highest priority)
@@ -254,31 +301,33 @@ class RegionDragView(context: Context) : View(context) {
                 val dx = (x - lastX) / w
                 val dy = (y - lastY) / h
                 lastX = x; lastY = y
+                val minX = minExtentX
+                val minY = minExtentY
 
                 when (dragging) {
-                    DragTarget.TOP         -> topFraction    = (topFraction + dy).coerceIn(0f, bottomFraction - 0.05f)
-                    DragTarget.BOTTOM      -> bottomFraction = (bottomFraction + dy).coerceIn(topFraction + 0.05f, 1f)
-                    DragTarget.LEFT        -> leftFraction   = (leftFraction + dx).coerceIn(0f, rightFraction - 0.05f)
-                    DragTarget.RIGHT       -> rightFraction  = (rightFraction + dx).coerceIn(leftFraction + 0.05f, 1f)
+                    DragTarget.TOP         -> topFraction    = heldFromStart(topFraction + dy, bottomFraction - minY)
+                    DragTarget.BOTTOM      -> bottomFraction = heldToEnd(bottomFraction + dy, topFraction + minY)
+                    DragTarget.LEFT        -> leftFraction   = heldFromStart(leftFraction + dx, rightFraction - minX)
+                    DragTarget.RIGHT       -> rightFraction  = heldToEnd(rightFraction + dx, leftFraction + minX)
                     DragTarget.TOP_LEFT    -> {
-                        topFraction  = (topFraction + dy).coerceIn(0f, bottomFraction - 0.05f)
-                        leftFraction = (leftFraction + dx).coerceIn(0f, rightFraction - 0.05f)
+                        topFraction  = heldFromStart(topFraction + dy, bottomFraction - minY)
+                        leftFraction = heldFromStart(leftFraction + dx, rightFraction - minX)
                     }
                     DragTarget.TOP_RIGHT   -> {
-                        topFraction   = (topFraction + dy).coerceIn(0f, bottomFraction - 0.05f)
-                        rightFraction = (rightFraction + dx).coerceIn(leftFraction + 0.05f, 1f)
+                        topFraction   = heldFromStart(topFraction + dy, bottomFraction - minY)
+                        rightFraction = heldToEnd(rightFraction + dx, leftFraction + minX)
                     }
                     DragTarget.BOTTOM_LEFT -> {
-                        bottomFraction = (bottomFraction + dy).coerceIn(topFraction + 0.05f, 1f)
-                        leftFraction   = (leftFraction + dx).coerceIn(0f, rightFraction - 0.05f)
+                        bottomFraction = heldToEnd(bottomFraction + dy, topFraction + minY)
+                        leftFraction   = heldFromStart(leftFraction + dx, rightFraction - minX)
                     }
                     DragTarget.BOTTOM_RIGHT -> {
-                        bottomFraction = (bottomFraction + dy).coerceIn(topFraction + 0.05f, 1f)
-                        rightFraction  = (rightFraction + dx).coerceIn(leftFraction + 0.05f, 1f)
+                        bottomFraction = heldToEnd(bottomFraction + dy, topFraction + minY)
+                        rightFraction  = heldToEnd(rightFraction + dx, leftFraction + minX)
                     }
                     DragTarget.MIDDLE -> {
-                        val newTop  = (topFraction + dy).coerceIn(0f, 1f - middleDragH)
-                        val newLeft = (leftFraction + dx).coerceIn(0f, 1f - middleDragW)
+                        val newTop  = heldFromStart(topFraction + dy, 1f - middleDragH)
+                        val newLeft = heldFromStart(leftFraction + dx, 1f - middleDragW)
                         topFraction    = newTop;  bottomFraction = newTop  + middleDragH
                         leftFraction   = newLeft; rightFraction  = newLeft + middleDragW
                     }

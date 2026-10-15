@@ -27,6 +27,7 @@ import android.view.MotionEvent
 import android.view.ViewTreeObserver
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -34,16 +35,19 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.content.res.AppCompatResources
 import androidx.core.graphics.drawable.DrawableCompat
 import com.playtranslate.dictionary.Deinflector
 import com.playtranslate.overlay.OverlayHost
+import com.playtranslate.overlay.OverlayPlacement
 import com.playtranslate.overlay.WindowChurnGate
 import com.playtranslate.Prefs
 import com.playtranslate.R
 import com.playtranslate.isEffectivelyDark
 import com.playtranslate.overlayThemedContext
 import com.playtranslate.themeColor
+import androidx.core.view.doOnNextLayout
 import androidx.core.view.isVisible
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -125,12 +129,37 @@ private const val STYLED_INPLACE_DEADLINE_MS = 250L
  *  [MagnifierLens.setSplitDefinitions]. [opens] renders the section's
  *  trailing chevron and makes the whole section a tap target for its
  *  open-detail callback; pass false on surfaces (or entries) with nothing
- *  to open into. */
+ *  to open into. [caption], when set, is a muted line drawn above the
+ *  section's header ("Also matches" over an alternative entry). */
 data class LensSection(
     val data: WordDefinitionData,
     val label: String?,
     val opens: Boolean,
+    val caption: String? = null,
 )
+
+/** The lens's "Load more (n)" row ([MagnifierLens.setSplitDefinitions]):
+ *  [count] sections a host will add on tap; [loading] while the host
+ *  resolves them (the row reads "Looking up…" and ignores taps). */
+data class LensLoadMore(val count: Int, val loading: Boolean = false)
+
+/** Where the split body's viewport lands after
+ *  [MagnifierLens.setSplitDefinitions] rebuilds it. */
+sealed class LensScroll {
+    /** The top (a first show). */
+    object Top : LensScroll()
+
+    /** Where it was before the rebind, clamped to the new content (a rebind
+     *  that adds nothing the user asked for, such as the Anki deck
+     *  back-fill). */
+    object Keep : LensScroll()
+
+    /** The secondary section at [secondaryIndex] (an index into the
+     *  `secondaries` list as passed) at the body's resting position, where
+     *  the first row sits at scroll 0, clamped to the content's end (after a
+     *  "Load more"). An index outside the list behaves as [Keep]. */
+    data class Reveal(val secondaryIndex: Int) : LensScroll()
+}
 
 /**
  * Clamped card-body height for the post-release grow-to-fit. The card grows
@@ -324,6 +353,11 @@ class MagnifierLens(
      *  secondaries list — the containing phrase on the space-delimited
      *  surfaces, a member word on JA. Never fires outside split mode. */
     var onSecondaryOpenTap: ((Int) -> Unit)? = null
+    /** Fires when the split body's "Load more" row ([setSplitDefinitions]
+     *  with a [LensLoadMore]) is tapped or activated by the controller,
+     *  never while the row is loading. The host resolves the held-back
+     *  sections and rebinds the split with them. */
+    var onLoadMoreTap: (() -> Unit)? = null
     /** Fires when the right chip (Anki) is tapped in sticky mode. */
     var onAnkiTap: (() -> Unit)? = null
     /** Fires when the right chip (Anki) is long-pressed in sticky mode.
@@ -404,23 +438,63 @@ class MagnifierLens(
 
     /** Split definitions body: the [primary] section plus one or more
      *  [secondaries], dividers between, each headed by its own headword and
-     *  (when it opens) a trailing chevron. [primary] is the TAPPED unit —
+     *  (when it opens) a trailing chevron, an alternative entry's header
+     *  under its [LensSection.caption]. [primary] is the TAPPED unit:
      *  the pill keeps its identity and [onOpenTap] is its open action;
      *  each secondary routes to [onSecondaryOpenTap] with its list index.
      *  [secondariesOnTop] places the LONGER unit above: true on the
      *  space-delimited surfaces (tapped word + containing phrase above it),
-     *  false on JA (tapped fused expression on top + its member words
-     *  below, in expression order). Sections bind flat instantly; any
-     *  section whose data carries a structured Yomitan payload upgrades to
-     *  its own styled (WebView) renderer once painted, exactly like the
-     *  single-unit body. */
+     *  false on JA (tapped unit on top + its member words below, in
+     *  expression order, then its alternative entries). Sections bind flat
+     *  instantly; any section whose data carries a structured Yomitan
+     *  payload upgrades to its own styled (WebView) renderer once painted,
+     *  exactly like the single-unit body. [loadMore], when set, appends a
+     *  "Load more (n)" row after the last section, below a divider, whose
+     *  tap fires [onLoadMoreTap]; [secondaries] may then be empty, and the
+     *  primary renders alone above the row.
+     *
+     *  [scroll] is where the body's viewport lands ([LensScroll]):
+     *  [LensScroll.Top] scrolls at once; [LensScroll.Keep] and
+     *  [LensScroll.Reveal] scroll in the layout pass that lays the rebuilt
+     *  sections out, before that pass draws. The grow-to-fit below requests
+     *  its layout in the same call, so that one pass also lays the card out
+     *  at the grow's end state ([animateCardGrowInside]) and the scroll is
+     *  clamped against the grown viewport; the grow's frames are draw-only
+     *  (translation and clip, see [LensView.setGrowFrame]) and never touch
+     *  the scroll offset, so the grow does not undo it. A later relayout
+     *  keeps the offset in pixels: a section above the viewport that swaps
+     *  to its styled renderer afterwards changes height and shifts what
+     *  the viewport shows. */
     fun setSplitDefinitions(
         primary: LensSection,
         secondaries: List<LensSection>,
         secondariesOnTop: Boolean = true,
+        loadMore: LensLoadMore? = null,
+        scroll: LensScroll = LensScroll.Top,
     ) {
-        lensView?.setSplitDefinitions(primary, secondaries, secondariesOnTop)
+        lensView?.setSplitDefinitions(primary, secondaries, secondariesOnTop, loadMore, scroll)
         if (isInteractive) fitHeightToContent()
+    }
+
+    /** Flips the "Load more" row between its label and its loading text in
+     *  place: no rebind, no height change (both are one line). No-op
+     *  without a row. */
+    fun setLoadMoreLoading(loading: Boolean) {
+        lensView?.setLoadMoreLoading(loading)
+    }
+
+    @VisibleForTesting
+    internal fun loadMoreRowForTest(): TextView? = lensView?.loadMoreRow
+
+    @VisibleForTesting
+    internal fun navSectionsForTest(): List<View> = lensView?.navSections().orEmpty()
+
+    @VisibleForTesting
+    internal fun scrollYForTest(): Int = lensView?.definitionsScroll?.scrollY ?: 0
+
+    @VisibleForTesting
+    internal fun scrollToForTest(y: Int) {
+        lensView?.definitionsScroll?.scrollTo(0, y)
     }
 
     fun setLoading(word: String?, reading: String?) {
@@ -441,10 +515,14 @@ class MagnifierLens(
         lensView?.setSpeakChipLoading(loading)
     }
 
-    fun makeInteractive() {
-        val view = lensView ?: return
-        val root = lensRoot ?: return
-        val p = params ?: return
+    /** Promote the shown lens to sticky. Returns false when there is no lens
+     *  to promote (its window never attached, or a rebuild lost it): the
+     *  owner's session has no lens to end from later and ends itself
+     *  ([DragLookupController.endSession]). */
+    fun makeInteractive(): Boolean {
+        val view = lensView ?: return false
+        val root = lensRoot ?: return false
+        val p = params ?: return false
         // The interactive card needs window focus only for key/stick
         // navigation (dpad + A over the pill/chips, stick scroll, B/Escape
         // dismiss). With no gamepad or hardware keyboard attached there is
@@ -483,16 +561,11 @@ class MagnifierLens(
         root.onOffCardTap = { dismiss() }
         root.onDismissKey = { dismiss() }
         view.attachInteractiveListeners(onDismissRequest = { dismiss() })
-        // Arrow x stays inside the card region (in lens-local coords) — clamped
-        // so the triangle's tip lands over the card, not the chip-halo padding.
-        val arrowRelX = (lastFingerX - lastLensX).coerceIn(
-            chipHaloXPx + arrowSizePx,
-            chipHaloXPx + lastCardW - arrowSizePx,
-        )
-        view.setArrowVisible(true, arrowRelX)
+        view.setArrowVisible(true, arrowRelX())
         // Release commit: grow the card to fit the dictionary, animated inside
         // the fixed window (definitions were bound just above).
         fitHeightToContent()
+        return true
     }
 
     /** Controller-opened lens: ring the pill from the start, so the next A
@@ -516,7 +589,7 @@ class MagnifierLens(
 
     /** Clamped card height for the currently bound definitions. */
     private fun grownCardHeight(view: LensView): Int {
-        val (safeTop, safeBottom) = safeVerticalBounds(view)
+        val (safeTop, safeBottom) = safeVerticalBounds()
         return computeGrownCardHeight(
             flipped = lastFlipped,
             anchoredEdgeY = anchoredEdgeScreenY,
@@ -529,16 +602,71 @@ class MagnifierLens(
     }
 
     /** Visible vertical bounds for the grow clamp: system-bar + display-cutout
-     *  insets shrink the raw screen, plus [growBufferPx]. Uses the public
-     *  AndroidX inset API (API 29+); falls back to the raw screen edges when
-     *  insets aren't available yet. */
-    private fun safeVerticalBounds(view: View): Pair<Int, Int> {
-        val insets = ViewCompat.getRootWindowInsets(view)?.getInsets(
+     *  insets shrink the raw screen, plus [growBufferPx]. From the window's
+     *  own dispatch ([LensRoot.windowInsets]); the raw screen edges before
+     *  the first one. */
+    private fun safeVerticalBounds(): Pair<Int, Int> {
+        val insets = lensRoot?.windowInsets?.getInsets(
             WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
         )
         val top = (insets?.top ?: 0) + growBufferPx
         val bottom = lastScreenH - (insets?.bottom ?: 0) - growBufferPx
         return top to bottom
+    }
+
+    /** The lens column's horizontal range inside the root for a column
+     *  [viewW] wide on a screen [screenW] wide: inboard of a visible side
+     *  navigation bar this window lies below and of a side display cutout
+     *  ([LensRoot.windowInsets]); the screen edges before the first
+     *  dispatch. A column wider than the span pins to its left. */
+    private fun columnRange(root: LensRoot, screenW: Int, viewW: Int): IntRange {
+        val side = root.windowInsets?.getInsets(
+            WindowInsetsCompat.Type.navigationBars() or WindowInsetsCompat.Type.displayCutout()
+        )
+        val lo = side?.left ?: 0
+        val hi = maxOf(lo, screenW - (side?.right ?: 0) - viewW)
+        return lo..hi
+    }
+
+    /** Where the sticky arrow's tip sits inside the lens column: over the
+     *  finger, kept inside the card region (lens-local coords), not the
+     *  chip-halo padding. */
+    private fun arrowRelX(): Int =
+        (lastFingerX - lastLensX).coerceIn(chipHaloXPx + arrowSizePx, chipHaloXPx + lastCardW - arrowSizePx)
+
+    /** Slide the lens column to the finger's x, inboard of what the window
+     *  hears ([columnRange]); a sticky card takes its arrow along. The one
+     *  placement of the column: [show] runs it for a finger move, and the
+     *  root runs it when its insets change ([LensRoot.onInsetsChanged]),
+     *  which covers the first dispatch, which lands after the reveal has
+     *  placed the card, and a side bar the game shows or hides under a
+     *  sticky card (Codex reviews, 2026-10-11: the first cut clamped only in
+     *  show, and the test covering it needed a second show to see the
+     *  effect, the trigger a real bar change never supplies). The window is
+     *  fixed full-screen, so this is a pure view translation: no
+     *  updateViewLayout, no flash. */
+    private fun placeColumn() {
+        val root = lensRoot ?: return
+        val view = lensView ?: return
+        val p = params ?: return
+        val viewW = lastCardW + 2 * chipHaloXPx
+        lastLensX = (lastFingerX - viewW / 2).coerceIn(columnRange(root, p.width, viewW))
+        root.setLensX(lastLensX)
+        if (view.isInteractive) view.setArrowVisible(true, arrowRelX())
+    }
+
+    /** The bounds moved under a sticky card (a bar the window hears came
+     *  or went): re-fit the card to them, growing into room that appeared
+     *  or shrinking out from under a bar that now covers its far edge. The
+     *  content-driven [fitHeightToContent] only grows, since content
+     *  shrinking under a reader is jitter; a bound shrinking is a cover.
+     *  The anchored edge stays on the word, as it does for every grow. */
+    private fun refitToBounds() {
+        val view = lensView ?: return
+        if (!view.isInteractive) return
+        val target = grownCardHeight(view)
+        if (target == lensCardHeight) return
+        animateCardGrowInside(view, target)
     }
 
     /** Animate the card body from [lensCardHeight] to [target] INSIDE the fixed
@@ -655,23 +783,48 @@ class MagnifierLens(
         screenW: Int,
         screenH: Int,
         anchorHeight: Int = 0,
-    ) {
+    ): Boolean {
         // If the user changed the theme (mode or accent) between drags,
         // the cached LensView still carries the old colors. Tear it down
         // silently so ensureWindow rebuilds with the new attrs. Silent =
         // does NOT fire onDismiss (the user didn't dismiss; we're just
         // reconfiguring under the hood).
         val themeKey = currentThemeKey()
-        if (lensView != null && cachedThemeKey != themeKey) {
-            removeOverlayInternal()
-        }
+        // The window is sized to the screen it was built for ([ensureWindow]).
+        // A show for another screen gets a window of that size: one of the
+        // old size would catch off-card taps on only part of the new screen
+        // and place the card past its edge. The owner ends a session whose
+        // display changed ([DragLookupController.onDisplayChanged], and its
+        // capture checks the display when the frame returns), so this is
+        // reached by a show that lands between the change and that event.
+        // Same silent rebuild as the theme change: no onDismiss, the user
+        // dismissed nothing.
+        val builtSize = params?.let { it.width to it.height }
+        val rebuilt = lensView != null && (cachedThemeKey != themeKey || builtSize != (screenW to screenH))
+        if (rebuilt) removeOverlayInternal()
         cachedThemeKey = themeKey
 
         val cardW = cardWidth(screenW)
         val viewW = cardW + 2 * chipHaloXPx
         ensureWindow(cardW, viewW, screenW, screenH)
-        val view = lensView ?: return
-        val root = lensRoot ?: return
+        val view = lensView
+        val root = lensRoot
+        if (view == null || root == null) {
+            // No window: the add was refused (a revoked overlay permission, a
+            // display that went away). A rebuild that lost a working window
+            // reports it as a dismissal the user did not make, so the
+            // owner's lens state clears (its drag, if one is under way,
+            // carries on: [DragLookupController.lensDismissed]); a first
+            // show that fails has nothing to report. Either way the caller
+            // reads the return, and a session that reaches its release with
+            // no lens settles itself ([DragLookupController.endSession]).
+            android.util.Log.w(
+                "MagnifierLens",
+                "lens window did not attach at ${screenW}x$screenH (rebuilt=$rebuilt)",
+            )
+            if (rebuilt) onDismiss?.invoke()
+            return false
+        }
 
         val aboveY = fingerY - verticalMarginPx - lensH
         // Activity-window callers (tap-on-word in the result screen) need the
@@ -711,21 +864,24 @@ class MagnifierLens(
         // Slide the lens column to follow the finger horizontally; the window
         // itself is fixed full-screen (never moves or resizes), so this is a
         // pure view translation inside the root — no updateViewLayout, no flash.
-        val lensX = (fingerX - viewW / 2).coerceIn(0, (screenW - viewW).coerceAtLeast(0))
-        lastLensX = lensX
         lastCardW = cardW
-        root.setLensX(lensX)
+        placeColumn()
         view.invalidate()
+        return true
     }
 
     fun hide() {
         lensRoot?.visibility = View.INVISIBLE
     }
 
-    fun dismiss() {
-        if (lensView == null) return
+    /** Dismiss the lens and fire [onDismiss]. Returns false when there was
+     *  no window to dismiss and nothing fired: an owner ending its session
+     *  settles itself then ([DragLookupController.endSession]). */
+    fun dismiss(): Boolean {
+        if (lensView == null) return false
         removeOverlayInternal()
         onDismiss?.invoke()
+        return true
     }
 
     /** Remove the overlay + reset state WITHOUT firing onDismiss. Used by
@@ -806,6 +962,7 @@ class MagnifierLens(
             density = density,
             onOpenTap = { onOpenTap?.invoke() },
             onSecondaryOpenTap = { i -> onSecondaryOpenTap?.invoke(i) },
+            onLoadMoreTap = { onLoadMoreTap?.invoke() },
             onAnkiTap = { onAnkiTap?.invoke() },
             onAnkiLongPress = { onAnkiLongPress?.invoke() },
             onSpeakTap = { onSpeakTap?.invoke() },
@@ -813,6 +970,10 @@ class MagnifierLens(
             onStyledHeightChanged = { fitHeightToContent() },
         )
         val root = LensRoot(themedCtx, view, viewW)
+        root.onInsetsChanged = {
+            placeColumn()
+            refitToBounds()
+        }
         val windowType = if (useActivityWindow)
             WindowManager.LayoutParams.TYPE_APPLICATION_PANEL
         else
@@ -833,7 +994,7 @@ class MagnifierLens(
             y = 0
         }
         val attached = if (overlayHost != null) {
-            overlayHost.addOverlayWindow(root, wm, lp, displayId)
+            overlayHost.addOverlayWindow(root, wm, lp, displayId, OverlayPlacement.Content)
         } else {
             try {
                 wm.addView(root, lp)
@@ -867,15 +1028,43 @@ class MagnifierLens(
     ) : FrameLayout(ctx) {
         /** True once the lens is sticky; off-card taps dismiss only then. */
         var interactive = false
-        /** Invoked when a sticky-mode DOWN lands left/right of the lens column.
-         *  (Taps inside the column but off the chrome band are dismissed by
-         *  [lens] itself; both are consumed by this full-screen window.) */
+        /** Invoked when a sticky-mode DOWN lands left/right of the lens column,
+         *  or a touch lands outside the window altogether. (Taps inside the
+         *  column but off the chrome band are dismissed by [lens] itself; all
+         *  are consumed by this full-screen window.) */
         var onOffCardTap: (() -> Unit)? = null
         /** Controller B / back while the sticky lens holds window focus (it
          *  goes focusable when a controller is attached — [makeInteractive]).
          *  A separate hook from [onOffCardTap]: same dismissal, different
          *  intent. */
         var onDismissKey: (() -> Unit)? = null
+        /** The insets last dispatched to this window, the one source for
+         *  what the card keeps clear of: the system bars this window is
+         *  dispatched (below them on the MediaProjection backend; an
+         *  accessibility overlay lies above them and hears them only on
+         *  Android 11, which sends every bar to every window) and the
+         *  display cutout, which the host lays the window into. Null
+         *  before the first dispatch, when the card clamps to the screen. */
+        var windowInsets: WindowInsetsCompat? = null
+            private set
+        /** Fired when the bars or cutout this window hears changed, the
+         *  first dispatch included (it lands after the reveal placed the
+         *  card): the owner re-places the column and re-fits a sticky
+         *  card. Not for every dispatch: a relayout of our own repeats the
+         *  same insets. */
+        var onInsetsChanged: (() -> Unit)? = null
+
+        override fun onApplyWindowInsets(insets: WindowInsets): WindowInsets {
+            val next = WindowInsetsCompat.toWindowInsetsCompat(insets, this)
+            val before = windowInsets?.getInsets(WATCHED_INSETS)
+            windowInsets = next
+            if (before != next.getInsets(WATCHED_INSETS)) onInsetsChanged?.invoke()
+            return super.onApplyWindowInsets(insets)
+        }
+
+        private companion object {
+            val WATCHED_INSETS = WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+        }
 
         /** True between a consumed B DOWN and its UP, so dismissal fires only
          *  for a press that began on this window. */
@@ -933,11 +1122,25 @@ class MagnifierLens(
         }
 
         override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
-            if (interactive && ev.actionMasked == MotionEvent.ACTION_DOWN) {
-                val left = lens.translationX
-                if (ev.x < left || ev.x >= left + lensW) {
-                    onOffCardTap?.invoke()
-                    return true   // consume: the tap dismisses; it does not pass through
+            if (interactive) {
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        val left = lens.translationX
+                        if (ev.x < left || ev.x >= left + lensW) {
+                            onOffCardTap?.invoke()
+                            return true   // consume: the tap dismisses; it does not pass through
+                        }
+                    }
+                    // A touch outside this window (FLAG_WATCH_OUTSIDE_TOUCH):
+                    // on a navigation bar, which sits above an application
+                    // overlay, or past the window's frame. The notification
+                    // reaches the window's root, and a ViewGroup hands a
+                    // non-DOWN event to no child while it has no touch target,
+                    // so a listener on [lens] never saw one.
+                    MotionEvent.ACTION_OUTSIDE -> {
+                        onOffCardTap?.invoke()
+                        return true
+                    }
                 }
             }
             return super.dispatchTouchEvent(ev)
@@ -972,6 +1175,7 @@ class MagnifierLens(
         private val density: Float,
         private val onOpenTap: () -> Unit,
         private val onSecondaryOpenTap: (Int) -> Unit,
+        private val onLoadMoreTap: () -> Unit,
         private val onAnkiTap: () -> Unit,
         private val onAnkiLongPress: () -> Unit,
         private val onSpeakTap: () -> Unit,
@@ -1390,8 +1594,16 @@ class MagnifierLens(
         /** The split body's tappable section roots in VISUAL order (top →
          *  bottom) — the nav walk's candidates and activation targets
          *  (activation is the section's own click, so the wiring lives in
-         *  one place). Non-opening sections aren't listed. */
+         *  one place). Non-opening sections aren't listed; the "Load more"
+         *  row, when bound, is listed last. */
         private var splitSectionViews: List<View> = emptyList()
+        /** The split body's "Load more" row, built by [setSplitDefinitions]
+         *  when the bind carries a [LensLoadMore]; null otherwise. */
+        var loadMoreRow: TextView? = null
+            private set
+        /** The bound row's state: [setLoadMoreLoading] flips its loading
+         *  flag and [fireLoadMoreTap] reads it. */
+        private var loadMoreState: LensLoadMore? = null
 
         /** The open-cue chevron every body cell carries — trailing a split
          *  section's header, or floating over a headerless body. */
@@ -1432,7 +1644,9 @@ class MagnifierLens(
                 },
             )
         }
-        private val definitionsScroll = ScrollView(ctx).apply {
+        /** Not private: [MagnifierLens.scrollYForTest] and
+         *  [MagnifierLens.scrollToForTest] read and set its offset. */
+        val definitionsScroll = ScrollView(ctx).apply {
             isVerticalScrollBarEnabled = true
             isFillViewport = false
             // clipToPadding stays false so scrolled rows fill the body
@@ -1722,6 +1936,8 @@ class MagnifierLens(
             splitBindSeq++
             applySectionTint(null)
             splitSectionViews = emptyList()
+            loadMoreRow = null
+            loadMoreState = null
             // Pool views come OUT of the dying section columns (they're
             // reused next split bind — never destroyed here); the columns
             // themselves are discarded wholesale.
@@ -1993,7 +2209,7 @@ class MagnifierLens(
 
         /** Debounce so the open handlers can't fire twice from a single
          *  gesture that crosses the open detector and any other receiver —
-         *  shared between the word and phrase opens (one gesture, one open). */
+         *  shared by the opens and the "Load more" row (one gesture, one action). */
         private var lastOpenTapMs = 0L
         private fun fireOpenTap() {
             val now = SystemClock.uptimeMillis()
@@ -2007,6 +2223,16 @@ class MagnifierLens(
             if (now - lastOpenTapMs < 300L) return
             lastOpenTapMs = now
             onSecondaryOpenTap(index)
+        }
+
+        /** The "Load more" row's click: inert while the host resolves the
+         *  sections ([LensLoadMore.loading]), debounced with the opens. */
+        private fun fireLoadMoreTap() {
+            if (loadMoreState?.loading == true) return
+            val now = SystemClock.uptimeMillis()
+            if (now - lastOpenTapMs < 300L) return
+            lastOpenTapMs = now
+            onLoadMoreTap()
         }
 
         private val tapDetector = GestureDetector(ctx, object : GestureDetector.SimpleOnGestureListener() {
@@ -2404,8 +2630,11 @@ class MagnifierLens(
             // sheet reached on tap-through still shows misc (it re-resolves).
             // The flat renderer binds UNCONDITIONALLY: it is the instant
             // content of every lookup and the standing fallback the styled
-            // path degrades to (renderer death, empty render).
-            definitionsContent.bind(data, label, LENS_DEFINITIONS_SCALE, showMisc = false)
+            // path degrades to (renderer death, empty render). Both bodies
+            // lead with the conjugation line of the looked-up form.
+            definitionsContent.bind(
+                data, label, LENS_DEFINITIONS_SCALE, showMisc = false, showInflections = true,
+            )
             val styledData = data.styled
             val sv = if (styledData != null && styledData.structured.isNotEmpty()) {
                 ensureStyledView()
@@ -2463,6 +2692,7 @@ class MagnifierLens(
                         showMisc = false,
                         metaChips = styledMetaChips(context, data),
                         label = label,
+                        inflectionLines = data.inflectedForms.map { InflectionChain.format(context, it) },
                     ),
                     styledData.dictStyles,
                     styledData.sourceLanguage,
@@ -2494,9 +2724,16 @@ class MagnifierLens(
             primary: LensSection,
             secondaries: List<LensSection>,
             secondariesOnTop: Boolean,
+            loadMore: LensLoadMore?,
+            scroll: LensScroll,
         ) {
             mode = Mode.DEFINITIONS
             setLabel(primary.data.word, primary.data.reading, primary.data.pitch)
+            // Read before the teardown below detaches the targets: the
+            // controller cursor's place among them, -1 when it is elsewhere.
+            val cursorIndex = splitSectionViews.indexOf(navCursor)
+            // Read before the teardown: the offset [LensScroll.Keep] restores.
+            val savedY = definitionsScroll.scrollY
             // Styled steps aside; any prior split is torn down for rebuild.
             showFlatBody()
             definitionsContent.visibility = GONE
@@ -2506,46 +2743,155 @@ class MagnifierLens(
             // on top) drops its header — the pill directly above already
             // carries the same headword + reading, and repeating them costs
             // a row. A bottom-rendered primary (Latin: word under the
-            // phrase) keeps its header for scannability.
-            val ordered: List<Triple<LensSection, () -> Unit, Boolean>> = buildList {
-                val secs = secondaries.mapIndexed { i, s ->
-                    Triple(s, { fireSecondaryOpenTap(i) }, true)
-                }
+            // phrase) keeps its header for scannability. Each part carries
+            // its index into [secondaries], null for the primary.
+            val ordered: List<Triple<LensSection, Int?, Boolean>> = buildList {
+                val secs = secondaries.mapIndexed { i, s -> Triple(s, i, true) }
                 if (secondariesOnTop) {
                     addAll(secs)
-                    add(Triple(primary, ::fireOpenTap, true))
+                    add(Triple(primary, null, true))
                 } else {
-                    add(Triple(primary, ::fireOpenTap, false))
+                    add(Triple(primary, null, false))
                     addAll(secs)
                 }
             }
             val views = mutableListOf<View>()
-            ordered.forEachIndexed { i, (section, fire, showHeader) ->
+            // Every secondary's column, opening or not, in [secondaries]
+            // order (they are added as one run in that order).
+            val secondaryColumns = mutableListOf<View>()
+            ordered.forEachIndexed { i, (section, secondaryIndex, showHeader) ->
                 if (i > 0) splitContent.addView(buildSplitDivider())
-                addSplitSection(section, fire, showHeader)?.let { views += it }
+                val fire: () -> Unit =
+                    if (secondaryIndex == null) ::fireOpenTap else ({ fireSecondaryOpenTap(secondaryIndex) })
+                val col = addSplitSection(section, fire, showHeader)
+                if (section.opens) views += col
+                if (secondaryIndex != null) secondaryColumns += col
+            }
+            if (loadMore != null) {
+                splitContent.addView(buildSplitDivider())
+                views += addLoadMoreRow(loadMore)
             }
             splitSectionViews = views
             splitActive = true
             splitContent.visibility = VISIBLE
-            definitionsScroll.scrollTo(0, 0)
             definitionsScroll.visibility = VISIBLE
+            val revealed = (scroll as? LensScroll.Reveal)
+                ?.let { secondaryColumns.getOrNull(it.secondaryIndex) }
+            if (scroll == LensScroll.Top) {
+                definitionsScroll.scrollTo(0, 0)
+            } else {
+                // After the layout that places the rebuilt columns: a
+                // column's top is its offset in [splitContent] (a direct
+                // child; [splitContent] sits at the scroll content's top),
+                // the same resting offset [moveNav] scrolls a section to.
+                // On the scroll, not on [splitContent], so it runs after the
+                // ScrollView's own onLayout re-claims its offset; still in
+                // the same pass, before it draws. The ScrollView clamps an
+                // offset past the content's end. A newer bind (any
+                // [hideSplitBody]) makes this one's scroll moot.
+                val bindSeq = splitBindSeq
+                definitionsScroll.doOnNextLayout {
+                    if (bindSeq == splitBindSeq) definitionsScroll.scrollTo(0, revealed?.top ?: savedY)
+                }
+            }
+            // A controller cursor on a target this rebind tore down keeps
+            // its place: on the revealed section when the rebind reveals one
+            // that is a target (the host binding the sections it loaded,
+            // whether the row was activated by the cursor or by touch), else
+            // on the target at its index, clamped, which is the same section
+            // after a deck back-fill and the rebuilt row after one that lands
+            // while the row reads "Looking up...". Never on a detached view.
+            if (cursorIndex >= 0) {
+                navCursor = revealed?.takeIf { it in views }
+                    ?: views.getOrNull(cursorIndex.coerceAtMost(views.lastIndex))
+                syncNavRing()
+            }
             invalidate()
         }
 
-        /** Builds one split section — headword header (name + reading side
-         *  by side, chevron alone at the trailing edge when it opens) over
-         *  the flat definitions body — into [splitContent]. [showHeader]
-         *  false skips the header entirely (the top-rendered primary: the
-         *  pill already names it). Returns the section root when it's a tap
-         *  target ([LensSection.opens]), null otherwise. [fire] is the
-         *  section's (already-debounced) open action. */
+        /** Builds the "Load more" row into [splitContent] and returns it,
+         *  the split body's last nav target. The controller's selection tint
+         *  is written to (and cleared from) a target's background
+         *  ([applySectionTint]), so the touch ripple rides the foreground. */
+        private fun addLoadMoreRow(state: LensLoadMore): TextView {
+            val ripple = TypedValue().also {
+                context.theme.resolveAttribute(android.R.attr.selectableItemBackground, it, true)
+            }
+            val row = TextView(context).apply {
+                text = loadMoreText(state)
+                setTextColor(context.themeColor(R.attr.ptTextLink))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                gravity = Gravity.CENTER
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                minHeight = dp(40f)
+                setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx - dp(6f), 0)
+                foreground = context.getDrawable(ripple.resourceId)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { fireLoadMoreTap() }
+            }
+            splitContent.addView(
+                row,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            loadMoreRow = row
+            loadMoreState = state
+            return row
+        }
+
+        private fun loadMoreText(state: LensLoadMore): String =
+            if (state.loading) context.getString(R.string.lens_loading)
+            else context.getString(R.string.load_more_count, state.count)
+
+        /** See [MagnifierLens.setLoadMoreLoading]. */
+        fun setLoadMoreLoading(loading: Boolean) {
+            val row = loadMoreRow ?: return
+            val state = loadMoreState?.copy(loading = loading) ?: return
+            loadMoreState = state
+            row.text = loadMoreText(state)
+        }
+
+        /** Builds one split section into [splitContent]: the
+         *  [LensSection.caption] line when there is one, then the headword
+         *  header (name + reading side by side, chevron alone at the
+         *  trailing edge when it opens) over the flat definitions body.
+         *  [showHeader] false skips the header entirely (the top-rendered
+         *  primary: the pill already names it). The caption and header sit
+         *  outside the body's holder, so a styled swap-in
+         *  ([attachSectionStyled]) keeps them. Returns the section's root
+         *  column, a direct child of [splitContent], whether or not it opens;
+         *  it is a tap target, and so a nav target, only when
+         *  [LensSection.opens]. [fire] is the section's (already-debounced)
+         *  open action. */
         private fun addSplitSection(
             section: LensSection,
             fire: () -> Unit,
             showHeader: Boolean,
-        ): View? {
+        ): View {
             val col = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
+            }
+            section.caption?.let { caption ->
+                // The header reading's size and muted color, on its own
+                // line above the name, with the header's insets.
+                col.addView(
+                    TextView(context).apply {
+                        text = caption
+                        setTextColor(panelSecondaryText)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                        setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx - dp(6f), 0)
+                    },
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
             }
             if (showHeader) {
                 val header = LinearLayout(context).apply {
@@ -2611,7 +2957,12 @@ class MagnifierLens(
                 setPadding(bodyHPaddingPx - dp(6f), 0, bodyHPaddingPx - dp(6f), 0)
                 metaChipFill = panelBadgeBg
                 emptyPlaceholder = context.getString(R.string.word_detail_no_definitions)
-                bind(section.data, section.label, LENS_DEFINITIONS_SCALE, showMisc = false)
+                // The conjugation line rides inside the body, so a headerless
+                // section shows it too.
+                bind(
+                    section.data, section.label, LENS_DEFINITIONS_SCALE,
+                    showMisc = false, showInflections = true,
+                )
             }
             // Flat and (maybe) styled renderers share one holder, so the
             // styled swap-in is a visibility flip INSIDE the section —
@@ -2628,7 +2979,8 @@ class MagnifierLens(
                 // cost; the single-unit body ([singleChevronView]) uses
                 // the same placement. (A maximal-width first gloss line
                 // could reach under it; the usual first row is the
-                // left-packed meta chips.)
+                // conjugation line, whose end margin keeps it clear, or
+                // the left-packed meta chips.)
                 // Absolute RIGHT, matching the lens's canvas-aligned layout
                 // discipline. Added LAST so it stays painted over a styled
                 // swap-in.
@@ -2661,7 +3013,7 @@ class MagnifierLens(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                 ),
             )
-            return col.takeIf { section.opens }
+            return col
         }
 
         /** The section's styled (WebView) upgrade, mirroring the single-unit
@@ -2727,6 +3079,7 @@ class MagnifierLens(
                     showMisc = false,
                     metaChips = styledMetaChips(context, section.data),
                     label = section.label,
+                    inflectionLines = section.data.inflectedForms.map { InflectionChain.format(context, it) },
                 ),
                 styledData.dictStyles,
                 styledData.sourceLanguage,
@@ -2801,18 +3154,9 @@ class MagnifierLens(
 
         fun attachInteractiveListeners(onDismissRequest: () -> Unit) {
             dismissRequest = onDismissRequest
-            // ACTION_OUTSIDE delivers the system's "user touched outside the
-            // window" notification; this listener doesn't observe clicks on
-            // the lens itself, so there's no click semantic for
-            // View.performClick to mirror. TalkBack users dismiss the lens
-            // via the back gesture.
-            @android.annotation.SuppressLint("ClickableViewAccessibility")
-            setOnTouchListener { _, event ->
-                if (event.actionMasked == MotionEvent.ACTION_OUTSIDE) {
-                    onDismissRequest()
-                    false
-                } else false
-            }
+            // A touch outside the window is the root's to hear
+            // ([LensRoot.dispatchTouchEvent]). TalkBack users dismiss the
+            // lens via the back gesture.
             // Right stick scrolls the definitions — the sheet's scroll hand
             // (the left stick was the original driver, and before that a
             // nudge-to-dismiss; B carries dismissal now, and a dictionary
@@ -2834,7 +3178,6 @@ class MagnifierLens(
         }
 
         fun detachInteractiveListeners() {
-            setOnTouchListener(null)
             setOnGenericMotionListener(null)
             navPreDraw?.let { viewTreeObserver.removeOnPreDrawListener(it) }
             navPreDraw = null
@@ -2878,7 +3221,7 @@ class MagnifierLens(
         private fun navChromeRow(): List<View> =
             listOf(leftChip, pillView, rightChip).filter { it.isShown }
 
-        private fun navSections(): List<View> =
+        fun navSections(): List<View> =
             splitSectionViews.filter { it.isShown }
 
         /** Item rect in THIS view's coordinates. Chips ring their 32dp visible
@@ -3054,8 +3397,9 @@ class MagnifierLens(
                 v === pillView -> fireOpenTap()
                 v === leftChip -> onSpeakTap()
                 v === rightChip -> onAnkiTap()
-                // Sections carry their own (debounced) open action as their
-                // click listener — one wiring for touch and controller.
+                // Sections, and the "Load more" row, carry their own
+                // (debounced) action as their click listener: one wiring
+                // for touch and controller.
                 v in splitSectionViews -> v.performClick()
             }
         }

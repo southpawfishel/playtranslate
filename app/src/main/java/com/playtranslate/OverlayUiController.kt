@@ -27,7 +27,9 @@ import com.playtranslate.ocr.mangaocr.MangaOcrProvisioning
 import com.playtranslate.ocr.registry.OcrModelManager
 import com.playtranslate.ocr.registry.ocrLabel
 import com.playtranslate.ocr.registry.selectionToken
+import com.playtranslate.overlay.OverlayEnvironment
 import com.playtranslate.overlay.OverlayHost
+import com.playtranslate.overlay.OverlayPlacement
 import com.playtranslate.ui.CaptureOverlaySettingsActivity
 import com.playtranslate.ui.DimController
 import com.playtranslate.ui.DragLookupController
@@ -185,29 +187,35 @@ class OverlayUiController(
             reconcileFloatingIcons()
         }
         override fun onDisplayChanged(displayId: Int) {
-            if (!isActiveController) return
-            // Dismiss a SHOWING result panel when ITS display's geometry (size or rotation)
-            // changed — it's laid out + OCR-mapped against that geometry. An in-flight capture
-            // is deliberately NOT touched here (it self-validates after requestClean), so a
-            // spurious / cross-display event can't cancel a just-tapped capture — that was the
-            // rotate-then-tap no-op. 180° flips change rotation, so a stale panel still drops.
-            dismissCaptureResultPanelIfReconfigured(displayId)
-            // Same stale-layout rule for the floating workspace.
-            dismissWorkspaceIfReconfigured(displayId)
-            // A rotation / resize invalidates a per-box translation overlay
-            // group — its cached displayW/displayH drive the OCR→screen
-            // mapping. Drop it on a size change; the next capture cycle
-            // rebuilds the group at the new dimensions.
-            dropResizedTranslationOverlay(displayId)
-            // Same stale-mapping rule for the in-app result's on-screen boxes.
-            dropReconfiguredAppBoxes(displayId)
-            // Order matters: icon reposition first so it picks up the new
-            // screen dimensions; the intro + open menu reposition then read the
-            // icon's freshly-updated centre Y to anchor themselves relative to it.
-            repositionIconForDisplay(displayId)
-            repositionSonarIntroForDisplay(displayId)
-            repositionFloatingMenuForDisplay(displayId)
-            errorPills.onDisplayChanged(displayId)
+            if (isActiveController) {
+                // Dismiss a SHOWING result panel when ITS display's geometry (size or rotation)
+                // changed — it's laid out + OCR-mapped against that geometry. An in-flight capture
+                // is deliberately NOT touched here (it self-validates after requestClean), so a
+                // spurious / cross-display event can't cancel a just-tapped capture — that was the
+                // rotate-then-tap no-op. 180° flips change rotation, so a stale panel still drops.
+                dismissCaptureResultPanelIfReconfigured(displayId)
+                // Same stale-layout rule for the floating workspace.
+                dismissWorkspaceIfReconfigured(displayId)
+                // A rotation / resize invalidates a per-box translation overlay
+                // group — its cached displayW/displayH drive the OCR→screen
+                // mapping. Drop it on a size change; the next capture cycle
+                // rebuilds the group at the new dimensions.
+                dropResizedTranslationOverlay(displayId)
+                // Same stale-mapping rule for the in-app result's on-screen boxes.
+                dropReconfiguredAppBoxes(displayId)
+            }
+            // Every window still up on the display follows it: the host
+            // re-pins the full-screen ones and lays out every placed one (the
+            // icon, its spinner and sonar intro, an open menu, the region
+            // editor's chrome, the pills) against the display as it is now.
+            // Not gated: it touches only the windows this host holds, and a
+            // host with none does nothing.
+            overlayHost.onDisplayChanged(displayId)
+            if (isActiveController) {
+                // A drag session ends: its lens window, screenshot and finger
+                // coordinates belong to the old geometry.
+                iconHandles[displayId]?.dragController?.onDisplayChanged()
+            }
         }
     }
 
@@ -249,6 +257,14 @@ class OverlayUiController(
         val wm: WindowManager,
         val dragController: DragLookupController,
         val clearLivePauseFlag: () -> Unit,
+        /** Restores what a drag session paused (live mode, the region
+         *  indicator), as its settle does: for a teardown while capture
+         *  carries on. */
+        val settleDragPause: () -> Unit,
+        /** Forgets what a drag session paused without acting: for a teardown
+         *  that ends capture, where a resumed live start would land on a
+         *  backend on its way out. */
+        val dropDragPause: () -> Unit,
         /** Builds a fresh, fully wired icon VIEW for this display — closes
          *  over the display's collaborators (drag controller, session state)
          *  inside [installFloatingIconForDisplay], so install and the
@@ -263,13 +279,23 @@ class OverlayUiController(
 
     private val iconHandles: MutableMap<Int, FloatingIconHandle> = mutableMapOf()
 
+    /** The displays that hold a floating icon now, as a snapshot: what the
+     *  log export prints beside the resolved capture targets
+     *  ([com.playtranslate.diagnostics.DisplayDiag]), since the two differ
+     *  whenever [reconcileFloatingIcons] returns before installing (the
+     *  preference off, the boot or Hide-for-Now suppression, MediaProjection
+     *  not turned on). [iconHandles] is main-thread confined and the export
+     *  reads off it; a read that races a mutation fails, which the export
+     *  tolerates by leaving the block out (Codex review, 2026-10-14). */
+    val floatingIconDisplayIds: Set<Int> get() = iconHandles.keys.toSet()
+
     // ── Sonar-ping intro ─────────────────────────────────────────────────
     //
     // Attention animation that plays whenever a fresh floating icon lands in
     // a window (see design_handoff_sonar_ping/). Fires for every install —
     // capture activation, the QS tile flipping showOverlayIcon on, a new
     // display being added, etc. Does NOT fire for rotation
-    // (repositionIconForDisplay updates the existing icon's params in place)
+    // (the host lays the existing icon out again in place)
     // or for z-order re-raises (bringFloatingIconsToFront swaps in a fresh
     // icon view via the handle's makeIcon, without going through install).
     //
@@ -425,22 +451,16 @@ class OverlayUiController(
     // ── Overlay-specific mutable state ───────────────────────────────────
 
     private var floatingMenu: FloatingIconMenu? = null
-    /** Display the open [floatingMenu] is anchored on, so a rotation of that
-     *  display can re-anchor it ([repositionFloatingMenuForDisplay]). */
+    /** Display the open [floatingMenu] is on. */
     private var floatingMenuDisplayId: Int? = null
 
     private var pillView: View? = null
-    /** Display, window params and window manager of the no-text pill, so it
-     *  can move to stay below the translation-error pills while they
-     *  change on its display ([keepNoTextPillBelowErrorPills]). */
+    /** Display the no-text pill is on. */
     private var pillDisplayId: Int? = null
-    private var pillParams: WindowManager.LayoutParams? = null
-    private var pillWm: WindowManager? = null
     private val pillHandler = Handler(Looper.getMainLooper())
 
     /** The translation-error pills. See [showTranslationErrorPill]. */
     private val errorPills = TranslationErrorPills(overlayHost).also {
-        it.onStackMoved = ::keepNoTextPillBelowErrorPills
         it.onWithdrawn = com.playtranslate.translation.TranslationErrors::onPillsWithdrawn
         it.onSettings = ::onPillSettingsTapped
     }
@@ -542,19 +562,21 @@ class OverlayUiController(
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = android.view.Gravity.TOP or android.view.Gravity.CENTER_HORIZONTAL
-            y = (40 * dp).toInt()
-        }
-        // Under the translation-error pills when they're up on this display,
-        // not on top of them; kept there as they change.
-        errorPills.placeBelow(display.displayId, params)
-
-        overlayHost.addOverlayWindow(view, wm, params, display.displayId)
+        )
+        val displayId = display.displayId
+        var placed = false
+        overlayHost.addOverlayWindow(
+            view, wm, params, displayId,
+            OverlayPlacement.Placed { env, p ->
+                // Below a stack whose size is not known yet the pill keeps
+                // where it is; only its first placement has nowhere to keep.
+                if (placed && errorPills.stackPendingOn(displayId)) return@Placed
+                placeNoTextPill(displayId, dp, env, p)
+                placed = true
+            },
+        )
         pillView = view
-        pillDisplayId = display.displayId
-        pillParams = params
-        pillWm = wm
+        pillDisplayId = displayId
 
         // Brief display, then fade out
         pillHandler.postDelayed({
@@ -575,27 +597,21 @@ class OverlayUiController(
         }
         pillView = null
         pillDisplayId = null
-        pillParams = null
-        pillWm = null
     }
 
-    /** The translation-error pills on [displayId] were laid out anew or
-     *  moved: move the no-text pill, if it's up there, to just below them.
-     *  Called for their first layout too, which may come after the no-text
-     *  pill was placed (an error and a failed capture land in the same
-     *  frame), so the two never overlap whatever order they came in. When
-     *  the pills go away it stays put; it's gone within two seconds. */
-    private fun keepNoTextPillBelowErrorPills(displayId: Int) {
-        if (pillDisplayId != displayId) return
-        val view = pillView ?: return
-        val params = pillParams ?: return
-        if (!errorPills.placeBelow(displayId, params)) return
-        try {
-            pillWm?.updateViewLayout(view, params)
-        } catch (_: IllegalArgumentException) {
-            // Its window is already gone (a sweep, or the churn gate's
-            // deferred removal); hideNoTextPill clears the rest.
-        }
+    /** The no-text pill's layout ([OverlayPlacement.Placed]), run by the host
+     *  whenever it lays the display out: centred in the pills' clear span, on
+     *  the pills' line ([TranslationErrorPills.topLinePx]: the error pills
+     *  and this one hang from the same line, Gilad, 2026-10-11), or just
+     *  below the translation-error pills when they are up on this display,
+     *  not on top of them. The stack's first layout and every change of its
+     *  height lay the display out again, so the two never overlap whatever
+     *  order they came in (an error and a failed capture land in the same
+     *  frame). */
+    private fun placeNoTextPill(displayId: Int, density: Float, env: OverlayEnvironment, p: WindowManager.LayoutParams) {
+        p.gravity = android.view.Gravity.TOP or android.view.Gravity.CENTER_HORIZONTAL
+        p.x = TranslationErrorPills.centreOffsetPx(env)
+        p.y = errorPills.belowStackY(displayId) ?: TranslationErrorPills.topLinePx(env, density)
     }
 
     // ── Translation-error pills ──────────────────────────────────────────
@@ -612,7 +628,7 @@ class OverlayUiController(
     fun showTranslationErrorPill(error: TranslationError): Boolean {
         val displayId = errorPills.displayId
             ?: CaptureService.instance?.primaryGameDisplayId()
-            ?: CaptureBackendResolver.active().capturableTargets(Prefs(context).captureDisplayIds).firstOrNull()
+            ?: CaptureBackendResolver.active().capturableTargets(context, Prefs(context).captureDisplayIds).firstOrNull()
             ?: Display.DEFAULT_DISPLAY
         val display = (context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
             .getDisplay(displayId) ?: return false
@@ -900,7 +916,7 @@ class OverlayUiController(
             touchable = mainTouchable,
             windowAlpha = mainWindowAlpha,
         )
-        if (!overlayHost.addOverlayWindow(mainView, wm, mainParams, displayId)) return
+        if (!overlayHost.addOverlayWindow(mainView, wm, mainParams, displayId, OverlayPlacement.CaptureSpace)) return
         translationOverlayHandles[displayId] = mainView
 
         // Re-raise the floating icon above any touchable overlay so its
@@ -1054,7 +1070,7 @@ class OverlayUiController(
             }
         })
         val params = buildOverlayLayoutParams(touchable = true, windowAlpha = 1.0f)
-        if (!overlayHost.addOverlayWindow(view, wm, params, displayId)) return false
+        if (!overlayHost.addOverlayWindow(view, wm, params, displayId, OverlayPlacement.CaptureSpace)) return false
         appBoxesView = view
         appBoxesDisplayId = displayId
         appBoxesOnDismissed = onDismissed
@@ -1135,7 +1151,12 @@ class OverlayUiController(
     /**
      * Reconcile the floating icons against [Prefs.captureDisplayIds]: tear down
      * icons whose display is no longer selected or has been disconnected, and
-     * install icons for newly-selected, currently-connected displays.
+     * install icons for newly-selected, currently-connected displays. When
+     * the selection names no connected display at all, the one icon goes on
+     * the fallback display ([findIconDisplay]) and stays there. Idempotent:
+     * a reconcile that finds the icons where they belong touches nothing,
+     * which every caller relies on, since a display event, a resume, a
+     * service reconnect and a language change all reconcile.
      *
      * [freshAppearance] is false only for the projection-loss reinstall
      * ([com.playtranslate.capture.MediaProjectionController.onProjectionLost]):
@@ -1192,35 +1213,51 @@ class OverlayUiController(
             return
         }
         val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-        // Resolve the saved selection through the backend shim — MediaProjection
-        // collapses a stale non-default selection to its fallback display, so
-        // the icon never lands on a screen it can't drive. Empty only when
-        // the backend has no fallback either (accessibility with every saved
-        // display unreachable); the downstream "all unreachable" branch picks
-        // up in that case.
-        val target = CaptureBackendResolver.active().capturableTargets(prefs.captureDisplayIds)
+        // Resolve the saved selection through the backend shim: the
+        // selection's displays the backend can capture now, else its
+        // fallback display (MediaProjection: the default display, the only
+        // one it mirrors; accessibility: the selection's connected,
+        // non-private displays, else the default display). The resolution
+        // live start and the one-shot fan-out act on, so the icon is where
+        // the capture is.
+        val target = CaptureBackendResolver.active().capturableTargets(context, prefs.captureDisplayIds)
 
-        // Snapshot before mutating — tear down icons no longer needed.
-        val staleIds = iconHandles.keys.filter { id ->
-            id !in target || dm.getDisplay(id) == null
-        }
-        for (id in staleIds) hideFloatingIconForDisplay(id, "reconcile_remove")
+        // The displays the icons belong on, decided ONCE and read by both the
+        // sweep below and the install after it. The shim answers with
+        // connected displays (or the fallback) since 2026-10-14; the
+        // connected filter and the legacy single-display fallback here are a
+        // belt for a backend that ever does not, so the sweep and the install
+        // can never disagree again. Until that date the accessibility shim
+        // passed a selection through as stored, the sweep removed the
+        // fallback's icon as "not selected" and the install put it back as a
+        // fresh appearance, intro and all, on every reconcile; a Galaxy S25
+        // reporting a display change every few seconds, each reconciled by
+        // MainActivity's display listener, showed the icon popping inboard
+        // and sliding back to the edge for as long as the app was open
+        // (field report, 3.4.0).
+        val connected = target.filterTo(linkedSetOf()) { dm.getDisplay(it) != null }
+        val wanted: Set<Int> =
+            if (connected.isNotEmpty()) connected
+            else setOfNotNull(findIconDisplay(prefs)?.displayId)
 
-        // If the user has nothing selected OR every selected display is
-        // unreachable, fall back to the legacy single-display heuristic so the
-        // app always has at least one icon while it's "configured."
+        // Snapshot before mutating — tear down icons on displays not wanted
+        // (deselected, disconnected, or the fallback once a selected display
+        // is connected).
+        val staleIds = iconHandles.keys.filter { it !in wanted }
+        for (id in staleIds) hideFloatingIconForDisplay(id, "reconcile_remove", endsCapture = false)
+
         var installedAny = false
-        if (target.none { dm.getDisplay(it) != null }) {
-            val display = findIconDisplay(prefs) ?: return
-            if (display.displayId !in iconHandles) {
-                installedAny = installFloatingIconForDisplay(display, prefs, freshAppearance)
+        for (id in wanted) {
+            if (id in iconHandles) continue
+            val display = dm.getDisplay(id) ?: continue
+            if (connected.isEmpty()) {
+                Log.i(
+                    TAG,
+                    "reconcile: selection ${prefs.captureDisplayIds} names no connected display; " +
+                        "icon on fallback display $id",
+                )
             }
-        } else {
-            for (id in target) {
-                if (id in iconHandles) continue
-                val display = dm.getDisplay(id) ?: continue
-                if (installFloatingIconForDisplay(display, prefs, freshAppearance)) installedAny = true
-            }
+            if (installFloatingIconForDisplay(display, prefs, freshAppearance)) installedAny = true
         }
         // The translation-error pills live on a captured display: one that
         // left the capture set (deselected, or gone) takes them with it, and
@@ -1312,15 +1349,6 @@ class OverlayUiController(
         svc.requestAudioCaptureConsent()
     }
 
-    /** Reposition an icon after its display changed (e.g. rotation). */
-    fun repositionIconForDisplay(displayId: Int) {
-        val handle = iconHandles[displayId] ?: return
-        val p = handle.icon.params ?: return
-        val pos = Prefs(context).iconPositionForDisplay(displayId)
-        handle.icon.setPosition(pos.edge, pos.fraction)
-        try { handle.wm.updateViewLayout(handle.icon, p) } catch (_: Exception) {}
-    }
-
     /** Returns whether the icon window was actually added. */
     private fun installFloatingIconForDisplay(
         display: Display,
@@ -1330,7 +1358,7 @@ class OverlayUiController(
         val displayId = display.displayId
         // Idempotent: if an icon was already there for this display, tear it
         // down first so the closures and registry stay coherent.
-        hideFloatingIconForDisplay(displayId, "recreating")
+        hideFloatingIconForDisplay(displayId, "recreating", endsCapture = false)
 
         val displayCtx = context.createDisplayContext(display)
         val wm = OwnWindows.manager(displayCtx) ?: return false
@@ -1365,10 +1393,15 @@ class OverlayUiController(
             }
         }
 
-        controller.onSettled = {
+        val settleDragPause: () -> Unit = {
             restoreRegionOverlay()
             resumeLiveMode()
         }
+        val dropDragPause: () -> Unit = {
+            overlayHiddenForDrag = false
+            liveWasPausedForPopup = false
+        }
+        controller.onSettled = settleDragPause
 
         // One builder for every icon VIEW this display ever shows — the
         // install below and bringFloatingIconsToFront's replace both use it,
@@ -1410,9 +1443,27 @@ class OverlayUiController(
             // language without a reading hint), applies to the next touch of
             // this same icon; each `when` is exhaustive over its gesture's
             // candidates, so a new one cannot compile until it is wired here.
+            // Every gesture's action needs CaptureService, and on the
+            // accessibility backend this icon outlives it: between a kill
+            // and the service's sticky restart, or after a refused restore
+            // start, there is no instance and the actions used to be silent
+            // no-ops (field report 2026-08-03). A gesture is a user
+            // interaction, so request the start here, plainly. The start is
+            // asynchronous (the instance exists only after the service's
+            // onCreate, a later main-thread message), so THIS gesture still
+            // dispatches against a null instance and is lost; the next one
+            // finds the service. In the normal restore path the service was
+            // started with the icon, milliseconds earlier, and no gesture
+            // meets that window.
+            fun ensureService() {
+                if (CaptureService.instance == null) {
+                    CaptureLifecycle.startCaptureServicePlain(context, "icon gesture")
+                }
+            }
             icon.onTap = {
+                ensureService()
                 when (prefs.iconTapAction) {
-                    TapAction.OPEN_QUICK_MENU -> showFloatingMenu(display, icon)
+                    TapAction.OPEN_QUICK_MENU -> showFloatingMenu(display)
                     // The quick menu's Capture button without the menu: a
                     // fresh one-shot every tap, replacing any showing result.
                     TapAction.CAPTURE_SCREEN -> captureCurrentRegionForDisplay(displayId)
@@ -1421,15 +1472,17 @@ class OverlayUiController(
                     TapAction.CHANGE_GAME_LANGUAGE -> changeGameLanguage(display)
                 }
             }
-            // True from a hold whose toggle stopped auto-translate until that
-            // gesture ends: at the lift (onHoldEnd), or at the drag a slide
-            // turns it into (onDragStart, right after onHoldCancel in the same
-            // move). That drag leaves live mode alone. With the app in front
-            // on the other screen the stop is a message to MainActivity, so
-            // the drag can still find the session running; pausing it would
-            // resume it when the lens closes, undoing the stop.
+            // True from a hold whose toggle, or whose capture, stopped
+            // auto-translate until that gesture ends: at the lift
+            // (onHoldEnd), or at the drag a slide turns it into (onDragStart,
+            // right after onHoldCancel in the same move). That drag leaves
+            // live mode alone. With the app in front on the other screen the
+            // stop is a message to MainActivity, so the drag can still find
+            // the session running; pausing it would resume it when the lens
+            // closes, undoing the stop.
             var holdStoppedLive = false
             icon.onDragStart = {
+                ensureService()
                 when (prefs.iconDragAction) {
                     DragAction.LOOKUP_WORDS -> {
                         // Hide region preview so the user can see game text while dragging
@@ -1453,6 +1506,11 @@ class OverlayUiController(
             icon.onDragMove = { rawX, rawY -> controller.onDragMove(rawX, rawY) }
             icon.onDragEnd = { controller.onDragEnd() }
             icon.onDragCancel = { controller.cancelDrag() }
+            // The icon's drag visuals (window at the finger, ring) come up in
+            // the same step as the lens, never before the drag's clean
+            // capture is in hand: see FloatingOverlayIcon.dragVisualsRevealed.
+            // Rewired per icon generation so the newest icon is the target.
+            controller.onLensRevealed = { rawX, rawY -> icon.revealDragVisuals(rawX, rawY) }
             // A hold's action is latched at its start so the end and cancel
             // legs unwind the action that actually began, whatever the pref
             // says by then (dual-screen: the picker page can be open on the
@@ -1466,11 +1524,17 @@ class OverlayUiController(
             // closes it, as it closes the quick menu.
             var holdOpenedPicker = false
             icon.onHoldStart = {
+                ensureService()
                 val action = prefs.iconHoldAction
                 heldAction = action
                 when (action) {
+                    // The quick menu's Capture button at the threshold, as
+                    // the tap's: a fresh one-shot, replacing any showing
+                    // result. It stops a running auto-translate first, which
+                    // the drag a slide turns this hold into must not resume.
+                    HoldAction.CAPTURE_SCREEN -> holdStoppedLive = captureCurrentRegionForDisplay(displayId)
                     HoldAction.SHOW_TRANSLATIONS -> CaptureService.instance?.holdStart(displayId)
-                    HoldAction.OPEN_QUICK_MENU -> showFloatingMenu(display, icon)
+                    HoldAction.OPEN_QUICK_MENU -> showFloatingMenu(display)
                     HoldAction.TOGGLE_AUTO_TRANSLATE -> holdStoppedLive = toggleLiveFromOverlay()
                     HoldAction.SWAP_OVERLAY_MODE -> swapOverlayModeOrStartLive()
                     HoldAction.CHANGE_GAME_LANGUAGE -> holdOpenedPicker = changeGameLanguage(display)
@@ -1481,12 +1545,13 @@ class OverlayUiController(
                     HoldAction.SHOW_TRANSLATIONS -> CaptureService.instance?.holdEnd()
                     // The menu opened at the hold threshold and stays up; the
                     // lift ends the gesture, not the menu. Likewise the
-                    // toggle, the swap and the game-language change (its
-                    // switch, or its picker) happened at the threshold. A
-                    // lift with no start latched (the starved hold above)
-                    // therefore does none of them.
-                    HoldAction.OPEN_QUICK_MENU, HoldAction.TOGGLE_AUTO_TRANSLATE,
-                    HoldAction.SWAP_OVERLAY_MODE, HoldAction.CHANGE_GAME_LANGUAGE -> Unit
+                    // capture, the toggle, the swap and the game-language
+                    // change (its switch, or its picker) happened at the
+                    // threshold. A lift with no start latched (the starved
+                    // hold above) therefore does none of them.
+                    HoldAction.CAPTURE_SCREEN, HoldAction.OPEN_QUICK_MENU,
+                    HoldAction.TOGGLE_AUTO_TRANSLATE, HoldAction.SWAP_OVERLAY_MODE,
+                    HoldAction.CHANGE_GAME_LANGUAGE -> Unit
                 }
                 heldAction = null
                 holdStoppedLive = false
@@ -1501,6 +1566,15 @@ class OverlayUiController(
                     // touch stream, so the menu's tap-outside dismissal never
                     // saw it). Close the menu first.
                     HoldAction.OPEN_QUICK_MENU -> dismissFloatingMenu()
+                    // The one-shot this hold began is cancelled, as the
+                    // hold-to-preview's is: its panel, in flight or already
+                    // up on this display, would come up under the lens
+                    // (the dismiss bumps the capture generation, so a shot
+                    // still in flight is dropped). A capture sent to the app
+                    // in front on the other screen is the app's and stands.
+                    // The auto-translate it stopped stays stopped
+                    // (holdStoppedLive), as after the toggle's stop.
+                    HoldAction.CAPTURE_SCREEN -> dismissCaptureResultOverlay()
                     // The toggle and the swap stand: the drag that follows
                     // pauses a running auto-translate and resumes it
                     // afterwards, in the mode the swap left, as any drag does,
@@ -1525,19 +1599,28 @@ class OverlayUiController(
 
         val icon = makeWiredIcon()
         val params = icon.params ?: return false
-        val added = overlayHost.addOverlayWindow(icon, wm, params, displayId)
+        // This display's saved slot: the host places the window on it before
+        // the window exists, and again whenever the display changes.
+        val pos = prefs.iconPositionForDisplay(displayId)
+        icon.setSlot(pos.edge, pos.fraction)
+        val added = overlayHost.addOverlayWindow(
+            icon, wm, params, displayId, OverlayPlacement.Placed(icon::layoutAtRest),
+        )
         if (added) {
-            // Set position after addView from this display's saved slot.
-            val pos = prefs.iconPositionForDisplay(displayId)
-            icon.setPosition(pos.edge, pos.fraction)
-            try { wm.updateViewLayout(icon, params) } catch (_: Exception) {}
             iconHandles[displayId] = FloatingIconHandle(
                 icon = icon,
                 wm = wm,
                 dragController = controller,
                 clearLivePauseFlag = clearLivePauseFlag,
+                settleDragPause = settleDragPause,
+                dropDragPause = dropDragPause,
                 makeIcon = makeWiredIcon,
             )
+            // An icon is on screen: the persisted session record says so
+            // (SessionMarker). This and the last removal in
+            // hideFloatingIconForDisplay are its only writers in normal
+            // operation; the record is the observable, never a derived flag.
+            com.playtranslate.capture.SessionMarker.markOn(context)
             // The error pills keep priority over the icon (Gilad, 2026-09-27).
             errorPills.raise(displayId)
             // Fresh icon → sonar-ping intro. This is the only "icon added to
@@ -1570,7 +1653,6 @@ class OverlayUiController(
         pos: IconPosition,
     ) {
         val wm = icon.wm ?: return
-        val iconParams = icon.params ?: return
         val edge = if (pos.edge == FloatingOverlayIcon.Edge.LEFT.ordinal)
             FloatingOverlayIcon.Edge.LEFT
         else
@@ -1579,17 +1661,6 @@ class OverlayUiController(
         val density = displayCtx.resources.displayMetrics.density
         val windowWidth = (SONAR_INTRO_WIDTH_DP * density).toInt()
         val windowHeight = (SONAR_INTRO_HEIGHT_DP * density).toInt()
-        val screenSize = displayCtx.displaySizePx()
-        // Centre the intro window vertically on the icon's centre Y; the
-        // anchor inside the view is at view-x = (width − 28dp) for RIGHT or
-        // 28dp for LEFT, which lines the carrier up exactly with the icon's
-        // docked compact-mode position on screen.
-        val iconCenterY = iconParams.y + icon.viewSizePx / 2
-        val windowX = when (edge) {
-            FloatingOverlayIcon.Edge.RIGHT -> screenSize.x - windowWidth
-            FloatingOverlayIcon.Edge.LEFT -> 0
-        }
-        val windowY = iconCenterY - windowHeight / 2
 
         // Stop any earlier intro that's still playing on the same display
         // (e.g. very rapid toggle-off → toggle-on). The new install gets a
@@ -1615,8 +1686,6 @@ class OverlayUiController(
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = windowX
-            y = windowY
         }
 
         // Hide the underlying icon while the intro plays. The intro's final
@@ -1636,7 +1705,8 @@ class OverlayUiController(
             }
         }
 
-        if (overlayHost.addOverlayWindow(intro, wm, params, displayId)) {
+        val placement = OverlayPlacement.Placed { _, p -> placeSonarIntro(displayId, edge, p) }
+        if (overlayHost.addOverlayWindow(intro, wm, params, displayId, placement)) {
             activeSonarIntros[displayId] = intro
             intro.start()
         } else {
@@ -1655,64 +1725,38 @@ class OverlayUiController(
         overlayHost.removeOverlayWindow(intro)
     }
 
-    /** Re-anchor an in-flight sonar intro after a display change (rotation,
-     *  resize). Recomputes x/y from the new screen dimensions and the
-     *  icon's freshly-updated centre Y, then pushes a layout update onto
-     *  the existing intro window — no view rebuild, animation continues
-     *  uninterrupted from wherever it was. No-op when no intro is showing
-     *  on [displayId] or the underlying icon handle is gone. */
-    private fun repositionSonarIntroForDisplay(displayId: Int) {
-        val intro = activeSonarIntros[displayId] ?: return
-        val handle = iconHandles[displayId] ?: return
-        val params = intro.layoutParams as? WindowManager.LayoutParams ?: return
-        val iconParams = handle.icon.params ?: return
-
-        val displayCtx = intro.context
-        val density = displayCtx.resources.displayMetrics.density
-        val windowWidth = (SONAR_INTRO_WIDTH_DP * density).toInt()
-        val windowHeight = (SONAR_INTRO_HEIGHT_DP * density).toInt()
-        val screenSize = displayCtx.displaySizePx()
-        val iconCenterY = iconParams.y + handle.icon.viewSizePx / 2
-
-        val newX = when (intro.edge) {
-            FloatingOverlayIcon.Edge.RIGHT -> screenSize.x - windowWidth
-            FloatingOverlayIcon.Edge.LEFT -> 0
+    /** The sonar intro's layout ([OverlayPlacement.Placed]), run by the host
+     *  whenever it lays the display out: the window centred vertically on
+     *  the icon's centre and, horizontally, on its dock line (its window's
+     *  centre: the display edge, or inboard of what covers the icon there,
+     *  [FloatingOverlayIcon.layoutAtRest]); the anchor inside the view is at
+     *  view-x = (width - 28dp) for RIGHT or 28dp for LEFT, which lines the
+     *  carrier up exactly with the icon's docked compact-mode position. Read
+     *  from the display's current icon, so it follows an icon re-raised
+     *  under it. The y is not clamped: the carrier must sit on the icon. */
+    private fun placeSonarIntro(displayId: Int, edge: FloatingOverlayIcon.Edge, p: WindowManager.LayoutParams) {
+        val icon = iconHandles[displayId]?.icon ?: return
+        val iconParams = icon.params ?: return
+        val iconDockX = iconParams.x + icon.viewSizePx / 2
+        val iconCenterY = iconParams.y + icon.viewSizePx / 2
+        p.x = when (edge) {
+            FloatingOverlayIcon.Edge.RIGHT -> iconDockX - p.width
+            FloatingOverlayIcon.Edge.LEFT -> iconDockX
         }
-        val newY = iconCenterY - windowHeight / 2
-        if (params.x == newX && params.y == newY) return
-        params.x = newX
-        params.y = newY
-        try { handle.wm.updateViewLayout(intro, params) } catch (_: Exception) {}
+        p.y = iconCenterY - p.height / 2
     }
 
-    /** Re-anchor an open floating menu after its display changed (rotation /
-     *  resize) so its card tracks the icon's freshly-repositioned edge slot
-     *  against the new screen dimensions. Mirrors [repositionIconForDisplay] /
-     *  [repositionSonarIntroForDisplay]: must run *after* the icon reposition
-     *  so it reads the icon's updated params, and reads the screen size through
-     *  [getDisplaySize], whose per-call window context returns the post-rotation
-     *  bounds (a cached one intermittently reports the previous orientation
-     *  here). The menu's full-screen host re-lays-out its gravity-anchored
-     *  children + region preview itself; only the absolutely-placed card needs
-     *  this. No-op unless the menu is open on [displayId]. */
-    private fun repositionFloatingMenuForDisplay(displayId: Int) {
-        val menu = floatingMenu ?: return
-        if (floatingMenuDisplayId != displayId) return
+    /** The floating menu's layout ([OverlayPlacement.Placed]), run by the
+     *  host whenever it lays the display out: the card beside the display's
+     *  current icon, inside what the environment leaves clear
+     *  ([FloatingIconMenu.placeNear], which does nothing when none of that
+     *  moved). */
+    private fun placeFloatingMenu(menu: FloatingIconMenu, displayId: Int, env: OverlayEnvironment) {
         val icon = iconHandles[displayId]?.icon ?: return
-        val display = (context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)
-            ?.getDisplay(displayId) ?: return
-        val screenSize = getDisplaySize(display)
-        // Below R the menu's full-screen window was pinned to an explicit size
-        // that doesn't follow rotation; re-pin it to the new display size before
-        // re-anchoring the card, or a right-edge margin computed from the new
-        // bounds can land off the still-old-sized surface (no-op on R+).
-        overlayHost.resizeFullScreenOverlayForDisplay(menu, displayId)
-        val p = icon.params
-        val iconCx = (p?.x ?: 0) + icon.viewSizePx / 2
-        val iconCy = (p?.y ?: 0) + icon.viewSizePx / 2
-        menu.positionNearIcon(
-            iconCx, iconCy, icon.currentEdge, screenSize.x, screenSize.y,
-            animateEntrance = false,
+        val p = icon.params ?: return
+        menu.placeNear(
+            p.x + icon.viewSizePx / 2, p.y + icon.viewSizePx / 2, icon.currentEdge,
+            env.geometry.width, env.geometry.height, env.covered,
         )
     }
 
@@ -1759,12 +1803,16 @@ class OverlayUiController(
             if (oldParams == null || oldParams.alpha == 0f) continue
             val fresh = handle.makeIcon()
             val params = fresh.params ?: continue
+            // The persisted slot, which every snap writes at its release: the
+            // host places the fresh window on it before it exists.
+            val pos = Prefs(context).iconPositionForDisplay(id)
+            fresh.setSlot(pos.edge, pos.fraction)
             // On add failure keep the old icon: still functional, just below
             // the new overlay — matching the old path's failure behavior.
-            if (!overlayHost.addOverlayWindow(fresh, handle.wm, params, id)) continue
-            val pos = Prefs(context).iconPositionForDisplay(id)
-            fresh.setPosition(pos.edge, pos.fraction)
-            try { handle.wm.updateViewLayout(fresh, params) } catch (_: Exception) {}
+            if (!overlayHost.addOverlayWindow(
+                    fresh, handle.wm, params, id, OverlayPlacement.Placed(fresh::layoutAtRest),
+                )
+            ) continue
             fresh.showLoading = old.showLoading
             fresh.degraded = old.degraded
             fresh.liveMode = old.liveMode
@@ -1788,7 +1836,16 @@ class OverlayUiController(
         }
     }
 
-    private fun hideFloatingIconForDisplay(displayId: Int, reason: String) {
+    /** Tear down one display's icon. [endsCapture] decides what becomes of
+     *  what an in-flight drag session paused: capture carrying on (a
+     *  recreate, a display gone, the task swiped away) restores live mode
+     *  and the region indicator as the session's own end would; capture
+     *  ending (Turn Off, a backend swap, projection lost) forgets them,
+     *  since whoever ends capture stops live mode itself and a resume from
+     *  here would start it on the backend being torn down. The controller's
+     *  teardown reports nothing ([DragLookupController.destroy]); this is
+     *  where the decision lives. */
+    private fun hideFloatingIconForDisplay(displayId: Int, reason: String, endsCapture: Boolean) {
         // Kill any in-flight sonar intro on this display first — the intro
         // is a sibling overlay that doesn't track the icon's lifecycle, so
         // we have to remove it explicitly.
@@ -1796,10 +1853,16 @@ class OverlayUiController(
         val handle = iconHandles.remove(displayId) ?: return
         Log.i(TAG, "hideFloatingIcon[$displayId]: $reason")
         handle.dragController.destroy()
+        if (endsCapture) handle.dropDragPause() else handle.settleDragPause()
         handle.icon.destroy()
         overlayHost.removeOverlayWindow(handle.icon)
         // A parked placement prompt belongs to the appearance that armed it.
         if (iconHandles.isEmpty()) placementPromptPending = false
+        // No icon on screen: whatever removed the last one (Turn Off, Hide
+        // for Now, a Recents swipe, a backend swap, a graceful service end)
+        // ends what the persisted session record stands for. A kill never
+        // reaches here, which is exactly how the record outlives one.
+        if (iconHandles.isEmpty()) com.playtranslate.capture.SessionMarker.markOff(context)
 
         CaptureService.instance?.updateForegroundState()
         CaptureService.instance?.syncIconState()
@@ -1816,7 +1879,7 @@ class OverlayUiController(
         if (iconHandles.isEmpty()) return
         Log.i(TAG, "hideFloatingIcon (all): $reason")
         val ids = iconHandles.keys.toList()
-        for (id in ids) hideFloatingIconForDisplay(id, reason)
+        for (id in ids) hideFloatingIconForDisplay(id, reason, endsCapture)
     }
 
     /** "Hide for Now": tear the icons down AND suppress them for the rest of
@@ -1864,10 +1927,9 @@ class OverlayUiController(
         var captureIsPreferredPrimary = false
     }
 
-    private fun showFloatingMenu(display: Display, icon: FloatingOverlayIcon) {
+    private fun showFloatingMenu(display: Display) {
         dismissFloatingMenu()
         val wm = OwnWindows.manager(context.createDisplayContext(display)) ?: return
-        val screenSize = getDisplaySize(display)
         val themeRes = baseActivityTheme(context)
         val themedCtx = android.view.ContextThemeWrapper(context.createDisplayContext(display), themeRes)
         applyAccentOverlay(themedCtx.theme, context)
@@ -2036,14 +2098,16 @@ class OverlayUiController(
             PixelFormat.TRANSLUCENT
         )
 
-        overlayHost.addOverlayWindow(menu, wm, params, display.displayId)
+        // The card goes beside the icon now and whenever the host lays the
+        // display out again (a rotation, a bar the game shows or hides, the
+        // icon coming to rest somewhere else).
+        val displayId = display.displayId
+        overlayHost.addOverlayWindow(
+            menu, wm, params, displayId,
+            OverlayPlacement.Placed { env, _ -> placeFloatingMenu(menu, displayId, env) },
+        )
         floatingMenu = menu
-        floatingMenuDisplayId = display.displayId
-
-        val p = icon.params
-        val iconCx = (p?.x ?: 0) + icon.viewSizePx / 2
-        val iconCy = (p?.y ?: 0) + icon.viewSizePx / 2
-        menu.positionNearIcon(iconCx, iconCy, icon.currentEdge, screenSize.x, screenSize.y)
+        floatingMenuDisplayId = displayId
     }
 
     /** Overlay modes selectable for [id]: just Translation, unless the language
@@ -2477,20 +2541,26 @@ class OverlayUiController(
 
     /**
      * Run a one-shot capture of [displayId]'s current region (full screen unless
-     * one is set) — the action shared by the floating menu's Capture button and
-     * the capture-screen hotkey. [handleRegionSelection] routes single- vs
-     * dual-screen and configures the override itself; a running auto session is
-     * stopped first so this is a clean one-shot, not a live refresh. Marks
-     * capture the most-recently-used primary (styling for the next menu open).
+     * one is set) — the action shared by the floating menu's Capture button,
+     * the capture-screen hotkey and the icon's capture gesture
+     * ([HoldAction.CAPTURE_SCREEN], [TapAction.CAPTURE_SCREEN]).
+     * [handleRegionSelection] routes single- vs dual-screen and configures the
+     * override itself; a running auto session is stopped first so this is a
+     * clean one-shot, not a live refresh. Marks capture the most-recently-used
+     * primary (styling for the next menu open). Returns true when it stopped
+     * auto-translate, or asked MainActivity to, as [toggleLiveFromOverlay]
+     * does: a hold's drag reads it.
      */
-    private fun captureCurrentRegionForDisplay(displayId: Int) {
+    private fun captureCurrentRegionForDisplay(displayId: Int): Boolean {
         captureIsPreferredPrimary = true
         val region = CaptureService.instance?.activeRegionForDisplay(displayId)
             ?: CaptureService.DEFAULT_REGION
-        if (CaptureService.instance?.isLive == true) {
+        val stoppedLive = CaptureService.instance?.isLive == true
+        if (stoppedLive) {
             stopLiveRouted()
         }
         handleRegionSelection(displayId, region)
+        return stoppedLive
     }
 
     private fun sendMainActivityIntent(action: String, targetDisplayId: Int? = null) {
@@ -2587,7 +2657,7 @@ class OverlayUiController(
             //    to stale geometry; a gone display reads null (!= snapshot) → also bails.
             // Self-contained, so correctness holds regardless of when — or whether —
             // onDisplayChanged fires. That decoupling is what removes the rotate-then-tap race.
-            val curGeometry = displayGeometry(displayId)
+            val curGeometry = context.displayGeometryOf(displayId)
             if (gen != captureGeneration || curGeometry != launchGeometry) {
                 bitmap?.recycle()
                 return@launch
@@ -2631,11 +2701,29 @@ class OverlayUiController(
         }
     }
 
-    /** Pre-overlay fallback: launch [TranslationResultActivity]. Used only when
-     *  the capture-service handle is briefly unavailable. */
+    /**
+     * The one-shot's fallback when no over-game panel can be shown (no
+     * CaptureService yet, a gone display, no window manager): the
+     * full-screen result page, launched once a clean shot is in hand. It is
+     * the capture job, gated on the capture generation, as the panel's shot
+     * is, so a [dismissCaptureResultOverlay] while the shot is in flight
+     * drops it instead of letting the page open later: the icon's capture
+     * hold sliding into a drag (the page would open under the lens), a menu
+     * opening, or a newer capture superseding it (two pages used to open).
+     * The no-service case is a real state, not only the moment before the
+     * service's sticky restart: after a restore whose start was refused the
+     * icon stays up with no service until the restart or the next app open,
+     * and a gesture's own start is asynchronous, so that gesture's one-shot
+     * takes this path.
+     */
     private fun launchResultActivity(displayId: Int, region: RegionEntry) {
-        scope.launch {
+        val gen = captureGeneration
+        captureJob = scope.launch {
             val frame = CaptureBackendResolver.active().captureSource?.requestClean(displayId)
+            if (gen != captureGeneration) {
+                frame?.recycle()
+                return@launch
+            }
             val intent = Intent(context, com.playtranslate.ui.TranslationResultActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 putExtra(com.playtranslate.ui.TranslationResultActivity.EXTRA_TOP_FRAC, region.top)
@@ -2680,20 +2768,6 @@ class OverlayUiController(
         pendingReshow = null
     }
 
-    /** The display geometry a capture/panel is laid out against — size AND rotation. A
-     *  180° flip keeps the pixel size but changes rotation, so comparing this (not size
-     *  alone) still invalidates a stale panel; a refresh-rate/HDR event keeps both, so it
-     *  doesn't churn one. */
-    private data class DisplayGeometry(val width: Int, val height: Int, val rotation: Int)
-
-    /** Size + rotation of [displayId], or null if it can't be resolved. */
-    private fun displayGeometry(displayId: Int): DisplayGeometry? {
-        val display = (context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)
-            ?.getDisplay(displayId) ?: return null
-        val size = getDisplaySize(display)
-        return DisplayGeometry(size.x, size.y, display.rotation)
-    }
-
     /** Dismiss a SHOWING capture panel when its own display's geometry (size or rotation)
      *  changed — the panel was laid out + OCR-mapped against that geometry, so a 180° flip
      *  (rotation change, same pixels) invalidates it too. Scoped to the panel's display, so a
@@ -2704,7 +2778,7 @@ class OverlayUiController(
         if (captureResultOverlay == null) return
         if (changedDisplayId != captureDisplayId) return
         val built = captureGeometry ?: return
-        val now = displayGeometry(changedDisplayId) ?: return
+        val now = context.displayGeometryOf(changedDisplayId) ?: return
         if (now != built) {
             dismissCaptureResultOverlay()
         }
@@ -2837,7 +2911,7 @@ class OverlayUiController(
         if (workspace == null) return
         if (changedDisplayId != workspaceDisplayId) return
         val built = workspaceGeometry ?: return
-        val now = displayGeometry(changedDisplayId) ?: return
+        val now = context.displayGeometryOf(changedDisplayId) ?: return
         if (now != built) {
             dismissWorkspace()
         }
@@ -2866,7 +2940,7 @@ class OverlayUiController(
         val displays = dm.displays
         if (displays.size <= 1) return displays.firstOrNull()
         val backend = CaptureBackendResolver.active()
-        val primaryId = backend.capturableTargets(prefs.captureDisplayIds).firstOrNull()
+        val primaryId = backend.capturableTargets(context, prefs.captureDisplayIds).firstOrNull()
             ?: Display.DEFAULT_DISPLAY
         return dm.getDisplay(primaryId) ?: displays.firstOrNull()
     }

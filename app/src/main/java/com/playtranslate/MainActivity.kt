@@ -72,6 +72,7 @@ import com.playtranslate.language.StalePack
 import com.playtranslate.ocr.registry.OcrModelManager
 import com.playtranslate.model.TranslationResult
 import com.playtranslate.translation.OfflineModelReclaimer
+import com.playtranslate.ui.AccessibilityHelp
 import com.playtranslate.ui.AppReadiness
 import com.playtranslate.ui.sentenceTranslationBackend
 import com.playtranslate.ui.HomeAction
@@ -81,6 +82,7 @@ import com.playtranslate.ui.ClickableTextView
 import com.playtranslate.ui.DimController
 import com.playtranslate.ui.OnboardingViewModel
 import com.playtranslate.ui.OverlayAlert
+import com.playtranslate.ui.QuickTilePromptPolicy
 import android.net.Uri
 import com.playtranslate.AnkiManager
 import com.playtranslate.ui.AddCustomRegionSheet
@@ -484,19 +486,25 @@ class MainActivity :
     override fun onWordTapped(
         word: String,
         reading: String?,
+        surface: String?,
         screenshotPath: String?,
         sentenceOriginal: String?,
         sentenceTranslation: String?,
-        wordResults: Map<String, Triple<String, String, Int>>
+        wordResults: Map<String, Triple<String, String, Int>>,
+        lookupForm: String,
+        lookupReading: String?,
     ) {
         pauseLiveMode()
         WordDetailBottomSheet.newInstance(
             word,
             reading = reading,
+            surface = surface,
             screenshotPath = screenshotPath,
             sentenceOriginal = sentenceOriginal,
             sentenceTranslation = sentenceTranslation,
             sentenceWordResults = wordResults,
+            lookupForm = lookupForm,
+            lookupReading = lookupReading,
             // A deferred result's pending rides ONLY when the sentence being
             // passed is that result's own original (resolveAnkiTranslation's
             // caller contract) — the sheet's Anki paths then complete it.
@@ -559,6 +567,11 @@ class MainActivity :
         if (prefs.captureDisplayIds.size > 1) return null
         return !prefs.hideGameOverlays
     }
+
+    // The static instance too: a recreated activity seeds its page before it
+    // re-binds the service (captureService is null until onServiceConnected).
+    override fun isLiveModeRunning() =
+        (captureService ?: CaptureService.instance)?.liveModeState?.value == true
 
     override fun setLiveShowOnScreen(on: Boolean) {
         // Same-process synchronous write; the swap below re-reads it.
@@ -654,7 +667,7 @@ class MainActivity :
         setupRegionButton()
         setupButtons()
         setupEditOverlay()
-        startAndBindService()
+        bindCaptureService()
         (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
             .registerDisplayListener(displayListener, null)
         dumpDisplayState("onCreate")
@@ -749,6 +762,10 @@ class MainActivity :
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 onboardingVm.state.collect { current ->
                     current?.let {
+                        if (firstReadiness == null) {
+                            firstReadiness = it
+                            setUpAtFirstReadiness = prefs.hasTargetLangBeenSet
+                        }
                         route(lastReadiness, it)
                         lastReadiness = it
                     }
@@ -902,6 +919,15 @@ class MainActivity :
     }
 
     override fun onStart() {
+        // Re-issue the service start on every return to the foreground, not
+        // once per activity instance: Android stops an idle app's started
+        // service about a minute into the background with the session off,
+        // and this activity's binding then keeps the instance alive WITHOUT
+        // the started state, so a session turned on from this same screen
+        // ended the moment the screen closed (Moto G system log,
+        // 2026-10-05: "Stopping service due to app idle", then STOP_SERVICE
+        // on Back). Idempotent on a started service.
+        CaptureLifecycle.startCaptureService(this)
         // Stateless staleness check: if the panel still shows content the user has since made
         // stale by changing a language (via a header/no-text picker or Settings), blank it
         // BEFORE super dispatches STARTED to the fragment, so we land on an empty panel with
@@ -1105,7 +1131,7 @@ class MainActivity :
     }
 
     private fun updateRegionButton() {
-        val region = captureService?.activeRegion ?: prefs.primaryDisplayRegion()
+        val region = captureService?.activeRegion ?: prefs.primaryDisplayRegion(resolvedPrimaryDisplayId())
         val label = region.displayName(this)
         val isInAppOnly = Prefs.shouldUseInAppOnlyMode(this)
         val overlayLive = isLiveMode && !isInAppOnly
@@ -1170,6 +1196,9 @@ class MainActivity :
         // The toggle's semantics flip with live mode even when the VM state
         // doesn't change (a stop that keeps the last Ready result on screen).
         resultFragment?.refreshShowOnScreen()
+        // The Words card auto-hides for the live session (rows are lazy, so
+        // a hidden card skips the per-result dictionary work).
+        resultFragment?.onLiveModeChanged(isLive)
         // Dim controller: cancel on any live mode change, recreate only when stopping
         dimController?.cancel()
         dimController = null
@@ -1485,9 +1514,11 @@ class MainActivity :
 
     // ── Service ───────────────────────────────────────────────────────────
 
-    private fun startAndBindService() {
+    /** The one-time bind for this activity instance. The start request is
+     *  [onStart]'s, which follows every onCreate, so the bind's auto-create
+     *  is always paired with a start before the activity is visible. */
+    private fun bindCaptureService() {
         val intent = Intent(this, CaptureService::class.java)
-        ContextCompat.startForegroundService(this, intent)
         bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
@@ -1689,6 +1720,8 @@ class MainActivity :
         onWordTapped(
             word = word,
             reading = reading,
+            // No producer of this intent sends the dragged surface.
+            surface = null,
             screenshotPath = screenshotPath,
             sentenceOriginal = sentenceOriginal,
             sentenceTranslation = sentenceTranslation,
@@ -1815,7 +1848,7 @@ class MainActivity :
         if (prefs.hasDisplaySelection) return false
         val backend = CaptureBackendResolver.active()
         if (!DisplaySelectionSeed.isBackendPermissionBacked(this, backend)) return false
-        prefs.captureDisplayIds = DisplaySelectionSeed.seedFor(backend, findGameDisplayId())
+        prefs.captureDisplayIds = DisplaySelectionSeed.seedFor(this, backend, findGameDisplayId())
         // Keep onResume's picker-change diff from re-applying the seed.
         lastSeenCaptureDisplayIds = prefs.captureDisplayIds
         return true
@@ -1868,7 +1901,11 @@ class MainActivity :
     private fun showAccessibilityDialog() {
         AlertDialog.Builder(this)
             .setTitle(getString(R.string.accessibility_dialog_title))
-            .setMessage(getString(R.string.accessibility_dialog_message))
+            .setMessage(
+                AccessibilityHelp.withRestrictedSettingsStep(
+                    this, getString(R.string.accessibility_dialog_message),
+                ),
+            )
             .setPositiveButton(getString(R.string.accessibility_dialog_open)) { _, _ ->
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             }
@@ -1884,15 +1921,27 @@ class MainActivity :
             .setMessage(getString(R.string.crash_dialog_message))
             .addButton(getString(R.string.crash_dialog_send), themeColor(R.attr.ptAccent)) {
                 lifecycleScope.launch {
-                    val files = withContext(Dispatchers.IO) {
-                        runCatching {
-                            crashFiles + LogExporter.exportLogcat(this@MainActivity)
-                        }.getOrElse { crashFiles }
+                    // The email carries COPIES of the crash files, staged next
+                    // to the logcat export: the chooser returns before the
+                    // receiving app opens the attachment URIs, and the
+                    // originals are deleted below, so attaching them directly
+                    // lost the stack every time (b74e8ff52 through 2026-10).
+                    val (files, staged) = withContext(Dispatchers.IO) {
+                        val logFile = runCatching { LogExporter.exportLogcat(this@MainActivity) }.getOrNull()
+                        val copies = runCatching { LogExporter.stageCrashFiles(this@MainActivity, crashFiles) }.getOrNull()
+                        Pair((copies ?: crashFiles) + listOfNotNull(logFile), copies != null)
                     }
                     val subject = getString(R.string.crash_email_subject, BuildConfig.VERSION_NAME)
                     val body = getString(R.string.crash_email_body)
-                    LogExporter.emailFiles(this@MainActivity, files, subject, body)
-                    LogExporter.deleteCrashFiles(this@MainActivity)
+                    LogExporter.emailFiles(
+                        this@MainActivity, files, subject, body,
+                        chooserTitle = getString(R.string.crash_email_chooser_title),
+                        noFilesToast = R.string.toast_no_crash_report,
+                    )
+                    // The originals go only once copies are what the email
+                    // holds. A failed copy leaves them for the next launch's
+                    // prompt instead of losing the report.
+                    if (staged) LogExporter.deleteCrashFiles(this@MainActivity)
                 }
             }
             .addButton(
@@ -1929,12 +1978,10 @@ class MainActivity :
         val activeSource = prefs.sourceLangId
         if (LanguagePackStore.isInstalled(this, activeSource)) {
             val ocr = com.playtranslate.ocr.registry.OcrModelManager
-            // (a) The better default's pack is already on disk (e.g. the shared CJK
-            //     recognizer downloaded for another language) → adopt it silently:
-            //     no UI, no download, just move the token off the floor so the user
-            //     is on the better engine.
-            ocr.adoptInstalledDefaultOcr(this, activeSource)
-            // (b) Else the recognizer still needs downloading → fold a synthetic
+            // A better default whose pack is already on disk (e.g. the shared CJK
+            //     recognizer downloaded for another language) needs nothing here:
+            //     an unset selection resolves to it (OcrModelManager.selectedBackend).
+            // Else the recognizer still needs downloading → fold a synthetic
             //     "update the source pack" entry into this flow; its post-upgrade
             //     priming fetches the recognizer and the dict re-install no-ops
             //     (idempotency guard in LanguagePackStore.install). Skipped when the
@@ -2124,23 +2171,6 @@ class MainActivity :
         }
     }
 
-    private fun showRestrictedSettingsDialog() {
-        OverlayAlert.Builder(this)
-            .setTitle(getString(R.string.restricted_settings_title))
-            .setMessage(getString(R.string.restricted_settings_message))
-            .addButton(
-                getString(R.string.btn_open_app_settings),
-                themeColor(R.attr.ptAccent)
-            ) {
-                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                    data = Uri.fromParts("package", packageName, null)
-                }
-                startActivity(intent)
-            }
-            .addCancelButton()
-            .show()
-    }
-
     /** Apply [current] readiness to the UI — show the onboarding pages (with the
      *  home surfaces hidden), or the steady-state home (surfaces restored). This
      *  is the single place the readiness state machine touches the UI; the
@@ -2164,8 +2194,68 @@ class MainActivity :
             is AppReadiness.Ready -> {
                 setMainSurfacesVisible(true)
                 showReadyHome(current.home, prev)
+                maybePromptQuickTile(current)
+                maybeShowKillNotice()
             }
         }
+    }
+
+    /** The one-time "add the Quick Settings tile" prompt at the end of
+     *  onboarding; [QuickTilePromptPolicy] decides from the first readiness
+     *  this process derived ([firstReadiness]), so a user who was already
+     *  set up before the prompt existed is marked done without seeing it. */
+    private fun maybePromptQuickTile(current: AppReadiness) {
+        when (QuickTilePromptPolicy.decide(
+            first = firstReadiness,
+            setUpAtFirst = setUpAtFirstReadiness,
+            current = current,
+            tileAdded = prefs.quickTileAdded,
+            promptDone = prefs.quickTilePromptDone,
+        )) {
+            QuickTilePromptPolicy.Decision.PROMPT -> {
+                prefs.quickTilePromptDone = true
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    com.playtranslate.ui.QuickTile.requestAdd(this) { prefs.quickTileAdded = true }
+                }
+            }
+            QuickTilePromptPolicy.Decision.MARK_DONE -> prefs.quickTilePromptDone = true
+            QuickTilePromptPolicy.Decision.NONE -> Unit
+        }
+    }
+
+    /** After a process that replaced one the system killed with the
+     *  controls on ([com.playtranslate.capture.SessionMarker]): say so
+     *  once, and point at the Keep-running page. The crash prompt owns
+     *  crashes, and an app update is not a kill; [KillNotice] filters both
+     *  out of the exit record. Stops for good once the page has been seen. */
+    private fun maybeShowKillNotice() {
+        val kind = com.playtranslate.diagnostics.KillNotice.pending(this) ?: return
+        com.playtranslate.diagnostics.KillNotice.markShown()
+        // Only an icon actually on screen earns the sentence. The summon
+        // flag behind isActive lifts in onResume before the accessibility
+        // service has re-bound (no icon yet), and the MediaProjection
+        // restore rides this activity's service start, which lands after
+        // this runs; both would claim "back on" over an empty screen, so
+        // the sentence is simply omitted then (Codex, 2026-10-06).
+        val restored = CaptureBackendResolver.activeOverlayUi?.hasAnyFloatingIcon == true
+        val body = buildString {
+            append(getString(
+                when (kind) {
+                    com.playtranslate.diagnostics.KillNotice.Kind.MEMORY -> R.string.kill_notice_body_memory
+                    com.playtranslate.diagnostics.KillNotice.Kind.STOPPED -> R.string.kill_notice_body_stopped
+                    com.playtranslate.diagnostics.KillNotice.Kind.OTHER -> R.string.kill_notice_body_other
+                }
+            ))
+            if (restored) append(' ').append(getString(R.string.kill_notice_restored))
+        }
+        OverlayAlert.Builder(this)
+            .setTitle(getString(R.string.kill_notice_title))
+            .setMessage(body)
+            .addButton(getString(R.string.kill_notice_see_options), themeColor(R.attr.ptAccent)) {
+                startActivity(Intent(this, com.playtranslate.ui.KeepRunningActivity::class.java))
+            }
+            .addCancelButton(getString(R.string.kill_notice_not_now))
+            .show()
     }
 
     /** Re-derive onboarding readiness from current system state — the
@@ -2272,9 +2362,20 @@ class MainActivity :
         // Used both for the Your Language row display and for localizing the
         // Game Language name.
         val sourceCode = com.playtranslate.language.SourceLanguageProfiles[p.sourceLangId].translationCode
-        val effectiveTarget = if (tgtSet) p.targetLang
-            else com.playtranslate.ui.WelcomeDefaults.computeDefaultTarget(sourceCode)
-        val tgtLocale = java.util.Locale.forLanguageTag(effectiveTarget)
+        val effectiveTarget = if (tgtSet) {
+            com.playtranslate.language.TargetSelection(p.targetLang, p.targetChineseVariant)
+        } else {
+            com.playtranslate.ui.WelcomeDefaults.computeDefaultTarget(sourceCode)
+        }
+        // The rows read in the target's own script: the variant code for Chinese
+        // (zh-Hant-TW names the game language in Traditional), the bare code else.
+        val tgtLocale = java.util.Locale.forLanguageTag(
+            if (com.playtranslate.language.ChineseScriptVariant.isChineseTarget(effectiveTarget.code)) {
+                effectiveTarget.chineseVariant.code
+            } else {
+                effectiveTarget.code
+            },
+        )
 
         rowWelcomeGameLang.findViewById<TextView>(R.id.tvRowTitle).text =
             getString(R.string.lang_translate_from)
@@ -2295,7 +2396,7 @@ class MainActivity :
         // something else they tap the row. Tapping Continue without having
         // picked explicitly runs the install flow for this default.
         yourVal.text = com.playtranslate.language.ChineseScriptVariant.targetDisplayName(
-            effectiveTarget, p.targetChineseVariant, tgtLocale,
+            effectiveTarget.code, effectiveTarget.chineseVariant, tgtLocale,
         )
         yourVal.setTextColor(themeColor(R.attr.ptTextMuted))
 
@@ -2348,9 +2449,9 @@ class MainActivity :
                         .computeDefaultTarget(sourceCode)
                     welcomeTargetInstaller.installAndLoad(
                         sourceLangCode = sourceCode,
-                        targetCode = defaultTarget,
+                        targetCode = defaultTarget.code,
                         onSuccess = {
-                            Prefs(this).targetLang = defaultTarget
+                            Prefs(this).setTarget(defaultTarget.code, defaultTarget.chineseVariant)
                             refreshReadiness()
                         },
                     )
@@ -2494,8 +2595,22 @@ class MainActivity :
         tv.text = spannable
     }
 
+    /** The display the service will treat as primary before it is bound:
+     *  the first of the selection as the active backend resolves it
+     *  ([com.playtranslate.capture.CaptureBackend.capturableTargets]), so the
+     *  pre-bind region label agrees with [CaptureService.activeRegion] once
+     *  the service is up. */
+    private fun resolvedPrimaryDisplayId(): Int =
+        CaptureBackendResolver.active().capturableTargets(this, prefs.captureDisplayIds).firstOrNull()
+            ?: android.view.Display.DEFAULT_DISPLAY
+
     // ── Display detection ─────────────────────────────────────────────────
 
+    /** The display the first-launch seed guesses the game is on
+     *  ([DisplaySelectionSeed.detectGameDisplayId]: the other screen of a
+     *  dual-screen device, on or off, never a private display), else what
+     *  the selection already reads as (the default display until something
+     *  is stored). Read by [seedDisplaySelectionIfReady] only. */
     private fun findGameDisplayId(): Int {
         val myDisplayId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             display?.displayId ?: Display.DEFAULT_DISPLAY
@@ -2505,9 +2620,7 @@ class MainActivity :
         }
 
         val displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-        return displayManager.displays
-            .firstOrNull { it.displayId != myDisplayId }
-            ?.displayId
+        return DisplaySelectionSeed.detectGameDisplayId(displayManager, myDisplayId)
             ?: (prefs.captureDisplayIds.firstOrNull() ?: android.view.Display.DEFAULT_DISPLAY)
     }
 
@@ -2541,7 +2654,7 @@ class MainActivity :
         // The service's active region already folds in the persisted selection,
         // so prefer it outright — an unnamed override (a drawn region) resolves
         // through displayName rather than falling back to the saved entry's name.
-        val region = captureService?.activeRegion ?: prefs.primaryDisplayRegion()
+        val region = captureService?.activeRegion ?: prefs.primaryDisplayRegion(resolvedPrimaryDisplayId())
         val label = region.displayName(this)
         return "Searching for $lang in the \"$label\" area"
     }
@@ -2705,7 +2818,7 @@ class MainActivity :
         // dropdown still has something to apply a region to. Matches live
         // start and floating-icon placement.
         val all = CaptureBackendResolver.active()
-            .capturableTargets(prefs.captureDisplayIds)
+            .capturableTargets(this, prefs.captureDisplayIds)
             .toList()
         val filtered = all.filter { it != MainActivity.foregroundDisplayId }
         return filtered.ifEmpty { all }
@@ -3035,6 +3148,13 @@ class MainActivity :
          *  display the user actually tapped, instead of falling through
          *  to primaryGameDisplayId / dropdownTargetDisplayIds.first. */
         const val EXTRA_TARGET_DISPLAY_ID = "extra_target_display_id"
+
+        /** The first readiness this process derived, and whether a target
+         *  language was already set then; process-scoped so an activity
+         *  recreation mid-onboarding (a rotation, a theme change) does not
+         *  restart the history [QuickTilePromptPolicy] reads. */
+        private var firstReadiness: AppReadiness? = null
+        private var setUpAtFirstReadiness = false
 
         @Volatile
         var isInForeground = false

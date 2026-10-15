@@ -1767,7 +1767,7 @@ object LayoutAnalyzer {
         // Extended-A, and Presentation Forms (e.g. the ﷲ ligature) the recognizer
         // emits, which a base-block-only range would drop from the pipeline.
         else -> {
-            val profile = SourceLanguageProfiles.forCode(sourceLang)
+            val profile = SourceLanguageProfiles.scriptFor(sourceLang)
             if (profile != null) profile.isScriptChar(c) else c.code > 0x007F
         }
     }
@@ -1807,7 +1807,7 @@ object LayoutAnalyzer {
         angleToleranceDeg: Float = DeskewGeometry.DEFAULT_CLUSTER_CAP_DEG,
     ): List<LayoutGroup> {
         if (regions.isEmpty()) return emptyList()
-        val profile = SourceLanguageProfiles.forCode(sourceLang)
+        val profile = SourceLanguageProfiles.scriptFor(sourceLang)
         val ctx = GroupingContext(
             sourceLang = sourceLang,
             screenshotWidthInRegionSpace = screenshotWidthInRegionSpace,
@@ -2286,9 +2286,11 @@ object LayoutAnalyzer {
             if (frame != null) raw.map { DeskewGeometry.deskew(it.box, frame) }
             else raw.map { it.box.bounds }
         val regions = readingOrderIndices(geomRects, orientation).map { raw[it] }
-        val text = regions.joinToString(lineJoin) { it.text }.trim()
+        // The group's text is its lines joined (a line-level region IS its one
+        // line: RecognizedTextNormalizer rebuilds both from the same clean),
+        // and the join addresses each line into that text.
+        val (text, lines) = joinLines(regions.flatMap { it.lines }, lineJoin)
         if (text.isBlank()) return null
-        val lines = regions.flatMap { it.lines }
         if (frame != null) {
             // Framed group: oriented union in-frame, exact AABB back in screen
             // space — bounds.center == the oriented rect's center (±0.5px) and

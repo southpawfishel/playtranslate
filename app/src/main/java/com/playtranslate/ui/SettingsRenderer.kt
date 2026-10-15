@@ -1,5 +1,6 @@
 package com.playtranslate.ui
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -52,7 +53,7 @@ import com.playtranslate.IconAction
 import com.playtranslate.Prefs
 import com.playtranslate.R
 import com.playtranslate.UpdateChecker
-import com.playtranslate.diagnostics.LogExporter
+import com.playtranslate.diagnostics.BugReport
 import com.playtranslate.language.HintTextKind
 import com.playtranslate.language.SourceLanguageProfiles
 import com.playtranslate.blendColors
@@ -854,7 +855,11 @@ class SettingsRenderer(
     private fun showOverlayIconA11yAlert() {
         AlertDialog.Builder(ctx)
             .setTitle(R.string.overlay_icon_a11y_required_title)
-            .setMessage(R.string.overlay_icon_a11y_required_message)
+            .setMessage(
+                AccessibilityHelp.withRestrictedSettingsStep(
+                    ctx, ctx.getString(R.string.overlay_icon_a11y_required_message),
+                ),
+            )
             .setPositiveButton(R.string.btn_open_a11y_settings) { _, _ ->
                 ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             }
@@ -862,11 +867,13 @@ class SettingsRenderer(
             .show()
     }
 
-    /** Enabled in system Settings but not bound to our process — the
-     *  force-stop zombie state the system's accessibility page reports as
-     *  "malfunctioning". Checked BEFORE the toggle branches (power button,
-     *  Game Screen Controls row) so a tap in that state repairs instead of
-     *  writing prefs against a service that cannot host the icon. */
+    /** Enabled in system Settings but not bound to our process — the state
+     *  the system's accessibility page reports as "malfunctioning", left by
+     *  a kill whose restart was blocked (a force stop disables the service
+     *  outright on stock Android). Checked BEFORE the toggle branches
+     *  (power button, Game Screen Controls row) so a tap in that state
+     *  repairs instead of writing prefs against a service that cannot host
+     *  the icon. */
     private fun a11yServiceStuck(): Boolean =
         PlayTranslateAccessibilityService.isEnabled(ctx) &&
             !PlayTranslateAccessibilityService.isConnected
@@ -874,19 +881,21 @@ class SettingsRenderer(
     /** Repair-prompt dispatch for a failed
      *  [CaptureLifecycle.activateAccessibility]: enabled-but-unbound is the
      *  state the system's accessibility page reports as "malfunctioning"
-     *  (Android never rebinds a force-stopped service until the user
-     *  re-toggles it) and gets the stuck alert; not enabled at all gets the
-     *  ordinary enable prompt. */
+     *  (Android does not rebind it until the user re-toggles the service)
+     *  and gets the stuck alert; not enabled at all gets the ordinary
+     *  enable prompt. */
     private fun showA11yActivationBlockedAlert() {
         if (PlayTranslateAccessibilityService.isEnabled(ctx)) showA11yStuckAlert()
         else showOverlayIconA11yAlert()
     }
 
+    /** No restricted-settings step here: a service that was enabled once
+     *  has already been allowed. */
     private fun showA11yStuckAlert() {
         var message = ctx.getString(R.string.a11y_stuck_message)
-        // Xiaomi's battery manager force-stops apps that lack its Autostart
-        // permission, which is what strands the service in this state — the
-        // generic re-toggle fixes the symptom, these settings stop the loop.
+        // The Keep-running page's two Xiaomi settings, suspected (not
+        // established) to be what stops the service there; the re-toggle
+        // fixes the symptom either way.
         if (Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true)) {
             message += "\n\n" + ctx.getString(R.string.a11y_stuck_message_xiaomi)
         }
@@ -916,7 +925,7 @@ class SettingsRenderer(
             isClickable = false
             isFocusable = false
             // No window params, so this only sets the edge the slice is drawn on.
-            setPosition(edge.ordinal, 0.5f)
+            setSlot(edge.ordinal, 0.5f)
         }
         overlayIconPreviewSlot.addView(
             preview,
@@ -1213,17 +1222,26 @@ class SettingsRenderer(
                 onLongClick = { copyUrl(discordUrl) },
             ),
         )
+        // The troubleshooting rows sit together, above the donate row that
+        // closes the section (Gilad, 2026-10-06).
         bindHubCell(
-            root.findViewById(R.id.rowExportLogs),
+            root.findViewById(R.id.rowKeepRunning),
+            HubCell(
+                iconRes = R.drawable.ic_mobile_wrench,
+                title = ctx.getString(R.string.settings_support_keep_running_title),
+                summary = ctx.getString(R.string.settings_support_keep_running_subtitle),
+                onClick = { ctx.startActivity(Intent(ctx, KeepRunningActivity::class.java)) },
+            ),
+        )
+        bindHubCell(
+            root.findViewById(R.id.rowReportBug),
             HubCell(
                 iconRes = R.drawable.ic_export_notes,
-                title = ctx.getString(R.string.settings_debug_export_logs_title),
-                summary = ctx.getString(R.string.settings_debug_export_logs_subtitle),
-                // Same external-link affordance as the link rows — export leaves
-                // the app via the system share sheet.
+                title = ctx.getString(R.string.settings_support_report_bug_title),
+                summary = ctx.getString(R.string.settings_support_report_bug_subtitle),
                 trailing = Trailing.EXTERNAL,
-                onClick = { exportLogs() },
-                onLongClick = { copyLogs() },
+                onClick = { (ctx as? Activity)?.let { BugReport.email(it, lifecycleScope) } },
+                onLongClick = { (ctx as? Activity)?.let { BugReport.share(it, lifecycleScope) } },
             ),
         )
         val donateUrl = "https://go.playtranslate.com/donate"
@@ -1309,59 +1327,6 @@ class SettingsRenderer(
         clipboard.setPrimaryClip(android.content.ClipData.newPlainText(label, text))
     }
 
-    /** Long-press affordance on the Export logs row: the same logs a tap would
-     *  share, onto the clipboard instead of out through the share sheet. */
-    private fun copyLogs() {
-        lifecycleScope.launch {
-            val text = withContext(Dispatchers.IO) { LogExporter.clipboardLogText() }
-            // A clip this size can still be refused — an OEM clipboard cap, or a
-            // Binder buffer already loaded by other traffic. Toast, don't crash.
-            runCatching {
-                setClip(ctx.getString(R.string.settings_debug_export_logs_subject), text)
-            }.fold(
-                onSuccess = {
-                    Toast.makeText(ctx, ctx.getString(R.string.toast_copied), Toast.LENGTH_SHORT)
-                        .show()
-                },
-                onFailure = {
-                    Toast.makeText(
-                        ctx,
-                        ctx.getString(
-                            R.string.settings_debug_export_logs_failed, it.javaClass.simpleName,
-                        ),
-                        Toast.LENGTH_LONG,
-                    ).show()
-                },
-            )
-        }
-    }
-
-    private fun exportLogs() {
-        lifecycleScope.launch {
-            val files = withContext(Dispatchers.IO) {
-                runCatching {
-                    val logFile = LogExporter.exportLogcat(ctx)
-                    listOf(logFile) + LogExporter.getCrashFiles(ctx)
-                }
-            }
-            files.fold(
-                onSuccess = {
-                    if (ctx is android.app.Activity) {
-                        LogExporter.shareFiles(
-                            ctx, it, ctx.getString(R.string.settings_debug_export_logs_subject),
-                        )
-                    }
-                },
-                onFailure = {
-                    Toast.makeText(
-                        ctx,
-                        ctx.getString(R.string.settings_debug_export_logs_failed, it.javaClass.simpleName),
-                        Toast.LENGTH_LONG,
-                    ).show()
-                },
-            )
-        }
-    }
 
     // ── Hub cell binder ────────────────────────────────────────────────────
 

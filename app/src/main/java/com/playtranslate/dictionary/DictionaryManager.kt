@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.util.Log
+import com.playtranslate.dictionary.deinflect.Deinflection
+import com.playtranslate.dictionary.deinflect.JapaneseDeinflector
 import com.playtranslate.language.InflectionTag
 import com.playtranslate.language.LanguagePackCatalogLoader
 import com.playtranslate.language.LanguagePackStore
@@ -279,13 +281,20 @@ class DictionaryManager private constructor(private val context: Context) {
          *  (Jitendex lists 瞬く間 too) can't re-admit them as JMdict misses.
          *  Oracle-only joins carry no POS and still fuse. */
         excludeExpressionJoins: Boolean = false,
+        /** Fold an auxiliary verb after て/で, the negative adjective 無い and
+         *  the appearance stem そう into the word before them (see
+         *  [continuesConjugation]), so 飲んでいなかった is one span. Member mode
+         *  passes false: decomposing 連れて行く must keep 行く a unit of its
+         *  own, or the one folded span would equal the headword and the member
+         *  list would come out empty. */
+        foldAuxiliaries: Boolean = true,
     ): List<ReglobSpan>? = withContext(Dispatchers.IO) {
         val database = ensureOpen() ?: return@withContext null
 
         // Batch existence query: candidate N-gram phrases PLUS each content
         // token's dictionaryForm/normalizedForm (layer 1 — lets us pick the
         // form that actually resolves, e.g. キミ→君).
-        val candidates = phraseCandidatesFor(tokens)
+        val candidates = phraseCandidatesFor(tokens, foldAuxiliaries)
             .filter { it.lookupForm !in excludePhrases }
         // Single content-token forms (layer 1: dictionaryForm / normalizedForm).
         val formCandidates = mutableSetOf<String>()
@@ -309,7 +318,9 @@ class DictionaryManager private constructor(private val context: Context) {
         // Structural admissibility: joins that contradict Sudachi's parse are
         // vetoed (conjugation cuts) or held to the kana-native tier (function
         // runs) BEFORE the oracle sees them — a conjugation cut is wrong no
-        // matter which dictionary lists the string. See [Suspicion].
+        // matter which dictionary lists the string. See [Suspicion]. Whether
+        // a window cuts the word before it is the walk's call (reglobSpans),
+        // so such windows reach the oracle like any other.
         val admissible = admissiblePhraseCandidates(
             candidates, membership.headwords, membership.kanaNativeReadings,
             membership.priorityHeadwords,
@@ -326,7 +337,7 @@ class DictionaryManager private constructor(private val context: Context) {
             if (forOracle.isNotEmpty()) knownPhrases = knownPhrases + phraseOracle(forOracle)
         }
 
-        reglobSpans(tokens, admissible, knownPhrases, knownForms)
+        reglobSpans(tokens, admissible, knownPhrases, knownForms, membership.headwords, foldAuxiliaries)
     }
 
     /** Fallback when the JMdict DB isn't ready: content words on their own
@@ -339,8 +350,13 @@ class DictionaryManager private constructor(private val context: Context) {
     /**
      * Look up [word] in the local JMdict database.
      *
-     * If no direct match is found, de-inflection candidates are tried in
-     * order.  Returns null if nothing matches or the database isn't ready.
+     * If no direct match is found, the deinflection stage runs
+     * ([firstAcceptedDeinflection]): the first of [JapaneseDeinflector.candidates]
+     * whose text has pack entries accepting it (an entry accepts a candidate
+     * when its senses' parts of speech match the candidate's conditions)
+     * resolves [word] to those entries alone, and the candidate's chain rides
+     * on [DictionaryResponse.deinflection]. Returns null if nothing matches or
+     * the database isn't ready.
      *
      * This is a suspend function; do NOT call on the main thread.
      */
@@ -363,15 +379,9 @@ class DictionaryManager private constructor(private val context: Context) {
                 return@withRefcount buildResponse(database, directIds)
             }
 
-            // 3. Try de-inflected candidates (first dictionary hit wins)
-            for (candidate in Deinflector.candidates(word)) {
-                val ids = queryEntryIds(database, candidate.text)
-                if (ids.isNotEmpty()) {
-                    return@withRefcount buildResponse(database, ids, candidate.reason)
-                }
-            }
-
-            null
+            // 3. Deinflection: the first candidate some entry's senses accept
+            val hit = deinflectedHit(database, word) ?: return@withRefcount null
+            buildResponse(database, hit.entryIds, hit.deinflection)
         }
     }
 
@@ -753,6 +763,54 @@ class DictionaryManager private constructor(private val context: Context) {
         return ids
     }
 
+    /** [firstAcceptedDeinflection] over the open pack: [queryEntryIds] for each
+     *  candidate's text, [sensePosTokens] for the ids it returns. The one
+     *  deinflection stage of both [lookup] and [lookupReadingsOnly]. */
+    private fun deinflectedHit(db: SQLiteDatabase, word: String): DeinflectedHit? =
+        firstAcceptedDeinflection(word, { queryEntryIds(db, it) }, { sensePosTokens(db, it) })
+
+    /**
+     * [alternativeCandidates] over the open pack, bound to the reads
+     * [lookup] makes ([queryEntryIds], memoized per text for the call;
+     * [queryEntryIdsWithReading]; [sensePosTokens]) and to
+     * [primaryFormsForEntry]. Empty when the database isn't ready.
+     */
+    internal suspend fun alternativeKeys(
+        surface: String,
+        lookupForm: String,
+        tokenTags: List<InflectionTag>,
+        primaryIds: Set<Long>,
+    ): List<AlternativeKey> = withContext(Dispatchers.IO) {
+        val database = ensureOpen() ?: return@withContext emptyList()
+        database.withRefcount {
+            val idsByText = HashMap<String, List<Long>>()
+            alternativeCandidates(
+                surface, lookupForm, tokenTags, primaryIds,
+                entryIdsFor = { text -> idsByText.getOrPut(text) { queryEntryIds(database, text) } },
+                entryIdsWithReadingFor = { text, reading -> queryEntryIdsWithReading(database, text, reading) },
+                posTokensFor = { ids -> sensePosTokens(database, ids) },
+                primaryFormsFor = { id -> primaryFormsForEntry(database, id) },
+            )
+        } ?: emptyList()
+    }
+
+    /** Part-of-speech tokens of every sense of each entry in [entryIds] (all
+     *  senses, where [buildEntry] keeps the first 8), split by
+     *  [PosVocabulary.parse] as [buildEntry] splits them. One query; an id with
+     *  no sense rows is absent from the map. */
+    private fun sensePosTokens(db: SQLiteDatabase, entryIds: List<Long>): Map<Long, List<String>> {
+        val out = HashMap<Long, MutableList<String>>()
+        db.rawQuery(
+            "SELECT entry_id, pos FROM sense WHERE entry_id IN (${entryIds.joinToString(",") { "?" }})",
+            Array(entryIds.size) { entryIds[it].toString() },
+        ).use { c ->
+            while (c.moveToNext()) {
+                out.getOrPut(c.getLong(0)) { mutableListOf() } += PosVocabulary.parse(c.getString(1))
+            }
+        }
+        return out
+    }
+
     /**
      * The entry's headword list — kanji forms + reading forms paired by
      * [buildHeadwords]. Shared VERBATIM by [buildEntry] and
@@ -833,16 +891,17 @@ class DictionaryManager private constructor(private val context: Context) {
 
     /**
      * Readings-only resolution for the annotator: the SAME entry choice as
-     * [lookup] (narrowed → direct → deinflection, identical ranked SQL) and
-     * the SAME headword pairing ([loadHeadwords]) — but no senses, examples,
-     * or imported enrichment. Returns a senses-free [DictionaryEntry]
-     * skeleton (packId + headwords) or null when the pack has nothing —
-     * callers fall back to the full two-store lookup, where imported-
-     * dictionary synthesis may still resolve. Parity with the full path's
-     * entry choice holds BY CONSTRUCTION (shared SQL, shared pairing, and
-     * YomitanEnrichment.mergeImportedTerms anchors on the first pack entry
-     * without reordering); cost is 2–3 indexed queries, which is what keeps
-     * FULL-depth annotation affordable on the live cycle.
+     * [lookup] (narrowed → direct → deinflection, identical ranked SQL and
+     * the one [deinflectedHit] gate) and the SAME headword pairing
+     * ([loadHeadwords]), but no senses, examples, or imported enrichment.
+     * Returns a senses-free [DictionaryEntry] skeleton (packId + headwords),
+     * or null when the pack has nothing; callers then fall back to the full
+     * two-store lookup, where imported-dictionary synthesis may still
+     * resolve. Parity with the full path's entry choice holds BY
+     * CONSTRUCTION (shared SQL, shared deinflection gate, shared pairing,
+     * and YomitanEnrichment.mergeImportedTerms anchors on the first pack
+     * entry without reordering); cost is 2–3 indexed queries, which is what
+     * keeps FULL-depth annotation affordable on the live cycle.
      */
     suspend fun lookupReadingsOnly(word: String, reading: String? = null): DictionaryEntry? =
         withContext(Dispatchers.IO) {
@@ -853,12 +912,7 @@ class DictionaryManager private constructor(private val context: Context) {
                     id = queryEntryIdsWithReading(database, word, reading).firstOrNull()
                 }
                 if (id == null) id = queryEntryIds(database, word).firstOrNull()
-                if (id == null) {
-                    for (candidate in Deinflector.candidates(word)) {
-                        id = queryEntryIds(database, candidate.text).firstOrNull()
-                        if (id != null) break
-                    }
-                }
+                if (id == null) id = deinflectedHit(database, word)?.entryIds?.first()
                 val entryId = id ?: return@withRefcount null
                 val headwords = loadHeadwords(database, entryId.toString())
                 if (headwords.isEmpty()) return@withRefcount null
@@ -878,13 +932,11 @@ class DictionaryManager private constructor(private val context: Context) {
     private fun buildResponse(
         db: SQLiteDatabase,
         entryIds: List<Long>,
-        inflectionNote: String? = null
-    ): DictionaryResponse {
-        val entries = entryIds.mapNotNull { buildEntry(db, it, inflectionNote) }
-        return DictionaryResponse(entries = entries)
-    }
+        deinflection: List<InflectionTag> = emptyList(),
+    ): DictionaryResponse =
+        DictionaryResponse(entries = entryIds.mapNotNull { buildEntry(db, it) }, deinflection = deinflection)
 
-    private fun buildEntry(db: SQLiteDatabase, id: Long, inflectionNote: String?): DictionaryEntry? {
+    private fun buildEntry(db: SQLiteDatabase, id: Long): DictionaryEntry? {
         val idStr = id.toString()
 
         var isCommon = false
@@ -932,14 +984,10 @@ class DictionaryManager private constructor(private val context: Context) {
                 val posList   = PosVocabulary.parse(c.getString(1))
                 val glossList = c.getString(2).split('\t').filter { it.isNotBlank() }
                 val miscList  = c.getString(3).split('\t').filter { it.isNotBlank() }
-                val finalPos  = if (inflectionNote != null && senses.isEmpty())
-                    listOf("[$inflectionNote]") + posList
-                else
-                    posList
                 senses.add(
                     Sense(
                         targetDefinitions = glossList,
-                        partsOfSpeech = finalPos,
+                        partsOfSpeech = posList,
                         tags = emptyList(),
                         restrictions = emptyList(),
                         info = emptyList(),
@@ -1020,19 +1068,28 @@ class DictionaryManager private constructor(private val context: Context) {
         internal data class PhraseCandidate(
             /** Window start in the token list. */
             val startIndex: Int,
-            /** Tokens inside the window (excluding any trailing folded glue). */
+            /** Tokens inside the window, excluding the trailing tokens a lemma
+             *  variant folds after it: glue, and with folding on an auxiliary
+             *  verb, 無い or そう with their own glue ([continuesConjugation]). */
             val windowLen: Int,
             /** String checked against the membership set; becomes the result's lookupForm. */
             val lookupForm: String,
             /** Actual input surfaces for the consumed span. */
             val surface: String,
-            /** Total tokens to advance past on a match (windowLen + folded glue). */
+            /** Total tokens to advance past on a match (windowLen + the folded tokens). */
             val tokensConsumed: Int,
             /** False = exact surface join; true = last-token lemma variant. */
             val isVariant: Boolean,
             /** How this window collides with the morphological parse, or null
              *  for a clean join. Decides admissibility — see [Suspicion]. */
             val suspicion: Suspicion? = null,
+            /** The window starts where the word before it may still be
+             *  conjugating ([cutsPreviousWord]); recorded on exact windows,
+             *  never on a lemma variant, which starts at a content token of
+             *  its own. Orthogonal to [suspicion], the window's own shape, and
+             *  applied by [reglobSpans], the only place that knows whether
+             *  that word is open. */
+            val cutsPreviousWord: Boolean = false,
         )
 
         /**
@@ -1054,6 +1111,10 @@ class DictionaryManager private constructor(private val context: Context) {
          * (ないわけにはいかない) or reading coincidences — neither is a WORD the
          * app is trying to surface.
          *
+         * A [Suspicion] reads the window itself. Whether the window would cut
+         * the conjugation of the word BEFORE it is a separate question,
+         * [cutsPreviousWord], answered in the walk.
+         *
          * [CONVERB_CUT] — an incomplete content stem followed by PARTICLE
          * glue only (押し|て, 従っ|て) — a fossilized-converb shape. Unlike
          * CONJUGATION_CUT's auxiliary case (知ら+せる→知らせる, a real v1 verb
@@ -1065,6 +1126,14 @@ class DictionaryManager private constructor(private val context: Context) {
          * stem+glue shape, restricting to particle-only glue selects 207,
          * none of which is a plain verb entry once the priority bar drops
          * the unranked ones — the 593 auxiliary-glue forms are untouched.
+         *
+         * [AUXILIARY_CUT]: a [CONVERB_CUT] window whose next token is an
+         * auxiliary verb the fold attaches through its て (従っ|て + いる,
+         * 通じ|て + いる). The verb conjugates on there rather than standing as
+         * the fossilized converb, so even a priority headword (従って, 除いて)
+         * must not take the window: never admissible, and the fold reads
+         * 従う -て « -いる. Only with folding on; without it the converb
+         * keeps its priority rule.
          *
          * "Incomplete" = 連用形/未然形/語幹 — forms that grammatically require
          * a continuation. 終止形-adjacent joins stay clean, which is what
@@ -1084,7 +1153,7 @@ class DictionaryManager private constructor(private val context: Context) {
          * garbage-removal; だから/でも/かな/かもしれない/ストレスかいしょう keep
          * fusing.
          */
-        internal enum class Suspicion { CONJUGATION_CUT, CONVERB_CUT, FUNCTION_RUN }
+        internal enum class Suspicion { CONJUGATION_CUT, CONVERB_CUT, AUXILIARY_CUT, FUNCTION_RUN }
 
         /** Tiered phrase membership from [batchCheckPhrases] — see its doc. */
         internal data class PhraseMembership(
@@ -1112,8 +1181,11 @@ class DictionaryManager private constructor(private val context: Context) {
          * Drop candidates whose [Suspicion] their membership tier can't
          * license: converb cuts (押して) need a PRIORITY headword; conjugation
          * cuts (した/知らせる) and function runs admit via any headword, plus a
-         * kana-native reading for function runs. Clean candidates pass
-         * through. Pure; the matcher then needs no admissibility knowledge.
+         * kana-native reading for function runs; auxiliary cuts (従って before
+         * いる) never admit. Clean candidates pass through. Pure; the matcher
+         * then needs no tier knowledge. Whether a window cuts the word before
+         * it ([PhraseCandidate.cutsPreviousWord]) is not a matter of tier and
+         * is the walk's call, in [reglobSpans].
          */
         internal fun admissiblePhraseCandidates(
             candidates: List<PhraseCandidate>,
@@ -1125,25 +1197,155 @@ class DictionaryManager private constructor(private val context: Context) {
                 null -> true
                 Suspicion.CONJUGATION_CUT -> c.lookupForm in headwords
                 Suspicion.CONVERB_CUT -> c.lookupForm in priorityHeadwords
+                Suspicion.AUXILIARY_CUT -> false
                 Suspicion.FUNCTION_RUN ->
                     c.lookupForm in headwords || c.lookupForm in kanaNativeReadings
             }
         }
 
         /** Inflection-form prefixes that grammatically require a continuation.
-         *  A stem in one of these cannot end a word's surface on its own. */
+         *  A stem in one of these cannot end a word's surface on its own. A
+         *  形状詞 reports no 活用形, so the stem shapes below never fire on one. */
         private val INCOMPLETE_INFLECTIONS = arrayOf("連用形", "未然形", "語幹")
 
         private val JaToken.hasIncompleteInflection: Boolean
             get() = inflectionForm?.let { f -> INCOMPLETE_INFLECTIONS.any(f::startsWith) } == true
 
+        /** The written forms of the 接続助詞 an auxiliary verb attaches through. */
+        private val TE_SURFACES = setOf("て", "で")
+
+        /** The particles that may sit between a 連用形 and the 無い negating it. */
+        private val NAI_INTERPOSED_PARTICLES = setOf("は", "も")
+
+        /** Inflection-form prefixes the appearance stem そう attaches to. */
+        private val SOU_STEM_INFLECTIONS = arrayOf("連用形", "語幹")
+
+        /**
+         * Whether [tok] is an auxiliary verb the fold attaches through [prev]:
+         * a 動詞 非自立可能 on the allow-list ([JapaneseInflectionAnalyzer.AUX_VERB_TAGS],
+         * keyed on normalizedForm because the written form varies: いる and
+         * おる are 居る, いけ is 行く, 頂け is 頂く) right after a 接続助詞 written
+         * て or で. Built from the survey chains 飲ん|で|い(いる, 居る)|なかっ|た,
+         * 持っ|て|いっ(いく, 行く)|て|しまっ(しまう, 仕舞う)|た, 来|て|頂け(頂ける,
+         * 頂く)|ます and 教え|て|ください(くださる, 下さる). Positional, not by
+         * role: 見 in 見|て|みる is 非自立可能 too. The particle is checked by
+         * surface because ては is one morpheme (食べ|ては|いけ|ない) and ちゃ
+         * normalizes to て (食べ|ちゃ|いけ|ない, Sudachi CLI); both stay split,
+         * as does ても (食べ|て|も|いる). A 非自立可能 verb off the list stays a
+         * word of its own (みせる in やっ|て|みせる).
+         */
+        internal fun isTeAuxiliary(prev: JaToken, tok: JaToken): Boolean =
+            tok.category == JaCategory.VERB && tok.isAuxiliaryCapable &&
+                prev.isConjunctiveParticle && prev.surface in TE_SURFACES &&
+                tok.normalizedForm in JapaneseInflectionAnalyzer.AUX_VERB_TAGS
+
+        /**
+         * Whether [tok], at [index] in [tokens] after [prev], is the negative
+         * adjective 無い (形容詞 非自立可能) negating a 連用形: an i-adjective's
+         * (高く|ない, 高く|なかっ|た), an auxiliary's (食べ|たく|ない; だ's で or
+         * じゃ, as in 静か|で|は|ない), or either of those with は or も between
+         * (高く|は|ない and 食べ|たく|も|ない, Sudachi CLI). After a verb's 未然形
+         * Sudachi gives the 助動詞 ない instead (食べ|ない), which is glue
+         * already; another 非自立可能 adjective (いい in 食べ|て|も|いい) never
+         * qualifies. A 形状詞 reaches it through だ's で or じゃ (静か|で|は|ない,
+         * 静か|じゃ|ない).
+         */
+        internal fun isNaiAdjective(prev: JaToken, tok: JaToken, tokens: List<JaToken>, index: Int): Boolean {
+            if (tok.category != JaCategory.ADJ_I || !tok.isAuxiliaryCapable || tok.normalizedForm != "無い") {
+                return false
+            }
+            if (prev.isNegatableContinuative) return true
+            return prev.category == JaCategory.PARTICLE && prev.surface in NAI_INTERPOSED_PARTICLES &&
+                tokens.getOrNull(index - 2)?.isNegatableContinuative == true
+        }
+
+        /** An i-adjective or auxiliary in 連用形: what 無い attaches to. */
+        private val JaToken.isNegatableContinuative: Boolean
+            get() = (category == JaCategory.ADJ_I || category == JaCategory.AUX) &&
+                inflectionForm?.startsWith("連用形") == true
+
+        /**
+         * Whether [tok] is the appearance stem そう (形状詞 助動詞語幹) attached to
+         * [prev], a verb in 連用形 or an i-adjective in 語幹: 食べ|そう|だ and
+         * 高|そう in the survey. Hearsay そう follows a complete form (食べる|そう|だ,
+         * 食べる in 連体形) and stays its own span, as does よう (食べる|よう|だ).
+         */
+        internal fun isSouStem(prev: JaToken, tok: JaToken): Boolean =
+            tok.isAuxiliaryStem && tok.normalizedForm == "そう" &&
+                prev.category.startsConjugation &&
+                prev.inflectionForm?.let { f -> SOU_STEM_INFLECTIONS.any(f::startsWith) } == true
+
+        /**
+         * Whether the token at [j] is a content token the fold attaches to
+         * the word before it, the token at j - 1 (so [j] >= 1): an auxiliary
+         * verb after て/で ([isTeAuxiliary]), 無い after a 連用形
+         * ([isNaiAdjective]) or そう after a 連用形 or 語幹 ([isSouStem]).
+         */
+        internal fun isFoldTarget(tokens: List<JaToken>, j: Int): Boolean {
+            val prev = tokens[j - 1]
+            val tok = tokens[j]
+            return isTeAuxiliary(prev, tok) || isNaiAdjective(prev, tok, tokens, j) || isSouStem(prev, tok)
+        }
+
+        /**
+         * Whether the token at [j] continues the conjugation of the word
+         * before it (so [j] >= 1): any particle or auxiliary (glue), and with
+         * [foldAuxiliaries] also an [isFoldTarget]. The single-token fold in
+         * [reglobSpans] and the lemma variant's trailing fold in
+         * [phraseCandidatesFor] both scan with it, so they cannot disagree. A
+         * folded auxiliary's own glue follows it, and so may a further て and
+         * auxiliary (持っ|て|いっ|て|しまっ|た).
+         */
+        internal fun continuesConjugation(tokens: List<JaToken>, j: Int, foldAuxiliaries: Boolean): Boolean =
+            tokens[j].category.isConjugationGlue || (foldAuxiliaries && isFoldTarget(tokens, j))
+
+        /**
+         * Whether a window starting at [start] would cut the conjugation of
+         * the word before it, read from the tokens alone: with folding on, it
+         * starts at a token the fold attaches to that word, even in a complete
+         * form (知っ|て|いる|か, いるか being 海豚's reading; 高く|ない|か;
+         * 食べ|そう|だ), or on glue bound to a 助動詞語幹, which has no 活用形 to
+         * read but is incomplete by definition, そう needing its だ, な or に
+         * (入れ|そう|に|ない, where にない is 担い's reading); folding or not, it
+         * starts on the 助動詞 right after a 形状詞, that word's own conjugation
+         * (静か|だっ|た, 静か|で|は|ない, where だった and ではない are readings; a
+         * particle may end a 形状詞, 静か|ね, so only the 助動詞 counts).
+         *
+         * This is the one judgement about the word to the LEFT of a window,
+         * and the tokens cannot settle it: the word before the window may
+         * instead be a phrase span the walk has already closed, which folds
+         * nothing and leaves no conjugation to cut (なんじゃ|ないか, 特徴的|だが).
+         * So [reglobSpans] applies it, where the spans are known: such a
+         * window fuses as a headword, or right after a closed phrase, and
+         * stays out after an open word whatever lists it. [suspicionFor]
+         * reads the window itself and never this.
+         */
+        internal fun cutsPreviousWord(tokens: List<JaToken>, start: Int, foldAuxiliaries: Boolean): Boolean {
+            if (start == 0) return false
+            if (foldAuxiliaries && isFoldTarget(tokens, start)) return true
+            val prev = tokens[start - 1]
+            val first = tokens[start]
+            if (!first.category.isConjugationGlue) return false
+            return (foldAuxiliaries && prev.isAuxiliaryStem) ||
+                (prev.category == JaCategory.ADJ_NA && first.category == JaCategory.AUX)
+        }
+
         /**
          * Classify a candidate window's [Suspicion]. Lemma variants are never
          * suspect: candidate generation already restricts them to content
          * starts, and their whole mechanism is deliberate lemma-swap + glue
-         * folding of the final stem.
+         * folding of the final stem. [foldAuxiliaries] adds
+         * [Suspicion.AUXILIARY_CUT]; without folding it would protect a fold
+         * that never happens. The window's relation to the word before it is
+         * not read here: see [cutsPreviousWord].
          */
-        internal fun suspicionFor(tokens: List<JaToken>, start: Int, windowLen: Int, isVariant: Boolean): Suspicion? {
+        internal fun suspicionFor(
+            tokens: List<JaToken>,
+            start: Int,
+            windowLen: Int,
+            isVariant: Boolean,
+            foldAuxiliaries: Boolean,
+        ): Suspicion? {
             if (isVariant) return null
             val first = tokens[start]
             if (first.category.isConjugationGlue) {
@@ -1171,12 +1373,17 @@ class DictionaryManager private constructor(private val context: Context) {
             ) {
                 // PARTICLE-only glue disagrees with the parse about part of
                 // speech (押し|て); AUX glue derives a real word that agrees
-                // with it (知ら|せる→知らせる). See [Suspicion.CONVERB_CUT].
-                return if ((start + 1 until start + windowLen).all {
-                        tokens[it].category == JaCategory.PARTICLE
+                // with it (知ら|せる→知らせる). See [Suspicion.CONVERB_CUT]. An
+                // auxiliary verb right after the window means the verb
+                // conjugates on through its て (従っ|て|いる): see
+                // [Suspicion.AUXILIARY_CUT].
+                val end = start + windowLen
+                return if ((start + 1 until end).all { tokens[it].category == JaCategory.PARTICLE }) {
+                    if (foldAuxiliaries && end < tokens.size && isTeAuxiliary(tokens[end - 1], tokens[end])) {
+                        Suspicion.AUXILIARY_CUT
+                    } else {
+                        Suspicion.CONVERB_CUT
                     }
-                ) {
-                    Suspicion.CONVERB_CUT
                 } else {
                     Suspicion.CONJUGATION_CUT
                 }
@@ -1203,13 +1410,17 @@ class DictionaryManager private constructor(private val context: Context) {
          *  - exact: the surfaces joined as-is (かもしれない);
          *  - lemma variant: for windows ENDING at an inflected conjugating
          *    content token, the last surface is swapped for its
-         *    dictionaryForm (気+に+なっ → 気になる), and the trailing
-         *    auxiliary/particle glue (た) is folded into the surface span /
-         *    advance count — mirroring the single-token folding in
-         *    [reglobTokens]. This lets dictionary headwords match inflected
-         *    expressions (気になった) the exact join can't.
+         *    dictionaryForm (気+に+なっ → 気になる), and the tokens
+         *    [continuesConjugation] folds after it (た; with
+         *    [foldAuxiliaries] also て+い+た) join the surface span /
+         *    advance count, the same scan as the single-token fold in
+         *    [reglobSpans]. This lets dictionary headwords match inflected
+         *    expressions (気になった, 気になっていた) the exact join can't.
          */
-        internal fun phraseCandidatesFor(tokens: List<JaToken>): List<PhraseCandidate> {
+        internal fun phraseCandidatesFor(
+            tokens: List<JaToken>,
+            foldAuxiliaries: Boolean = true,
+        ): List<PhraseCandidate> {
             val surfaces = tokens.map { it.surface }
             val out = mutableListOf<PhraseCandidate>()
             for (i in tokens.indices) {
@@ -1220,7 +1431,8 @@ class DictionaryManager private constructor(private val context: Context) {
                         out.add(PhraseCandidate(
                             startIndex = i, windowLen = n, lookupForm = phrase,
                             surface = phrase, tokensConsumed = n, isVariant = false,
-                            suspicion = suspicionFor(tokens, i, n, isVariant = false),
+                            suspicion = suspicionFor(tokens, i, n, isVariant = false, foldAuxiliaries),
+                            cutsPreviousWord = cutsPreviousWord(tokens, i, foldAuxiliaries),
                         ))
                     }
                     // Lemma variant: window ends at an inflected verb/i-adjective.
@@ -1232,6 +1444,8 @@ class DictionaryManager private constructor(private val context: Context) {
                     if (!tokens[i].category.isContent) continue
                     val last = tokens[i + n - 1]
                     if (!last.category.isContent || !last.category.startsConjugation) continue
+                    // Uninflected: nothing to swap. A 形状詞 does not inflect,
+                    // so it always stops here.
                     if (last.surface == last.dictionaryForm) continue
                     // 語幹 (bare stem) is an incomplete inflection awaiting a
                     // derivational continuation (良さ before そう) — lemma-swapping
@@ -1243,7 +1457,7 @@ class DictionaryManager private constructor(private val context: Context) {
                         surfaces.subList(i, i + n - 1).joinToString("") + last.dictionaryForm
                     if (lemmaPhrase == phrase || !isLookupWorthy(lemmaPhrase)) continue
                     var j = i + n
-                    while (j < tokens.size && tokens[j].category.isConjugationGlue) j++
+                    while (j < tokens.size && continuesConjugation(tokens, j, foldAuxiliaries)) j++
                     out.add(PhraseCandidate(
                         startIndex = i, windowLen = n, lookupForm = lemmaPhrase,
                         surface = surfaces.subList(i, j).joinToString(""),
@@ -1268,7 +1482,9 @@ class DictionaryManager private constructor(private val context: Context) {
          * opening particles of a phrase that then matches at its own start
          * (言われる folds かも, then かもしれない matches at か). The overlap
          * is load-bearing for the words list; SentenceAnnotator computes a
-         * disjoint display cover from these spans, phrase-priority.
+         * disjoint display cover from these spans, phrase-priority. No span
+         * starts at a content token an earlier span folded (an auxiliary verb,
+         * 無い or そう): [reglobSpans] skips it.
          */
         internal data class ReglobSpan(
             val tokenStart: Int,
@@ -1288,35 +1504,63 @@ class DictionaryManager private constructor(private val context: Context) {
             candidates: List<PhraseCandidate>,
             knownPhrases: Set<String>,
             knownForms: Set<String>,
+            headwords: Set<String>,
         ): List<TokenWithReading> =
-            reglobSpans(tokens, candidates, knownPhrases, knownForms)
+            reglobSpans(tokens, candidates, knownPhrases, knownForms, headwords)
                 .map { TokenWithReading(it.surface, it.lookupForm, it.reading, it.inflections) }
 
         /**
          * Greedy left-to-right re-glob matcher plus single-token fallback.
          * Pure: all dictionary knowledge arrives pre-resolved in [knownPhrases]
-         * (phrase candidates that passed their membership gate) and
-         * [knownForms] (single content-token dictionaryForm/normalizedForm).
+         * (phrase candidates that passed their membership gate), [knownForms]
+         * (single content-token dictionaryForm/normalizedForm) and
+         * [headwords] (the pack's written forms, which clear a window that
+         * [cutsPreviousWord] after an open word).
          *
          * At each position the longest matching window wins (exact surface
          * join before lemma variant at equal length); otherwise the token's
-         * base form is emitted if it's a content word, with trailing
-         * auxiliary/particle morphemes folded into a conjugating word's
-         * surface span (e.g. ない after 使わ).
+         * base form is emitted if it's a content word, with the tokens
+         * [continuesConjugation] admits folded into a conjugating word's
+         * surface span: ない after 使わ, and with [foldAuxiliaries] an
+         * auxiliary verb after て/で with its own glue, so 飲んでいなかった is
+         * one span, 飲む with the chain -て « -いる « negative « -た.
          */
         internal fun reglobSpans(
             tokens: List<JaToken>,
             candidates: List<PhraseCandidate>,
             knownPhrases: Set<String>,
             knownForms: Set<String>,
+            headwords: Set<String>,
+            foldAuxiliaries: Boolean = true,
         ): List<ReglobSpan> {
             val byStart = candidates.groupBy { it.startIndex }.mapValues { (_, group) ->
                 group.sortedWith(compareByDescending<PhraseCandidate> { it.windowLen }.thenBy { it.isVariant })
             }
             val result = mutableListOf<ReglobSpan>()
+            // End (exclusive) of the last single-token span's fold. Glue is
+            // never content, so a content token before it is an auxiliary
+            // verb, 無い or そう that span already covers.
+            var foldedUntil = 0
             var i = 0
             while (i < tokens.size) {
-                val match = byStart[i]?.firstOrNull { it.lookupForm in knownPhrases }
+                // A folded auxiliary is neither a word of its own nor a phrase
+                // start: a phrase there is a reading coincidence (いるか, 海豚)
+                // or a re-spelling of the auxiliary itself (頂きます), and
+                // letting it win would trim the span that folded it.
+                if (i < foldedUntil && tokens[i].category.isContent) {
+                    i++
+                    continue
+                }
+                // A window that would cut the word before it
+                // ([cutsPreviousWord]) fuses as a headword, or right after a
+                // phrase span this walk has closed, which folds nothing and so
+                // leaves no conjugation to cut; after an open word it stays
+                // out, whatever lists it.
+                val previousWordClosed = closedPhraseEndsAt(result, i)
+                val match = byStart[i]?.firstOrNull {
+                    it.lookupForm in knownPhrases &&
+                        (!it.cutsPreviousWord || previousWordClosed || it.lookupForm in headwords)
+                }
                 if (match != null) {
                     // Lemma-variant phrases (気になった → 気になる) carry a productive
                     // inflection on their final verb/adjective — tag it from that
@@ -1327,6 +1571,7 @@ class DictionaryManager private constructor(private val context: Context) {
                         JapaneseInflectionAnalyzer.analyze(
                             tokens[i + match.windowLen - 1],
                             tokens.subList(i + match.windowLen, i + match.tokensConsumed),
+                            match.lookupForm,
                         )
                     } else {
                         emptyList()
@@ -1370,7 +1615,7 @@ class DictionaryManager private constructor(private val context: Context) {
                         val glue = mutableListOf<JaToken>()
                         if (t.category.startsConjugation) {
                             var j = i + 1
-                            while (j < tokens.size && tokens[j].category.isConjugationGlue) {
+                            while (j < tokens.size && continuesConjugation(tokens, j, foldAuxiliaries)) {
                                 surfaceSpan += tokens[j].surface
                                 glue.add(tokens[j])
                                 j++
@@ -1381,20 +1626,32 @@ class DictionaryManager private constructor(private val context: Context) {
                             tokenStart = i, tokenCount = 1 + glue.size,
                             surface = surfaceSpan, lookupForm = lookupForm,
                             reading = reading,
-                            inflections = JapaneseInflectionAnalyzer.analyze(t, glue),
+                            inflections = JapaneseInflectionAnalyzer.analyze(t, glue, lookupForm),
                             isPhrase = false,
                         ))
+                        // Only an emitted span claims its fold: when the stem
+                        // is not lookup-worthy, its auxiliary gets its own span.
+                        foldedUntil = i + 1 + glue.size
                     }
                 }
-                // NOTE: i advances by ONE even after glue folding — the folded
-                // tokens are revisited (they're non-content, so they emit
-                // nothing themselves) BUT a phrase candidate starting inside
-                // the folded glue still gets its chance to match (言われるかも
-                // then かもしれない). That overlap is intentional; see
-                // [ReglobSpan].
+                // NOTE: i advances by ONE even after folding. The folded
+                // tokens are revisited so a phrase candidate starting at
+                // folded GLUE still gets its chance to match (言われるかも
+                // then かもしれない); that overlap is intentional, see
+                // [ReglobSpan]. Folded glue emits nothing itself (it is not
+                // content), and a folded auxiliary is skipped above.
                 i++
             }
             return result
+        }
+
+        /** Whether the last span [reglobSpans] emitted is a phrase ending
+         *  exactly at token [i], so the token before [i] closed it; a
+         *  single-token span may still be folding, and a phrase that ended
+         *  earlier left glue between that belongs to no span. */
+        private fun closedPhraseEndsAt(result: List<ReglobSpan>, i: Int): Boolean {
+            val last = result.lastOrNull() ?: return false
+            return last.isPhrase && last.tokenStart + last.tokenCount == i
         }
 
         // ── Ranking SQL constants ─────────────────────────────────────────
@@ -1472,6 +1729,176 @@ class DictionaryManager private constructor(private val context: Context) {
             WHERE h.text = ? AND r.text = ?
             ORDER BY e.freq_score DESC LIMIT 8
         """
+
+        /** What the deinflection stage resolved a word to: [entryIds], the ids
+         *  the winning candidate's text returned that accept it, in the order
+         *  they were returned, and [deinflection], its chain as tags,
+         *  dictionary form outward. */
+        internal data class DeinflectedHit(
+            val entryIds: List<Long>,
+            val deinflection: List<InflectionTag>,
+        )
+
+        /**
+         * The deinflection stage of [lookup] and [lookupReadingsOnly], one
+         * function so the two cannot resolve a word differently. Walks
+         * [JapaneseDeinflector.candidates] of [word] in their order (shortest
+         * chain first); for each, [entryIdsFor] its text and keeps the ids
+         * whose part-of-speech tokens ([posTokensFor]), as
+         * [JapaneseDeinflector.posFlags], pass [JapaneseDeinflector.accepts]
+         * for the candidate. The first candidate that keeps an id wins, with
+         * its transform keys mapped through [InflectionTag.fromKey]. A candidate whose text has no
+         * entries, or whose entries all reject it, is skipped; a candidate
+         * with conditions 0 (kansai-ben -たら, for one) accepts any entry,
+         * one with no recognized class included. Null when no candidate
+         * wins. Takes the pack reads as functions so it runs without a
+         * database; the instance binds them to [queryEntryIds] and
+         * [sensePosTokens].
+         */
+        internal fun firstAcceptedDeinflection(
+            word: String,
+            entryIdsFor: (String) -> List<Long>,
+            posTokensFor: (List<Long>) -> Map<Long, List<String>>,
+        ): DeinflectedHit? {
+            for (candidate in JapaneseDeinflector.candidates(word)) {
+                val ids = entryIdsFor(candidate.text)
+                if (ids.isEmpty()) continue
+                val posTokens = posTokensFor(ids)
+                val accepted = ids.filter { id ->
+                    JapaneseDeinflector.accepts(candidate, JapaneseDeinflector.posFlags(posTokens[id].orEmpty()))
+                }
+                if (accepted.isNotEmpty()) {
+                    return DeinflectedHit(accepted, candidate.transformKeys.mapNotNull(InflectionTag::fromKey))
+                }
+            }
+            return null
+        }
+
+        /** One other dictionary entry a looked-up word could be
+         *  ([alternativeCandidates]): [lookupForm] and [reading] are the key
+         *  [lookup] resolves to [entryId] first, and [tags] the chain from
+         *  that entry's dictionary form to the tapped surface, dictionary
+         *  form outward. */
+        internal data class AlternativeKey(
+            val lookupForm: String,
+            val reading: String?,
+            val tags: List<InflectionTag>,
+            val entryId: Long,
+        )
+
+        /** At most this many alternatives per tapped word. */
+        internal const val MAX_ALTERNATIVES = 3
+
+        /**
+         * The other entries a tapped word could be, besides [primaryIds] (the
+         * entries its own lookup returned), at most [cap], from three passes:
+         *
+         * 1. Homographs of [lookupForm]. When [surface] is [lookupForm], every
+         *    entry [entryIdsFor] returns, with [tokenTags]. When it differs (a
+         *    conjugated form), only the entries accepting a
+         *    [JapaneseDeinflector.candidates] of [surface] whose text is
+         *    [lookupForm], with that candidate's chain: 来た reaches 来る read
+         *    くる (a Kuru verb), not 来る read きたる (a Godan verb).
+         * 2. Deinflections of [lookupForm] (弾ける to 弾く, potential): each
+         *    candidate's accepting entries, its chain followed by [tokenTags].
+         * 3. Deinflections of [surface] to any other text (いった to 言う):
+         *    each candidate's accepting entries, its chain, which already ends
+         *    at [surface].
+         *
+         * An entry accepts a candidate by [firstAcceptedDeinflection]'s gate:
+         * its part-of-speech tokens ([posTokensFor]) as
+         * [JapaneseDeinflector.posFlags] pass [JapaneseDeinflector.accepts].
+         * Candidates keep their chain-length order and entries [entryIdsFor]'s
+         * ranked order; an entry in [primaryIds] or already offered is skipped.
+         *
+         * Each entry is offered under the first key [lookup]'s first two
+         * stages ([entryIdsWithReadingFor], else [entryIdsFor]) rank it first
+         * under, tried in order: for a kana candidate, which reaches an entry
+         * through one of its readings, that text as the reading (the tapped
+         * occurrence's: いった reaches 結う through いう, not its primary
+         * reading ゆう), with the candidate's text and then the entry's
+         * primary written form ([primaryFormsFor]); then the entry's primary
+         * reading with the same two forms, which is all a kanji candidate
+         * tries, as a written form says nothing about the reading (弾ける's
+         * 弾く is offered read ひく and read はじく). An entry no key ranks
+         * first is not offered (a kana text ranks by reading, and いる ranks
+         * 要る ahead of 居る). Takes the pack reads as functions so it runs
+         * without a database.
+         */
+        internal fun alternativeCandidates(
+            surface: String,
+            lookupForm: String,
+            tokenTags: List<InflectionTag>,
+            primaryIds: Set<Long>,
+            entryIdsFor: (String) -> List<Long>,
+            entryIdsWithReadingFor: (String, String) -> List<Long>,
+            posTokensFor: (List<Long>) -> Map<Long, List<String>>,
+            primaryFormsFor: (Long) -> Pair<String?, String?>,
+            cap: Int = MAX_ALTERNATIVES,
+        ): List<AlternativeKey> {
+            val out = mutableListOf<AlternativeKey>()
+            val taken = primaryIds.toMutableSet()
+
+            fun rankedFirst(form: String, reading: String?): Long? =
+                reading?.let { entryIdsWithReadingFor(form, it) }.orEmpty()
+                    .ifEmpty { entryIdsFor(form) }
+                    .firstOrNull()
+
+            fun offer(text: String, ids: List<Long>, tags: List<InflectionTag>) {
+                // A kana candidate reaches an entry through one of its readings, so
+                // that reading is the tapped occurrence's (いった reaches 結う through
+                // いう, not its first reading ゆう); a kanji candidate reaches it
+                // through a written form and says nothing about the reading.
+                val matched = text.takeIf { it.all(Deinflector::isKana) }
+                for (id in ids) {
+                    if (out.size >= cap) return
+                    if (id in taken) continue
+                    val (written, primary) = primaryFormsFor(id)
+                    val key = buildList {
+                        if (matched != null) {
+                            add(text to matched)
+                            written?.let { add(it to matched) }
+                        }
+                        add(text to primary)
+                        written?.let { add(it to primary) }
+                    }.distinct().firstOrNull { (form, reading) -> rankedFirst(form, reading) == id } ?: continue
+                    taken += id
+                    out += AlternativeKey(key.first, key.second, tags, id)
+                }
+            }
+
+            fun accepting(candidate: Deinflection): List<Long> {
+                val ids = entryIdsFor(candidate.text)
+                if (ids.isEmpty()) return ids
+                val posTokens = posTokensFor(ids)
+                return ids.filter { id ->
+                    JapaneseDeinflector.accepts(candidate, JapaneseDeinflector.posFlags(posTokens[id].orEmpty()))
+                }
+            }
+
+            fun chain(candidate: Deinflection): List<InflectionTag> =
+                candidate.transformKeys.mapNotNull(InflectionTag::fromKey)
+
+            val conjugated = surface != lookupForm
+            val surfaceCandidates = if (conjugated) JapaneseDeinflector.candidates(surface) else emptyList()
+            if (!conjugated) {
+                offer(lookupForm, entryIdsFor(lookupForm), tokenTags)
+            } else {
+                for (c in surfaceCandidates) {
+                    if (out.size >= cap) return out
+                    if (c.text == lookupForm) offer(c.text, accepting(c), chain(c))
+                }
+            }
+            for (c in JapaneseDeinflector.candidates(lookupForm)) {
+                if (out.size >= cap) return out
+                offer(c.text, accepting(c), chain(c) + tokenTags)
+            }
+            for (c in surfaceCandidates) {
+                if (out.size >= cap) return out
+                if (c.text != lookupForm) offer(c.text, accepting(c), chain(c))
+            }
+            return out
+        }
 
         /**
          * Ranked prefix-scan entry IDs for [query], the core of [searchPrefix].

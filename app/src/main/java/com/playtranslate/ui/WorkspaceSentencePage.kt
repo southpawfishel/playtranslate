@@ -114,12 +114,21 @@ class WorkspaceSentencePage(
      *  lens's snapshot as the fallback. */
     private fun liveSentenceContext(): SentenceContext = vm.sentenceContext(args.sentenceContext)
 
-    private fun pushWordPage(word: String, reading: String?) {
+    private fun pushWordPage(
+        word: String,
+        reading: String?,
+        surface: String?,
+        lookupForm: String,
+        lookupReading: String?,
+    ) {
         val host = hostRef ?: return
         host.push(
             WorkspaceWordDetailPage(
                 word = word,
                 reading = reading,
+                surface = surface,
+                lookupForm = lookupForm,
+                lookupReading = lookupReading,
                 screenshotPath = args.screenshotPath,
                 audioAnchorMs = args.audioAnchorMs,
                 sentenceContext = { liveSentenceContext() },
@@ -160,12 +169,13 @@ class WorkspaceSentencePage(
          *  word page, the Anki chip pushes the word editor. */
         override fun wireLensActions(lens: MagnifierLens, resolved: SourceWordLookup.ResolvedAt) {
             val unit = resolved.word
-            val phrase = resolved.phrase
-            val secondaries = phrase?.let { listOf(it) } ?: resolved.members
+            val secondaries = resolved.secondaries()
             fun context(u: SourceWordLookup.Resolved) = LensActionContext(
-                u.word, u.reading, u.entry, args.sentence, args.screenshotPath,
+                u.word, u.reading, u.surface, u.entry, args.sentence, args.screenshotPath,
                 audioAnchorMs = args.audioAnchorMs,
                 entries = u.entries,
+                lookupForm = u.lookupForm,
+                lookupReading = u.lookupReading,
             )
             SourceLensActions(
                 ctx.applicationContext, host.displayId, host.overlayHost, lens,
@@ -175,6 +185,9 @@ class WorkspaceSentencePage(
                     WorkspaceWordDetailPage(
                         word = a.word,
                         reading = a.reading,
+                        surface = a.surface,
+                        lookupForm = a.lookupForm,
+                        lookupReading = a.lookupReading,
                         screenshotPath = a.screenshotPath,
                         audioAnchorMs = a.audioAnchorMs,
                         sentenceContext = { liveSentenceContext() },
@@ -186,7 +199,13 @@ class WorkspaceSentencePage(
             ) { context(unit) }
         }
 
-        override fun onWordTapped(word: String, reading: String?) = pushWordPage(word, reading)
+        override fun onWordTapped(
+            word: String,
+            reading: String?,
+            surface: String?,
+            lookupForm: String,
+            lookupReading: String?,
+        ) = pushWordPage(word, reading, surface, lookupForm, lookupReading)
 
         override fun onChangeLanguage(isSource: Boolean) {
             host.push(if (isSource) SourceListPage() else TargetListPage())

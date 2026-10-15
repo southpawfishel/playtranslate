@@ -10,6 +10,7 @@ import android.graphics.Rect
 import android.os.SystemClock
 import android.util.Log
 import android.view.Choreographer
+import com.playtranslate.language.SourceLangId
 import com.playtranslate.language.SourceLanguageProfiles
 import com.playtranslate.language.TextDirection
 import com.playtranslate.model.OcrProvenance
@@ -117,7 +118,7 @@ class PinholeOverlayMode(
      *  features are off and swallows its own failures. */
     private fun recordShown(
         groups: List<FarGroup>,
-        src: String,
+        src: SourceLangId,
         tgt: String,
         boxFor: (Int) -> TextBox?,
     ) {
@@ -131,10 +132,10 @@ class PinholeOverlayMode(
         }
     }
 
-    /** The recording pair at this instant (translation code + target). */
-    private fun recordPair(): Pair<String, String> {
+    /** The recording pair at this instant (exact source language + target). */
+    private fun recordPair(): Pair<SourceLangId, String> {
         val prefs = Prefs(service)
-        return SourceLanguageProfiles[prefs.sourceLangId].translationCode to prefs.targetLang
+        return prefs.sourceLangId to prefs.targetLang
     }
 
     private enum class PinholeResult { KEEP, REMOVE }
@@ -1639,13 +1640,16 @@ class PinholeOverlayMode(
      * synchronous JPEG write of the frame, wasted whenever the panel is
      * hidden (single-screen mode, the default). Boxes go out in cachedBoxes
      * order, as this tier always has (no reading-order sort — deliberate
-     * byte-parity with the shipped behavior).
+     * byte-parity with the shipped behavior). The gate is this tier's; the
+     * service then drops a delivery identical to what the panel shows (a
+     * remove-then-replace of the same text) before the screenshot write
+     * ([PanelEmissionDedup], at the delivery layer).
      */
     private fun sendFullStateToPanel(screenshotPath: () -> String?) {
         val boxes = cachedBoxes ?: return
         if (!service.appPanelVisible()) return
         service.emitPanelResult(
-            OverlayToolkit.panelTexts(boxes), screenshotPath(),
+            displayId, OverlayToolkit.panelTexts(boxes), screenshotPath,
             ocrProvenance = panelProvenance,
             backendDisplayName = OverlayToolkit.panelBackendLabel(boxes),
         )

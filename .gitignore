@@ -5,6 +5,7 @@ local.properties
 build/
 app/build/
 .gradle/
+.kotlin/
 
 # Android SDK / JDK (bundled toolchain, not part of source)
 .sdk/
@@ -26,6 +27,11 @@ third-party/**/docs/
 # Python cache from scripts/
 __pycache__/
 *.pyc
+
+# R8 mapping of each release build, archived by app/build.gradle.kts
+# (archiveReleaseMapping) for retracing crash logs; local only. The README
+# beside them is tracked.
+releases/mapping-*.txt
 
 # Release APK (distributed via GitHub Releases, not committed)
 *.apk

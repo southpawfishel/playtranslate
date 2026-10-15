@@ -41,11 +41,22 @@ class PlayTranslateApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // The kept window contexts belong to the Application that made them.
+        // A no-op in production (nothing reads a display before this); under
+        // Robolectric a fork's later tests would read through an earlier
+        // test's torn-down environment.
+        DisplayWindowContexts.reset()
         CrashHandler.install(this)
         // Translation-waterfall forensics (failure ring + connectivity
         // summary for the log-export header). Before the registry init so
         // the first waterfall pass can already record.
         com.playtranslate.diagnostics.TranslationDiag.init(this)
+        // Process-death forensics for the same header: the platform's
+        // record of why earlier processes died, read at export time.
+        com.playtranslate.diagnostics.ProcessExitDiag.init(this)
+        // Was the previous process killed with the floating controls on?
+        // Decided once, here, before any writer can overwrite the record.
+        com.playtranslate.capture.SessionMarker.evaluate(this)
         // Collect Anki screenshot pins orphaned by a crash/process death
         // (their send's finally never ran). Also swept opportunistically on
         // every pin; this catches the "never sends again" tail. Off-main:
@@ -218,6 +229,19 @@ class PlayTranslateApplication : Application() {
         // at lifecycle boundaries — Android can move an activity between
         // displays without firing onPause/onResume when configChanges
         // swallows the screenLayout swap, leaving any cached id stale.
+        // The registry starts empty: no activity of this process resumed
+        // before its Application was created. Said explicitly because the
+        // registry is static and outlives this instance: under Robolectric
+        // every test creates a new Application in a JVM whose statics
+        // persist, and an activity a previous test resumed and never paused
+        // stayed registered, held by that test's controller until the
+        // collector ran, so a later test's foregroundDisplayId reached into
+        // a torn-down environment and threw (ErrorPillSettingsGearTest, 11
+        // of 17, 2026-10-11; whether it showed depended on which fork ran
+        // the suite and what had run there before). The ops queued for the
+        // next resume are static for the same reason and start empty too.
+        resumedActivity = null
+        pendingForegroundOps.clear()
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
                 resumedActivity = WeakReference(activity)

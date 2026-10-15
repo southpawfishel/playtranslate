@@ -170,7 +170,19 @@ class Prefs internal constructor(
 
     var targetLang: String
         get() = sp.getString(KEY_TARGET_LANG, TranslateLanguage.ENGLISH) ?: TranslateLanguage.ENGLISH
-        set(v) = sp.edit { putString(KEY_TARGET_LANG, v) }
+        private set(v) = sp.edit { putString(KEY_TARGET_LANG, v) }
+
+    /** The ONE write of the target pair. [targetLang] and [targetChineseVariant]
+     *  are two stored fields read separately (the backend code everywhere, the
+     *  script only at conversion and display), so they are written together: a
+     *  writer that set the code alone left a Traditional-locale device on
+     *  Simplified (the welcome page, 2026-10-06). A non-Chinese [code] resets the
+     *  variant to Simplified, a no-op for it. */
+    fun setTarget(code: String, chineseVariant: ChineseScriptVariant = ChineseScriptVariant.SIMPLIFIED) =
+        sp.edit {
+            putString(KEY_TARGET_LANG, code)
+            putString(KEY_TARGET_CHINESE_VARIANT, chineseVariant.code)
+        }
 
     /**
      * The Chinese script variant for target output, meaningful only when
@@ -183,7 +195,7 @@ class Prefs internal constructor(
      */
     var targetChineseVariant: ChineseScriptVariant
         get() = ChineseScriptVariant.fromCode(sp.getString(KEY_TARGET_CHINESE_VARIANT, null))
-        set(v) = sp.edit { putString(KEY_TARGET_CHINESE_VARIANT, v.code) }
+        private set(v) = sp.edit { putString(KEY_TARGET_CHINESE_VARIANT, v.code) }
 
     /** The current (source, target, variant) translation context — what a freshly
      *  produced result is translated under. [sourceOverride] pins the source for a
@@ -225,6 +237,22 @@ class Prefs internal constructor(
     fun setOcrBackendToken(id: SourceLangId, token: String) =
         sp.edit { putString("ocr_backend_${id.code}", token) }
     fun clearOcrBackendToken(id: SourceLangId) = sp.edit { remove("ocr_backend_${id.code}") }
+
+    /** The selection [scope] resolves for [id]: a tool's own token when set, else
+     *  the global one. The ONE place the inherit-until-set rule lives; every
+     *  resolver and label reads it through `OcrModelManager.selectedBackend`. */
+    fun ocrBackendToken(id: SourceLangId, scope: OcrTokenScope): String? = when (scope) {
+        OcrTokenScope.GLOBAL -> ocrBackendToken(id)
+        OcrTokenScope.CAMERA -> cameraOcrBackendToken(id) ?: ocrBackendToken(id)
+        OcrTokenScope.IMPORT -> importOcrBackendToken(id) ?: ocrBackendToken(id)
+    }
+
+    /** Persist [token] as [scope]'s own selection for [id]. */
+    fun setOcrBackendToken(id: SourceLangId, token: String, scope: OcrTokenScope) = when (scope) {
+        OcrTokenScope.GLOBAL -> setOcrBackendToken(id, token)
+        OcrTokenScope.CAMERA -> setCameraOcrBackendToken(id, token)
+        OcrTokenScope.IMPORT -> setImportOcrBackendToken(id, token)
+    }
 
     /** The slow-OCR rescue prompt was answered for [id] — either way, it
      *  never shows again for that language (the OCR picker is the standing
@@ -419,18 +447,21 @@ class Prefs internal constructor(
     }
 
     /**
-     * Persistent counterpart to [CaptureService.activeRegion]: resolves the
-     * region for the first id in [captureDisplayIds] from the per-display
-     * selection map, falling back to the first list entry (full screen).
-     * Use as the in-app UI fallback when [CaptureService] isn't bound yet
-     * (e.g., the initial render before onServiceConnected) — once the
-     * service is up, prefer its `activeRegion` so `lastInteractedDisplayId`
-     * can steer the answer.
+     * Persistent counterpart to [CaptureService.activeRegion]: the region
+     * selected for [primaryDisplayId] from the per-display selection map,
+     * falling back to the first list entry (full screen). Use as the in-app
+     * UI fallback when [CaptureService] isn't bound yet (e.g., the initial
+     * render before onServiceConnected) — once the service is up, prefer its
+     * `activeRegion` so `lastInteractedDisplayId` can steer the answer. The
+     * caller resolves the id through the backend shim
+     * (MainActivity.resolvedPrimaryDisplayId), so a selection naming a
+     * display the backend cannot capture reads the region of the display
+     * the service will actually capture, which the region picker also writes
+     * under; until 2026-10-14 this read the first saved id as stored.
      */
-    fun primaryDisplayRegion(): RegionEntry {
+    fun primaryDisplayRegion(primaryDisplayId: Int): RegionEntry {
         val list = getRegionList()
-        val primaryId = captureDisplayIds.firstOrNull() ?: android.view.Display.DEFAULT_DISPLAY
-        val id = selectedRegionIdForDisplay(primaryId)
+        val id = selectedRegionIdForDisplay(primaryDisplayId)
         return if (id.isNotEmpty()) list.find { it.id == id } ?: list.first() else list.first()
     }
 
@@ -1482,6 +1513,40 @@ class Prefs internal constructor(
         get() = sp.getBoolean(KEY_QUICK_TILE_ADDED, false)
         set(v) = sp.edit { putBoolean(KEY_QUICK_TILE_ADDED, v) }
 
+    /** True once the one-time "add the Quick Settings tile" prompt at the
+     *  end of onboarding has been offered, or was found not to apply (the
+     *  user had already finished onboarding before the prompt existed). See
+     *  [com.playtranslate.ui.QuickTilePromptPolicy]. */
+    var quickTilePromptDone: Boolean
+        get() = sp.getBoolean(KEY_QUICK_TILE_PROMPT_DONE, false)
+        set(v) = sp.edit { putBoolean(KEY_QUICK_TILE_PROMPT_DONE, v) }
+
+    /** The boot the floating controls were last turned on in, as the OS's
+     *  BOOT_COUNT, or -1 while they are off. Paired with
+     *  [sessionOnProcessStart]; written only through
+     *  [com.playtranslate.capture.SessionMarker]. */
+    var sessionOnBoot: Int
+        get() = sp.getInt(KEY_SESSION_ON_BOOT, -1)
+        set(v) = sp.edit { putInt(KEY_SESSION_ON_BOOT, v) }
+
+    /** Start time (Process.getStartElapsedRealtime) of the process that
+     *  turned the controls on; see [sessionOnBoot]. */
+    var sessionOnProcessStart: Long
+        get() = sp.getLong(KEY_SESSION_ON_PROCESS_START, 0L)
+        set(v) = sp.edit { putLong(KEY_SESSION_ON_PROCESS_START, v) }
+
+    /** Pid of that process, to find its death in the platform's exit
+     *  records; see [sessionOnBoot]. */
+    var sessionOnPid: Int
+        get() = sp.getInt(KEY_SESSION_ON_PID, 0)
+        set(v) = sp.edit { putInt(KEY_SESSION_ON_PID, v) }
+
+    /** True once the user has opened the "Keep PlayTranslate running" page.
+     *  The alert that points there stops showing after that. */
+    var keepRunningPageSeen: Boolean
+        get() = sp.getBoolean(KEY_KEEP_RUNNING_PAGE_SEEN, false)
+        set(v) = sp.edit { putBoolean(KEY_KEEP_RUNNING_PAGE_SEEN, v) }
+
     /** Debug-only: forces isSingleScreen() to return true regardless of actual display count. */
     var debugForceSingleScreen: Boolean
         get() = sp.getBoolean(KEY_DEBUG_FORCE_SINGLE_SCREEN, false)
@@ -1832,6 +1897,11 @@ class Prefs internal constructor(
          *  so a fresh instance shows as selected in the picker rather than as
          *  a custom entry. */
         const val DEFAULT_CLAUDE_MODEL    = "claude-haiku-4-5-20251001"
+        /** The only model Index-Translate's /v1/models lists (2026-10-14): a
+         *  35B mixture-of-experts with 3B active parameters, so it is also
+         *  the endpoint's fast tier. Bilibili calls it a preview that is
+         *  still training, and the id carries no version. */
+        const val DEFAULT_INDEX_TRANSLATE_MODEL = "Index-Translate-35B-A3B"
         private const val KEY_LEGACY_THEME_INDEX    = "theme_index"
         const val KEY_THEME_MODE                    = "theme_mode"
         const val KEY_ACCENT_NAME                   = "accent_name"
@@ -1876,6 +1946,11 @@ class Prefs internal constructor(
         const val KEY_HOTKEY_CAPTURE_TAP                   = "hotkey_capture_tap"
         const val KEY_HOTKEY_CHANGE_GAME_LANGUAGE_TAP      = "hotkey_change_game_language_tap"
         const val KEY_QUICK_TILE_ADDED                     = "quick_tile_added"
+        const val KEY_QUICK_TILE_PROMPT_DONE               = "quick_tile_prompt_done"
+        const val KEY_SESSION_ON_BOOT                      = "session_on_boot"
+        const val KEY_SESSION_ON_PROCESS_START             = "session_on_process_start"
+        const val KEY_SESSION_ON_PID                       = "session_on_pid"
+        const val KEY_KEEP_RUNNING_PAGE_SEEN               = "keep_running_page_seen"
         /** Public so the in-app result header's "Show on screen" toggle can
          *  [observe] it and stay in sync with the Settings row. */
         const val KEY_HIDE_GAME_OVERLAYS                   = "hide_game_overlays"

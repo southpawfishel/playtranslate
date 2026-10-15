@@ -36,19 +36,28 @@ import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.bunpro.GrammarMatch
 import com.playtranslate.language.DefinitionResolver
 import com.playtranslate.language.DefinitionResult
+import com.playtranslate.language.InflectedForm
+import com.playtranslate.language.InflectionTag
+import com.playtranslate.language.inflection.ConjugationTable
+import com.playtranslate.language.inflection.TableKind
+import com.playtranslate.language.inflection.InflectionParadigms
 import com.playtranslate.language.LanguagePackCatalogLoader
 import com.playtranslate.language.OfflineFallbackTranslators
 import com.playtranslate.language.SourceLangId
 import com.playtranslate.language.TatoebaClient
 import com.playtranslate.language.TargetGlossDatabaseProvider
+import com.playtranslate.language.TokenSpan
 import com.playtranslate.language.WordTranslator
 import com.playtranslate.language.dedupeMtCsv
 import com.playtranslate.model.CharacterDetail
 import com.playtranslate.model.DictionaryEntry
 import com.playtranslate.model.HanziDetail
+import com.playtranslate.model.HeadwordDisplay
 import com.playtranslate.model.KanjiDetail
 import com.playtranslate.model.headwordDisplay
+import com.playtranslate.model.headwordFor
 import com.playtranslate.model.orderedReadingRows
+import com.playtranslate.model.preferDisplayable
 import com.playtranslate.model.selectHeadword
 import com.playtranslate.model.unambiguousFallbackPos
 import com.playtranslate.themeColor
@@ -59,6 +68,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -88,6 +98,10 @@ class WordDetailBinder(
     data class Args(
         val word: String,
         val reading: String?,
+        /** The text the opener found [word] as (飲んでいなかった for 飲む):
+         *  re-tokenized for the header's conjugation line. Null when the
+         *  opener has only the lemma. */
+        val surface: String?,
         val screenshotPath: String?,
         val sentenceOriginal: String? = null,
         val sentenceTranslation: String? = null,
@@ -97,6 +111,21 @@ class WordDetailBinder(
          *  workspace page): the headword scrolls with the content instead of
          *  shrinking into a toolbar slot the host doesn't render. */
         val embedded: Boolean = false,
+        /** The key the page resolves its entry with: the dictionary form the
+         *  opener resolved the entry under, as opposed to [word], the display
+         *  that seeds the header and the Anki card. The two differ where the
+         *  opener displayed something other than its key, such as the kana
+         *  of a usually-kana entry (あずかる for 与る), whose kana lookup can
+         *  rank another entry (預かる) first. Defaults to [word] for an
+         *  opener with no key of its own. */
+        val lookupForm: String = word,
+        /** The reading that narrowed [lookupForm]'s lookup, null when none;
+         *  for the lookup only. For a conjugated occurrence it is the
+         *  surface's reading (こだわっ for 拘って), which names no reading row
+         *  of the entry: the header's bold row and the Anki and one-tap
+         *  headwords follow [reading], what the opener showed. Defaults to
+         *  [reading] for an opener with no key of its own. */
+        val lookupReading: String? = reading,
     )
 
     /** Everything the editable word review needs — the host decides HOW to
@@ -136,8 +165,16 @@ class WordDetailBinder(
         fun sentenceContext(): SentenceContext?
 
         /** Cross-reference / member-word tap: open that word's own detail
-         *  (nested sheet on childFragmentManager, or a workspace push). */
-        fun openWordDetail(word: String, reading: String?)
+         *  (nested sheet on childFragmentManager, or a workspace push).
+         *  [surface] is [Args.surface] for the opened page, [lookupForm] and
+         *  [lookupReading] its [Args.lookupForm] and [Args.lookupReading]. */
+        fun openWordDetail(
+            word: String,
+            reading: String?,
+            surface: String?,
+            lookupForm: String,
+            lookupReading: String?,
+        )
 
         /** Open the editable word review for [args]. The host owns the
          *  AnkiDroid-permission gate (rationale + request on an Activity;
@@ -193,9 +230,12 @@ class WordDetailBinder(
     private var headerBadgeFlow: FlowLayout? = null
     private var headerWord: String? = null
 
-    /** The occurrence reading the caller passed (e.g. 明日 → あす). Bolds the
-     *  matching reading row and drives the occurrence-aware Anki fields;
-     *  null on a cold lookup. */
+    /** The reading the opener showed ([Args.reading], e.g. 明日 → あす):
+     *  bolds the matching reading row and picks the Anki and one-tap
+     *  headwords inside the entry the key resolved. Never the key's reading
+     *  ([Args.lookupReading]), which for a conjugated occurrence is the
+     *  surface's and matches no row; null on a cold lookup or a kana-only
+     *  display. */
     private var readingHint: String? = null
     private val deckPillTag = "anki_deck_pill"
     private val bunproPillTag = "bunpro_srs_pill"
@@ -209,9 +249,10 @@ class WordDetailBinder(
      *  predecessor the same way). */
     private var styledImportedView: YomitanDefinitionsView? = null
 
-    /** Member cells of the Words section that own a styled renderer of their
-     *  own ([WordResultCell.releaseStyled]) — released with the page, and at
-     *  the start of every rebuild of that section. */
+    /** Cells of the Words and Other matches sections that own a styled
+     *  renderer of their own ([WordResultCell.releaseStyled]): released
+     *  with the page, and by [loadSecondarySections] before it builds
+     *  those sections. */
     private val memberStyledCells = mutableListOf<WordResultCell>()
 
     /** Host teardown: cancel audio, destroy the WebView. Idempotent; the
@@ -230,7 +271,7 @@ class WordDetailBinder(
         releaseMemberStyledCells()
     }
 
-    /** Drop the Words section's per-cell styled renderers. */
+    /** Drop the word-cell sections' per-cell styled renderers. */
     private fun releaseMemberStyledCells() {
         memberStyledCells.forEach { it.releaseStyled() }
         memberStyledCells.clear()
@@ -241,7 +282,10 @@ class WordDetailBinder(
      *  toolbar's visibility). */
     fun bind(root: View, args: Args) {
         this.args = args
+        // [word] is what the page shows and saves (the header seed, the Anki
+        // card's word); [lookupForm] is what it resolves and selects with.
         val word = args.word
+        val lookupForm = args.lookupForm
         readingHint = args.reading
         val screenshotPath = args.screenshotPath
         val embedded = args.embedded
@@ -362,8 +406,18 @@ class WordDetailBinder(
             val resolver = DefinitionResolver(engine, targetGlossDb,
                 OfflineFallbackTranslators.forPair(engine.profile.translationCode, targetLangCode), targetLangCode,
                 enToTargetWrapper, charConverter)
-            val defResult = withContext(Dispatchers.IO) { resolver.lookup(word, readingHint) }
+            val defResult = withContext(Dispatchers.IO) { resolver.lookup(lookupForm, args.lookupReading) }
             val response = defResult?.response
+            // The header's conjugation line: the lookup's own deinflection
+            // chain, then the chain from the key to the surface the opener
+            // found it as ([detailSurfaceTags]). A surface equal to the key
+            // adds no chain of its own.
+            val surface = args.surface
+            val tokenTags = surface?.takeIf { it != lookupForm }?.let { s ->
+                detailSurfaceTags(withContext(Dispatchers.IO) { engine.tokenize(s) }, s, lookupForm) { span ->
+                    engine.alternativesOf(span, primaryIds = emptySet())
+                }
+            }.orEmpty()
             // Wiktionary-derived source packs (en/de/fr/es/...) split each
             // POS section into its own entry, so a lookup of "surprise"
             // returns three entries: noun, verb, intj. Render them all back
@@ -374,10 +428,32 @@ class WordDetailBinder(
             // headwords are duplicated across entries anyway).
             val entries = response?.entries.orEmpty()
             val primary = entries.firstOrNull()
-            // Hold the whole completion bind — not just the styled block —
+            val inflectedForms = InflectionChain.lines(
+                surface ?: lookupForm, response?.deinflection.orEmpty(), tokenTags,
+                InflectionParadigms.readingsOf(sourceLangId, entries, primary?.slug),
+            )
+            // The conjugation cards: each entry's whole table from the pack
+            // ([SourceLanguageEngine.inflectionTable]), laid out by the
+            // language's paradigm with the form the user arrived from lit.
+            // One per table-bearing entry: the page already renders every
+            // entry's senses (fue lists ser and ir), so the ser page carries
+            // ir's grid below ser's, labelled by lemma.
+            val tables: List<Pair<DictionaryEntry, ConjugationTable>> = withContext(Dispatchers.IO) {
+                val paradigm = InflectionParadigms[sourceLangId]
+                if (paradigm == null) emptyList() else entries.mapNotNull { e ->
+                    engine.inflectionTable(e)
+                        ?.let { paradigm.table(e.slug, it, highlight = surface ?: lookupForm) }
+                        ?.let { e to it }
+                }
+            }
+            // Hold the whole completion bind, not just the styled block,
             // until the host's entrance settles: a partial (native-first)
             // render with a styled upgrade behind it is the flat-then-styled
-            // flash family the popup had to engineer away. One reveal.
+            // flash family the popup had to engineer away. One reveal for
+            // the primary content and the Anki button; the Words and Other
+            // matches sections follow it ([loadSecondarySections]) behind a
+            // loading line, each built in one pass with its styled payloads
+            // fetched first.
             ui.awaitEnterSettled()
             if (!ui.isAlive) return@launch
             content.removeView(loadingView)
@@ -389,9 +465,13 @@ class WordDetailBinder(
                 entries.flatMap { it.senses }.map { s -> s.examples.map { it.translation } }
             } else null
             val translationRegistry = mutableMapOf<Pair<Int, Int>, TextView>()
-            buildContent(
+            // The word as found, under its key, for its other matches: the
+            // same chain the header draws from it.
+            val wordSpan = TokenSpan(surface ?: lookupForm, lookupForm, args.lookupReading, tokenTags)
+            val display = pageHeadwordDisplay(primary, word, lookupForm)
+            val secondaryHost = buildContent(
                 content, entries, engine, sourceLangId, defResult, initialTranslations,
-                translationRegistry, targetLangCode, enToTargetWrapper, word,
+                translationRegistry, targetLangCode, enToTargetWrapper, display, inflectedForms, tables,
             )
             scrollView?.scrollTo(0, 0)
 
@@ -405,16 +485,25 @@ class WordDetailBinder(
                 if (!ankiManager.isAnkiDroidInstalled()) {
                     ui.showAnkiNotInstalled()
                 } else {
-                    ui.openAnkiReview(ankiReviewArgs(word, primary, screenshotPath, defResult))
+                    ui.openAnkiReview(ankiReviewArgs(word, lookupForm, primary, screenshotPath, defResult))
                 }
             }
             btnAddAnki.setOnLongClickListener {
                 if (!ankiManager.isAnkiDroidInstalled()) {
                     ui.showAnkiNotInstalled()
                 } else {
-                    oneTapWordFromDetail(pill, word, primary, entries, screenshotPath, defResult)
+                    oneTapWordFromDetail(pill, word, lookupForm, primary, entries, screenshotPath, defResult)
                 }
                 true
+            }
+
+            // The Words and Other matches rows can machine-translate, so they
+            // load after the Anki button is bound, into the host buildContent
+            // left in their place.
+            launch {
+                loadSecondarySections(
+                    secondaryHost, primary, entries, wordSpan, engine, sourceLangId, targetLangCode, display,
+                )
             }
 
             if (targetLangCode != "en") {
@@ -497,16 +586,17 @@ class WordDetailBinder(
      * Computes the (reading, pos, definition) triple shared by both
      * the review-open path and the one-tap path. Pulling this out keeps
      * the two paths in lockstep on which definition the user sees and
-     * what lands on the card.
+     * what lands on the card. The reading is the one of the headword the
+     * page's key [lookupForm] names.
      */
     private fun buildAnkiWordFields(
         entry: DictionaryEntry,
         defResult: DefinitionResult?,
-        word: String,
+        lookupForm: String,
     ): Triple<String, String, String> {
         // Honor the occurrence reading the lens showed (明日 → あす); fall back to
         // the primary headword when there was none.
-        val hw = entry.selectHeadword(word, word, readingHint)
+        val hw = entry.selectHeadword(lookupForm, lookupForm, readingHint)
         val reading = hw?.reading?.takeIf { it != hw.written } ?: ""
 
         val pos = entry.senses.firstOrNull()?.partsOfSpeech
@@ -550,14 +640,16 @@ class WordDetailBinder(
     /** The sentence context an Anki action rides: the host's live provider
      *  first (the embedded host activity / the workspace caller's snapshot),
      *  else the launch-time [Args] fields — mirroring the fragment's
-     *  hostContext-vs-arguments fallback per field. */
+     *  hostContext-vs-arguments fallback per field. The card's word is the
+     *  display [word]; its fields come from the headword [lookupForm] names. */
     private fun ankiReviewArgs(
         word: String,
+        lookupForm: String,
         entry: DictionaryEntry,
         screenshotPath: String?,
         defResult: DefinitionResult?,
     ): WordAnkiArgs {
-        val (reading, pos, definition) = buildAnkiWordFields(entry, defResult, word)
+        val (reading, pos, definition) = buildAnkiWordFields(entry, defResult, lookupForm)
         val a = args
         val hostContext = ui.sentenceContext()
         val sentenceOriginal = hostContext?.original ?: a?.sentenceOriginal
@@ -594,12 +686,13 @@ class WordDetailBinder(
     private fun oneTapWordFromDetail(
         pill: PillAnkiButton,
         word: String,
+        lookupForm: String,
         entry: DictionaryEntry,
         entries: List<DictionaryEntry>,
         screenshotPath: String?,
         defResult: DefinitionResult?,
     ) {
-        val fallback = ankiReviewArgs(word, entry, screenshotPath, defResult)
+        val fallback = ankiReviewArgs(word, lookupForm, entry, screenshotPath, defResult)
         val ankiManager = AnkiManager(ctx)
         if (!ankiManager.hasPermission()) {
             ui.openAnkiReview(fallback)
@@ -641,8 +734,10 @@ class WordDetailBinder(
         val appCtx = ctx.applicationContext
         // Built before the send detaches from this surface's lifecycle — it
         // reads the target-lang pref, which must resolve now.
-        val (reading, pos, definition) = buildAnkiWordFields(entry, defResult, word)
-        val hw = entry.headwordDisplay(entry.selectHeadword(word, word, readingHint), word)
+        val (reading, pos, definition) = buildAnkiWordFields(entry, defResult, lookupForm)
+        // The headword the key names, with the display [word] as the seen
+        // surface deciding the kana-only collapse.
+        val hw = entry.headwordDisplay(entry.selectHeadword(lookupForm, lookupForm, readingHint), word)
         // Ui.launchOneTap: dismissing the page mid-send must not cancel the
         // card; result handling runs only while the surface is live, else
         // degrades to an app-context toast.
@@ -714,6 +809,9 @@ class WordDetailBinder(
         }
     }
 
+    /** Builds the page's primary content into [content] and returns the
+     *  host [loadSecondarySections] fills with the Words and Other matches
+     *  sections: appended last, holding a loading line until they land. */
     private suspend fun buildContent(
         content: LinearLayout,
         entries: List<DictionaryEntry>,
@@ -724,15 +822,17 @@ class WordDetailBinder(
         translationRegistry: MutableMap<Pair<Int, Int>, TextView>,
         targetLangCode: String,
         enToTargetTranslator: WordTranslator?,
-        queriedWord: String,
-    ) {
+        display: HeadwordDisplay,
+        inflectedForms: List<InflectedForm>,
+        tables: List<Pair<DictionaryEntry, ConjugationTable>> = emptyList(),
+    ): LinearLayout {
         // [primary] is the first entry. Header / Anki / character-breakdown
         // sections are word-level, so they pull from primary even when the
         // sense list below merges senses from sibling entries (typical for
         // Wiktionary-derived packs that POS-split into separate entries).
         val primary = entries.first()
         // ── Header block: headword + reading + badges ─────────────────────
-        addHeaderBlock(content, primary, sourceLangId, queriedWord)
+        addHeaderBlock(content, primary, sourceLangId, display, inflectedForms)
 
         // ── Definitions group ─────────────────────────────────────────────
         // Target-driven render path: for non-English targets with a Native
@@ -806,10 +906,12 @@ class WordDetailBinder(
         }
         content.addView(grammarAnchor)
         // Same sentence resolution the Anki/example sections use: live host
-        // context first, launch-time args second.
+        // context first, launch-time args second. The span is the text as the
+        // opener found it (the conjugated surface), so grammar inside the
+        // inflection matches too.
         maybeAddGrammarSection(
             grammarAnchor,
-            queriedWord,
+            args?.surface ?: args?.word ?: display.written,
             ui.sentenceContext()?.original ?: args?.sentenceOriginal,
         )
 
@@ -937,6 +1039,25 @@ class WordDetailBinder(
             }
         }
 
+        // ── Conjugation / Declension / Forms (Wiktionary packs with inflection tables) ──
+        // The header names what the table is of (a verb's conjugation, a German
+        // noun's declension, an English word's forms), and the card names its
+        // lemma whenever that is not the page's headword (vino's page lists
+        // venir's senses and so carries venir's table) or when there are
+        // several cards.
+        for ((entry, table) in tables) {
+            val title = when (table.kind) {
+                TableKind.CONJUGATION -> R.string.word_detail_group_conjugation
+                TableKind.DECLENSION -> R.string.word_detail_group_declension
+                TableKind.FORMS -> R.string.word_detail_group_forms
+            }
+            addGroupHeader(
+                content, ctx.getString(title),
+                suffix = entry.slug.takeIf { it != primary.slug || tables.size > 1 },
+            )
+            addGroupCard(content).addView(ConjugationTableView(ctx).apply { bind(table) })
+        }
+
         // ── More examples (Tatoeba, online) ──────────────────────────────
         if (TatoebaClient.supports(moreExamplesSourceLang, moreExamplesTargetLang)) {
             addMoreExamplesPlaceholder(content)
@@ -1014,16 +1135,77 @@ class WordDetailBinder(
             }
         }
 
+        // ── Words and Other matches (loaded after the Anki button) ───────
+        // Their rows resolve through the full definition tier chain, which
+        // machine-translates on a non-English target without a native
+        // gloss, so [bind] loads them through [loadSecondarySections] into
+        // this host, which holds a loading line styled like the More
+        // examples placeholder's until they land.
+        val secondaryHost = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+        }
+        secondaryHost.addView(TextView(ctx).apply {
+            text = ctx.getString(R.string.words_loading)
+            textSize = 13f
+            setTextColor(ctx.themeColor(R.attr.ptTextMuted))
+            setTypeface(null, Typeface.ITALIC)
+            setPadding(
+                dpRes(R.dimen.pt_row_h_padding),
+                dpRes(R.dimen.pt_row_v_padding),
+                dpRes(R.dimen.pt_row_h_padding),
+                dpRes(R.dimen.pt_row_v_padding),
+            )
+        })
+        content.addView(secondaryHost)
+        return secondaryHost
+    }
+
+    /** Loads the Words and Other matches sections into [host], the one
+     *  [buildContent] returned, after [bind] has shown and wired the Anki
+     *  button: releases the previous cells' renderers
+     *  ([releaseMemberStyledCells]), appends Words then Other matches after
+     *  the host's loading line, then removes the line, and the host as well
+     *  when neither section rendered. */
+    private suspend fun loadSecondarySections(
+        host: LinearLayout,
+        primary: DictionaryEntry,
+        entries: List<DictionaryEntry>,
+        wordSpan: TokenSpan,
+        engine: com.playtranslate.language.SourceLanguageEngine,
+        sourceLangId: SourceLangId,
+        targetLangCode: String,
+        display: HeadwordDisplay,
+    ) {
+        // The host holds only buildContent's loading line until the
+        // sections append after it.
+        val loadingLine = host.getChildAt(0)
+        releaseMemberStyledCells()
+
         // ── Member words (multi-word expressions) ────────────────────────
         // For a multi-word expression ("a great deal", 気になる) the detail
         // page is where the member words resurface: one standard word-result
         // cell per member, tappable through to that word's own detail.
         // Members come from the engine's own split
-        // ([SourceLanguageEngine.memberWordsOf] — whitespace on the
-        // space-delimited languages, a raw fusing-free tokenizer pass on JA)
-        // — NOT engine.tokenize, whose phrase handling could re-fuse the
+        // ([SourceLanguageEngine.memberWordsOf]: whitespace on the
+        // space-delimited languages, a raw fusing-free tokenizer pass on JA),
+        // NOT engine.tokenize, whose phrase handling could re-fuse the
         // expression into one token.
-        addMemberWordsSection(content, primary, engine, sourceLangId, targetLangCode, queriedWord)
+        addMemberWordsSection(host, primary, engine, sourceLangId, targetLangCode, display)
+
+        // ── Other matches ────────────────────────────────────────────────
+        // The other dictionary entries the word could be, as it was found
+        // ([SourceLanguageEngine.alternativesOf]): the lens offers them as
+        // "Also matches" sections, and this page lists them as cells that
+        // drill into their own pages, where the Anki button is.
+        addAlternativesSection(host, entries, wordSpan, engine, sourceLangId, targetLangCode)
+
+        if (!ui.isAlive) return
+        host.removeView(loadingLine)
+        if (host.childCount == 0) (host.parent as? ViewGroup)?.removeView(host)
     }
 
     /** Appends the "Words" section for a multi-word headword: each member
@@ -1031,19 +1213,19 @@ class WordDetailBinder(
      *  rendered as a [WordResultCell] whose tap opens a nested detail via
      *  [Ui.openWordDetail]. No-op for single-word headwords or when no
      *  member resolves. The engine split runs on the DISPLAYED headword
-     *  form — for JA `uk` entries the kana form (かもしれない), whose members
-     *  correctly fail the engine's kanji gate where the kanji variant's
-     *  (かも知れない → 知れ) would pass. */
+     *  form, the header's [display]: for JA `uk` entries the kana form
+     *  (かもしれない), whose members correctly fail the engine's kanji gate
+     *  where the kanji variant's (かも知れない → 知れ) would pass. Built by
+     *  [loadSecondarySections], which releases the previous cells'
+     *  renderers first. */
     private suspend fun addMemberWordsSection(
         content: LinearLayout,
         primary: DictionaryEntry,
         engine: com.playtranslate.language.SourceLanguageEngine,
         sourceLangId: SourceLangId,
         targetLangCode: String,
-        queriedWord: String,
+        display: HeadwordDisplay,
     ) {
-        releaseMemberStyledCells()
-        val display = primary.headwordDisplay(queriedWord)
         val displayed = display.written
         // Spaced headwords are expressions by form; no-whitespace ones
         // carry their POS class into the engine's member policy — phrases
@@ -1066,7 +1248,50 @@ class WordDetailBinder(
             members,
         ).rows
         if (!ui.isAlive || rows.isEmpty()) return
-        // Styled payloads for the members' imported groups, prefetched here
+        addWordCellsSection(content, ctx.getString(R.string.section_words), rows, sourceLangId)
+    }
+
+    /** Appends the "Other matches" section: the other dictionary entries the
+     *  page's word could be as found in [wordSpan]
+     *  ([com.playtranslate.language.SourceLanguageEngine.alternativesOf],
+     *  besides the page's own [entries]), each resolved through its own
+     *  [resolveWordRows] call (the resolver de-duplicates tokens by lookup
+     *  form, and two homographs share one) and rendered by
+     *  [addWordCellsSection] with its own conjugation line. No-op when no
+     *  alternative resolves. Built by [loadSecondarySections] after the
+     *  Words section, under the one release that precedes both. */
+    private suspend fun addAlternativesSection(
+        content: LinearLayout,
+        entries: List<DictionaryEntry>,
+        wordSpan: TokenSpan,
+        engine: com.playtranslate.language.SourceLanguageEngine,
+        sourceLangId: SourceLangId,
+        targetLangCode: String,
+    ) {
+        val primaryIds = entries.mapNotNullTo(mutableSetOf()) { it.packId }
+        val alternatives = engine.alternativesOf(wordSpan, primaryIds)
+        if (alternatives.isEmpty()) return
+        val appCtx = ctx.applicationContext
+        val lookupContext = WordLookupContext(engine, targetLangCode, Prefs(appCtx).targetChineseVariant)
+        val rows = coroutineScope {
+            alternatives.map { async { resolveWordRows(appCtx, lookupContext, listOf(it)).rows } }.awaitAll()
+        }.flatten()
+        if (!ui.isAlive || rows.isEmpty()) return
+        addWordCellsSection(content, ctx.getString(R.string.section_other_matches), rows, sourceLangId)
+    }
+
+    /** One group of word cells under [title] (the Words and Other matches
+     *  sections): a [WordResultCell] per row with its speak action and Anki
+     *  button, whose tap opens a nested detail via [Ui.openWordDetail] with
+     *  the row's surface and the key it was resolved under. */
+    private suspend fun addWordCellsSection(
+        content: LinearLayout,
+        title: String,
+        rows: List<RowState>,
+        sourceLangId: SourceLangId,
+    ) {
+        val appCtx = ctx.applicationContext
+        // Styled payloads for the rows' imported groups, prefetched here
         // like the page's own imported block — the cells own no coroutines.
         // Null per row degrades that row to the flat tier, nothing else.
         val styledByRow = rows.map {
@@ -1074,7 +1299,7 @@ class WordDetailBinder(
         }
         if (!ui.isAlive) return
 
-        addGroupHeader(content, ctx.getString(R.string.section_words))
+        addGroupHeader(content, title)
         val card = addGroupCard(content)
         rows.forEachIndexed { index, row ->
             if (index > 0) addInsetDivider(card, indentPx = dpRes(R.dimen.pt_row_h_padding))
@@ -1091,15 +1316,18 @@ class WordDetailBinder(
                     readingRows = row.readingRows,
                     importedGroups = row.importedGroups,
                     styled = styledByRow[index],
+                    inflectedForms = row.inflectedForms,
                 ),
                 scale = WordResultCell.DEFAULT_SCALE,
-                inflectedForms = row.inflectedForms,
                 onCellTap = {
-                    ui.openWordDetail(row.displayWord, row.reading.ifEmpty { null })
+                    ui.openWordDetail(
+                        row.displayWord, row.reading.ifEmpty { null }, row.surface,
+                        row.lookupForm, row.lookupReading,
+                    )
                 },
                 onSpeak = { speakHeadword(row.displayWord, sourceLangId) },
-                // Member words of an entry never stub or hide; the Anki
-                // button stays, as on the dictionary results.
+                // These cells never stub or hide; the Anki button stays, as
+                // on the dictionary results.
                 trailing = WordResultCell.TrailingAction.Anki {
                     if (!AnkiManager(ctx).isAnkiDroidInstalled()) {
                         ui.showAnkiNotInstalled()
@@ -1124,7 +1352,7 @@ class WordDetailBinder(
                 },
                 // This section is a static handful of cells under a block
                 // that renders styled; the flat tier's unspaced tag runs read
-                // as a bug next to it. One renderer per cell, the members
+                // as a bug next to it. One renderer per cell, the cells
                 // being two or three; the recycling search list stays flat.
                 styledRenderers = WordResultCell.StyledRendererSource.Own,
             )
@@ -1135,25 +1363,37 @@ class WordDetailBinder(
 
     // ── Section builders ──────────────────────────────────────────────────
 
+    /** The page's headword for [entry], the entry its key [lookupForm]
+     *  resolved: the variant the display [word] names, so the header shows
+     *  what the opener showed (entry 2863328 groups 無下 + 無気; a page
+     *  opened on 無気 must show 無気, not 無下), else the one [lookupForm]
+     *  names, else the entry's displayable primary. [word] is the seen
+     *  surface: for an entry marked "Kana only" (JMdict uk tag, なぜ over
+     *  何故) the kanji is suppressed unless the opener showed it. With no key
+     *  of the opener's own, [lookupForm] is [word] and this is
+     *  [headwordDisplay] of [word]. */
+    private fun pageHeadwordDisplay(entry: DictionaryEntry, word: String, lookupForm: String): HeadwordDisplay =
+        entry.headwordDisplay(
+            entry.headwordFor(word) ?: entry.headwordFor(lookupForm) ?: entry.headwords.preferDisplayable(),
+            word,
+        )
+
     /**
      * Reading + speak chip + badge block that lives in the scroll content
      * beneath the overlay headword. The overlay TextView itself is set up
      * in [bind] (typeface, pivot, scroll listener); here we just rewrite
-     * its text to the canonical headword from the resolved entry and emit
-     * the reading line (with its speak chip) plus the Common pill and
-     * stars badge row.
+     * its text to the canonical headword [display] ([pageHeadwordDisplay])
+     * and emit the reading line (with its speak chip) plus the Common pill
+     * and stars badge row. [inflectedForms], when there are any, are drawn as
+     * the conjugation lines between the headword and the readings.
      */
     private fun addHeaderBlock(
         parent: LinearLayout,
         entry: DictionaryEntry,
         sourceLangId: SourceLangId,
-        queriedWord: String,
+        display: HeadwordDisplay,
+        inflectedForms: List<InflectedForm>,
     ) {
-        // headwordDisplay picks the variant matching the user's clicked
-        // surface (entry 2863328 groups 無下 + 無気; tapping 無気 must show
-        // 無気, not 無下) and suppresses the kanji entirely for entries
-        // marked "Kana only" (JMdict uk tag — e.g. なぜ over 何故).
-        val display = entry.headwordDisplay(queriedWord)
         val written = display.written
         val readingRows = entry.orderedReadingRows(readingHint)
         // Kana-only: the (single) reading just repeats the kana title. Draw the
@@ -1185,6 +1425,23 @@ class WordDetailBinder(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
+        }
+
+        // The conjugation line (飲んでいなかった · -て « -いる « negative « -た),
+        // muted, at the size the results cell draws the same line.
+        for (form in inflectedForms) {
+            block.addView(TextView(ctx).apply {
+                text = InflectionChain.format(ctx, form)
+                setTextColor(ctx.themeColor(R.attr.ptTextMuted))
+                setTextSize(
+                    TypedValue.COMPLEX_UNIT_SP,
+                    InflectionChain.TEXT_SP * WordResultCell.DEFAULT_SCALE,
+                )
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).also { it.bottomMargin = dp(4) }
+            })
         }
 
         // Every reading, ordered by common use, flowing inline and wrapping to a
@@ -2454,4 +2711,30 @@ class WordDetailBinder(
     private fun dp(value: Int) = (value * ctx.resources.displayMetrics.density).toInt()
 
     private fun dpRes(resId: Int) = ctx.resources.getDimensionPixelSize(resId)
+}
+
+/** The span of a detail page's tokenized surface that stands for the page's
+ *  [word]: the one whose lookup form is [word], else the first. Null for an
+ *  empty tokenization. */
+internal fun detailSurfaceSpan(spans: List<TokenSpan>, word: String): TokenSpan? =
+    spans.firstOrNull { it.lookupForm == word } ?: spans.firstOrNull()
+
+/** The chain from a detail page's [word], the key it resolves
+ *  ([WordDetailBinder.Args.lookupForm]), to the [surface] it was found as,
+ *  given the surface's tokenization [spans]. The [detailSurfaceSpan]'s
+ *  inflections when that span's lookup form is [word]; otherwise (the page
+ *  is another entry the surface could be, 弾く for 弾けた, whose span reads
+ *  弾ける) the inflections of the first of [alternativesOf] a span on
+ *  [surface] keyed by [word] whose lookup form is [word], and the span's own
+ *  inflections when there is none. Empty for an empty tokenization. */
+internal suspend fun detailSurfaceTags(
+    spans: List<TokenSpan>,
+    surface: String,
+    word: String,
+    alternativesOf: suspend (TokenSpan) -> List<TokenSpan>,
+): List<InflectionTag> {
+    val span = detailSurfaceSpan(spans, word) ?: return emptyList()
+    if (span.lookupForm == word) return span.inflections
+    return alternativesOf(TokenSpan(surface, word)).firstOrNull { it.lookupForm == word }?.inflections
+        ?: span.inflections
 }

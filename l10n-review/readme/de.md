@@ -1,0 +1,66 @@
+# German (de) README localization review
+
+Mechanical layer: `readme_l10n_check.py` -> PASS (`[PASS] de -> readme/README.de.md`, no warnings). **No 🛑 issues.**
+
+## Findings
+
+| section | severity | current | suggested | note |
+|---|---|---|---|---|
+| Features > Dual Screen & Split Screen | 💬 | "Funktioniert auf Geräten mit zwei Displays wie dem Ayn Thor über beide Bildschirme hinweg und im Splitscreen von Android auch neben Spielen im Fenstermodus." | "Funktioniert auf Geräten mit zwei Displays wie dem Ayn Thor über beide Bildschirme hinweg oder im Android-Splitscreen neben Spielen im Fenstermodus." | The least natural sentence in the file. English has "or"; „und … auch“ makes windowed games sound like the special case („sogar daneben“), and „Splitscreen von Android“ is a stiff paraphrase of the compound „Android-Splitscreen“. |
+| Features > Anki export | 💬 | "Der Kartentyp ist frei wählbar, mit fertigen Voreinstellungen für beliebte Stapel." | "Den Kartentyp kannst du frei wählen; für beliebte Stapel gibt es fertige Presets." | „Voreinstellungen“ mostly reads as preferences/defaults, „fertige Voreinstellungen“ says "pre" twice, and the „…, mit …“ tail hangs loose. The presets are bundled field mappings for Lapis/JPMN/Migaku (`AnkiCardTypeMapper`); the app has no string for them, so no wording to match. „Presets“ (or „Vorgaben“) is the everyday German word. Avoid „Vorlagen“: it collides with Anki's „Kartenvorlagen“ and the app's own „Vorlagenfelder“ (`anki_content_flag_*_desc`). |
+| How to Install > step 2 | 💬 | "Android bietet dir auch an, dich direkt dorthin zu bringen, wenn du die APK zum ersten Mal öffnest" | "Wenn du die APK zum ersten Mal öffnest, bietet Android dir auch an, direkt zu dieser Einstellung zu wechseln" | „dich dorthin zu bringen“ is a calque of "take you there". „zu dieser Einstellung wechseln“ is what a German how-to would say. |
+
+## Clean areas (checked, no findings)
+
+- **Register:** du throughout, always lowercase (Klicke, tritt … bei, Fahre, Lege, Lass dir, Speichere, Richte, Erlaube, Öffne, Folge, Schalte, Tippe, Deaktiviere, Installiere, Authentifiziere dich, du kannst, dein/deine). A grep for Sie/Ihr/Ihre/Ihnen finds nothing, and the imperatives never fall into the infinitive style.
+- **Terminology vs `values-de/strings.xml`:** every feature or settings name matches the app. Einstellungen (`settings_title`), Übersetzungsdienste (`settings_cell_translation_services`, used both in the path and in the section heading), Tastenkürzel (`settings_cell_hotkeys`), Sprachausgabe (`settings_cell_tts`, `audio_source_tts_name`), Auto-Übersetzung (`live_mode_auto_translate_label`; the label beats `settings_header_auto_translate` „Automatische Übersetzung“ for a feature name), Furigana / Pinyin, Aufnahmebereiche (`menu_capture_region`), Textbox (`hint_region_name`), benutzerdefinierter Bereich (`label_add_custom_region`), Wortsuche (`onboarding_welcome_learn_body`), Texterkennung (OCR) (`settings_header_ocr`, verbatim), Offline-Modelle herunterladen (`lang_section_offline_models_title`), Spiel-Audio aufnehmen (`audio_source_game_name`, `anki_game_audio_row_title`), Wörterliste and Zielwort (`anki_content_words_table`, `anki_content_flag_targeted_sentence_desc`), Screenshot (`anki_group_screenshot`), Kartentyp (`anki_card_type_row_label`), Stapel (the glossary's deck term), Tonhöhenakzent / Häufigkeit (Yomitan categories), Standbild aufnehmen (`camera_shutter_cd`), Liste der aufgenommenen Sätze (`settings_cell_history_summary_*`), Textverlauf (`history_toggle_title`, `history_empty_off`), API-Schlüssel (`llm_backend_api_key_label`), Ausweichlösung (`tr_service_offline_footer`), Anki-Karteikarten (`settings_cell_anki`, used as the H2), Berechtigung für Bedienungshilfen (`accessibility_dialog_message` phrasing).
+- **Brief-requested term calls:**
+  - „schwebende Lupe“: keep it. The app has no string that names the lens. „schwebend“ matches the app's „schwebendes Symbol“, and „Lupe“ is the plain German word for a magnifier.
+  - „Zielsprachen“: keep it. The picker's „Deine Sprache“ (`lang_translate_to`) can't be counted („59 deine Sprachen“), and the app itself says „Zielsprache“ (`anki_content_sentence_translation_desc`, `llm_prompt_kw_target_desc`). It pairs cleanly with „Spielsprachen“ (`lang_translate_from`).
+  - „Splitscreen“: keep it. It is the Duden spelling and, to my knowledge, the word stock Android uses for the recents-menu option (not verified on disk). Only the sentence around it needs work (row 1).
+  - „fertige Voreinstellungen“: the one weak term (row 2).
+- **ML Kit sentence:** „Ist die Online-Übersetzung nicht verfügbar, springt ML Kit als Offline-Ausweichlösung ein.“ This says "used whenever online translation is unavailable", not "when the device is offline", and it reuses the footer's „Ausweichlösung … wenn Online-Übersetzungen nicht verfügbar sind“. Correct.
+- **Custom backend:** „Benutzerdefiniert“ = `llm_backend_preset_custom`. „trage unter „Benutzerdefinierte URL“ einfach die URL deines Backends ein“ uses the field label (`llm_backend_base_url_label`) and the hint's wording (`llm_backend_base_url_custom_hint` „Gib die URL deines Backends ein“) word for word, with no literal „Basis-URL“.
+- **Android / Play Store wording:** the labels match stock Android and Play Store German, to my knowledge of AOSP/Play wording. Nothing was available on disk to diff against and there was no device pass. Labels checked: Einstellungen → Apps → Spezieller App-Zugriff → Unbekannte Apps installieren, the switch „Dieser Quelle vertrauen“, „Installieren“, „App nicht installiert“, Play Store → Profilsymbol → Play Protect → Zahnradsymbol → „Apps mit Play Protect scannen“, the dialog „Eingeschränkte Einstellung“ (singular, correctly kept apart from the plural menu item) and „Eingeschränkte Einstellungen zulassen“, which matches `restricted_settings_title` and the quoted label in `restricted_settings_message`. „ausgegraut“ is the standard UI word. Glossing "sideloaded" as „APKs, die nicht aus dem Play Store stammen“ is a good reader-facing choice and is used the same way in both sections.
+- **Accuracy:** 13 feature bullets, 4 install steps, 5 Play Protect steps, 4 restricted-settings steps and 9 backend bullets: all present, in order, nothing dropped. Small clarifications that stay true to the app: „beim Antippen erscheint der Hinweis“, „lies die Übersetzung live mit“, „das Modell wählst du direkt in der App“ for "at runtime". „Eine noch tiefere Integration ist für die Zukunft geplant“ is a fair rendering of "Look for deeper integration in the future".
+- **Tables and links:** header cells are translated (Sprache / Eigenbezeichnung / Kürzel, all idiomatic), the rows are the pre-generated CLDR rows, and both `###` headings and the intro sentence are translated. „Chinesisch (Vereinfacht)“ / „(Traditionell)“ with capitals is the CLDR/`Locale.getDisplayName(GERMAN)` output, so it is what the app's picker shows (checked with the JDK: `Chinesisch (Vereinfacht)`). Leave it. Absolute release/APK URLs, link texts („Klicke hier, um …“, „Discord-Server“, „englischen README“) and the video line on its own line are all fine. The pointer section „Danksagungen und Lizenz“ names libraries, models and linguistic data, points to the English README's `#credits`, and links the GPL 3.0 LICENSE, as designed. Cosmetic only, raw source: in the second table the separator under „Kürzel“ is narrower than the header cell. GitHub renders it identically, and aligning it would mean re-padding the generated rows, so no fix is proposed.
+- **Typography:** German „ “ quotes everywhere (4 quoted labels), no straight quotes, no em dashes. All 11 dashes are spaced en dashes (–), which is correct German style for the English em dashes. Colon after bold labels with no space before it. The text after a label is capitalized when a full sentence follows (all feature bullets) and lowercase for fragments („kostenloser Tarif unter …“, „jeder andere OpenAI-kompatible Endpunkt …“), which is consistent and correct. Lists keep the English's period pattern: feature bullets end with periods, step lists and backend bullets don't, each consistent within its list.
+- **Compounds:** correct hyphenation throughout: Furigana- und Pinyin-Modus (Ergänzungsstrich), Auto-Übersetzung, Offline-Nutzung, Offline-Ausweichlösung, Online-Übersetzungsdienste, Yomitan-Wörterbücher, Kanji-Infos, Anki-Export, Android-Gerät, Android-Hersteller, APK-Datei, API-Schlüssel, OpenAI-kompatible, Discord-Server, Spiel-Audio (app precedent). Closed compounds where German closes them: Kameraübersetzung, Wörterbuchsuche, Spielbildschirm, Profilsymbol, Zahnradsymbol, Fenstermodus, Standardstimme, Splitscreen.
+- **Heading suffix form:** „Online-Übersetzungsdienste (optional)“ / „Anki-Karteikarten (optional)“ is idiomatic German and is used the same way for both. A calqued „Optional: …“ prefix would read worse. Keep it.
+
+## German-specific appendix
+
+- **du audit:** clean (see Register). No mixed address, no capitalized Du/Dein.
+- **Naturalness overall:** this reads like a German technical writer's README, not a translation. Sentences are rebuilt around German word order („Ist die Online-Übersetzung nicht verfügbar, springt … ein“, „So hebst du die Sperre auf:“, „Schalte die Prüfung in diesem Fall vorübergehend aus:“), the app's own wording is reused even for small nouns (Textbox, Wörterliste, Standbild), and the only calque-like spots are the three 💬 rows above.
+- **Verdict:** ship as is, or after the three optional polish edits. Nothing blocks.
+
+## Disposition (2026-10-06)
+
+Applied all 3 💬 as suggested (Android-Splitscreen with „oder“, fertige Presets, „zu dieser
+Einstellung wechseln“).
+
+## Delta review 2026-10-08 ("Can't enable accessibility?" rewritten)
+
+Mechanical layer: `readme_l10n_check.py` -> PASS (`[PASS] de -> readme/README.de.md`, no warnings; the same with `--require-header`). **No 🛑 issues.**
+
+| section | severity | current | suggested | note |
+|---|---|---|---|---|
+| Bedienungshilfen lassen sich nicht aktivieren? > intro | 💬 | "jeder App aus, die aus einer heruntergeladenen APK-Datei installiert wurde" | "jeder App aus, die über eine heruntergeladene APK-Datei installiert wurde" | The separable prefix of „graut … aus“ runs into the preposition: „aus, die aus“. „über eine … APK-Datei installiert“ is just as idiomatic, removes the echo and keeps the meaning. |
+
+Clean areas: du throughout, no Sie. All six Android labels match AOSP Android 16 `de` exactly: Einstellungen (`settings_label`), Bedienungshilfen (`accessibility_settings`), Apps (`apps_dashboard_title`), App-Info (`application_info_label`; the English's "AppInfo" was not copied), „Eingeschränkte Einstellung“ (`blocked_by_restricted_settings_title`) and Eingeschränkte Einstellungen zulassen (`app_restricted_settings_lockscreen_title`). Nothing contradicts the app: `a11y_restricted_settings_addendum` has the same App-Info, ausgegraut, Schalter and menu item, and „Einstellungen → Bedienungshilfen“ is the start of the path in `overlay_icon_a11y_required_message` and `accessibility_dialog_message`. Accurate against the English: four steps in order, „erst nach Schritt 1“ keeps the condition, „falls“ carries the new "if prompted", and the closing sentence and „(oben rechts)“ are gone as in English. Markdown: bold on the two paths, ⋮ and the menu item only, numbering 1 to 4, each step ending with a period like the English. Typography: „ “ quotes, no space before the colon, no dashes; Schalter and ausgegraut stay one term each from the intro through step 4. The German reads natively; the one row above is optional polish.
+
+### Disposition (2026-10-08)
+
+Applied the 1 💬 („über eine heruntergeladene APK-Datei“).
+
+## Delta review 2026-10-14 (Bilibili Index-Translate bullet)
+
+Mechanical layer: `readme_l10n_check.py` -> PASS (`[PASS] de -> readme/README.de.md`, no warnings; the same with `--require-header`). **No 🛑 issues.**
+
+No findings.
+
+Clean areas: The lead drops the API key as the English does: «kannst du unter **Einstellungen → Übersetzungsdienste** einen der folgenden Dienste einrichten». Using «einrichten» for "add" avoids repeating the next sentence's «hinzufügen», which is the app's own verb for this step (`tr_service_add_online` «Online-Übersetzungsdienst hinzufügen»). The path and its bold are unchanged. The bullet sits between Claude and Benutzerdefiniert, as in English, with a spaced en dash like its siblings. «kostenlos, ohne API-Schlüssel» renders "free, no API key needed" in the app's term. The brand stays in Latin script and the link is byte-identical (checker). The intro was correctly left alone: in «PlayTranslate ist eine Android-App, die …» the article belongs to a full sentence with a verb, not to a tagline that mirrors the English "A". du throughout, typography unchanged.
+
+### Disposition (2026-10-14)
+
+No findings; nothing to apply.

@@ -7,6 +7,7 @@ import com.playtranslate.dictionary.DictionaryManager.Companion.ReglobSpan
 import com.playtranslate.dictionary.JaToken
 import com.playtranslate.dictionary.SentenceAnnotator
 import com.playtranslate.dictionary.SudachiJapaneseTokenizer
+import com.playtranslate.dictionary.deinflect.JapaneseDeinflector
 import com.playtranslate.model.selectHeadword
 import com.playtranslate.model.CharacterDetail
 import com.playtranslate.model.DictionaryResponse
@@ -82,14 +83,15 @@ class JapaneseEngine(private val appContext: Context) : SourceLanguageEngine {
         }
 
     /** Pack lookup, then shared Yomitan enrichment: imported term groups merge
-     *  in (deinflection candidates are the fallback forms), with pitch +
-     *  frequency attached. Behaviour is identical to the pre-extraction inline
-     *  path — [YomitanEnrichment] is a verbatim move of it. */
+     *  in (the distinct texts of [JapaneseDeinflector.candidates], in order,
+     *  are the fallback forms), with pitch + frequency attached.
+     *  [YomitanEnrichment] is a verbatim move of the pre-extraction inline
+     *  path. */
     override suspend fun lookup(word: String, reading: String?): DictionaryResponse? =
         yomitan.applyTo(
             dict.lookup(word, reading),
             word, reading,
-            fallbackForms = Deinflector.candidates(word).map { it.text },
+            fallbackForms = JapaneseDeinflector.candidates(word).map { it.text }.distinct(),
         )
 
     /**
@@ -140,6 +142,23 @@ class JapaneseEngine(private val appContext: Context) : SourceLanguageEngine {
      *  Yomitan imports. */
     private val annotationCache = AnnotationCache()
 
+    /** Per-word resolution memo for FULL-depth annotations. Resolving is the
+     *  one costly part of annotating (2–3 indexed queries per unique word,
+     *  ~10 ms of a ~20 ms cold line on the Thor; tokenizing a whole dialogue
+     *  box is well under a millisecond), and the live overlay annotates a
+     *  group's full text on every typewriter step, so without this each step
+     *  would re-query every completed line's words. With it only the
+     *  frontier's new words query, whatever the group's height. A pure
+     *  function of the key given the two stores: generation-gated like the
+     *  annotation cache, cleared with it on [close]. Only resolutions that
+     *  found an entry are memoized: a lookup that fails to open the pack's
+     *  database returns the same null as a genuine miss, and a memoized
+     *  null would keep a frequent word unresolved until the engine closes
+     *  (Codex, 2026-10-08). A miss re-queries each time, a few indexed
+     *  queries per out-of-vocabulary word. */
+    private val resolutionCache =
+        GenerationLru<SentenceAnnotator.ResolutionKey, SentenceAnnotator.WordResolution>(1024)
+
     override suspend fun annotate(text: String, depth: AnnotationDepth): SentenceAnnotation {
         if (depth == AnnotationDepth.FULL) {
             annotationCache.get(text)?.let { return it }
@@ -162,7 +181,12 @@ class JapaneseEngine(private val appContext: Context) : SourceLanguageEngine {
                 } else null
             val resolutions =
                 if (reglob == null || depth != AnnotationDepth.FULL) emptyMap()
-                else SentenceAnnotator.resolutionKeys(reglob).associateWith { resolveWord(it) }
+                else SentenceAnnotator.resolutionKeys(reglob).associateWith { key ->
+                    resolutionCache.get(key)
+                        ?: resolveWord(key).also {
+                            if (it.entryRef != null) resolutionCache.put(key, it, generation)
+                        }
+                }
             val annotation = SentenceAnnotator.annotate(
                 text, profile.id, tokens, reglob, resolutions,
                 importGeneration = generation,
@@ -225,6 +249,9 @@ class JapaneseEngine(private val appContext: Context) : SourceLanguageEngine {
         val spans = dict.reglobSpansForTokens(
             tokens, yomitan.phraseOracle(), excludePhrases = setOf(headword),
             excludeExpressionJoins = true,
+            // Here 行く in 連れて行く is a member word, not an auxiliary: folded,
+            // the whole headword would be one span, which the filter below drops.
+            foldAuxiliaries = false,
         ).orEmpty()
         val ordered = memberUnits(tokens, spans, expressionClass)
         if (ordered.isEmpty()) return emptyList()
@@ -236,6 +263,14 @@ class JapaneseEngine(private val appContext: Context) : SourceLanguageEngine {
             }
             .distinctBy { it.lookupForm }
     }
+
+    /** [DictionaryManager.alternativeKeys] for the tapped [span]'s surface,
+     *  lookup form and conjugation tags, each key as a span on the tapped
+     *  surface whose inflections are the key's whole chain. */
+    override suspend fun alternativesOf(span: TokenSpan, primaryIds: Set<Long>): List<TokenSpan> =
+        dict.alternativeKeys(span.surface, span.lookupForm, span.inflections, primaryIds).map {
+            TokenSpan(surface = span.surface, lookupForm = it.lookupForm, reading = it.reading, inflections = it.tags)
+        }
 
     /** Reading hints for the member [units] (surface to lookupForm, in
      *  headword order) by aligning the headword's own reading against the
@@ -328,6 +363,7 @@ class JapaneseEngine(private val appContext: Context) : SourceLanguageEngine {
 
     override fun close() {
         annotationCache.clear()
+        resolutionCache.clear()
         // Release JA's process-scoped native handles so pack uninstall doesn't
         // leak them. The engine cache only evicts (SourceLanguageEngines.
         // releaseForPack, via LanguagePackStore.uninstall) when the pack is

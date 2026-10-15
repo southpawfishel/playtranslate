@@ -22,6 +22,7 @@ import android.view.Display
 import android.view.WindowManager
 import android.os.Binder
 import android.os.Build
+import android.os.PowerManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -66,6 +67,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import android.hardware.display.DisplayManager
+import com.playtranslate.capture.CaptureBackend
 import com.playtranslate.capture.CaptureBackendResolver
 import com.playtranslate.capture.GameAudioGate
 import com.playtranslate.capture.CaptureLifecycle
@@ -91,6 +93,7 @@ import com.playtranslate.translation.ShortTextOfflineRoute
 import com.playtranslate.translation.dispatchPartitioned
 import com.playtranslate.translation.shouldBypassForLlm
 import com.playtranslate.ui.DegradedWarningKind
+import com.playtranslate.ui.FuriganaMetrics
 import com.playtranslate.ui.GrowthLimits
 import com.playtranslate.ui.OverlayRenderConfig
 import com.playtranslate.ui.TextBox
@@ -139,12 +142,8 @@ class CaptureService : Service() {
     // ── Pipeline ──────────────────────────────────────────────────────────
 
     /** TextPaint for measuring relative character widths (furigana positioning). */
-    internal val furiganaPaint by lazy {
-        TextPaint().apply {
-            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-            textSize = 100f  // arbitrary — only relative proportions matter
-        }
-    }
+    /** Measures furigana the way the overlay draws it ([FuriganaMetrics]). */
+    internal val furiganaPaint by lazy { FuriganaMetrics.measuringPaint(resources.displayMetrics.density) }
 
     internal val ocrManager get() = OcrManager.instance
 
@@ -184,12 +183,15 @@ class CaptureService : Service() {
      * is stable thanks to LinkedHashSet); finally [Display.DEFAULT_DISPLAY]
      * if the set is empty.
      *
-     * A display that no longer exists is passed over, as [shouldSkipDisplay]
-     * passes it over: with auto-translate off, a removed display (a monitor
-     * unplugged) stays in both fields, since the display listener that
-     * repairs them runs only while live, and the capture and game-language
-     * hotkeys, the in-app one-shot and the translation-error pill would
-     * otherwise target it.
+     * A display the backend cannot capture ([CaptureBackend.canCapture]: one
+     * that no longer exists, or this app's own private projection display)
+     * is passed over, as [shouldSkipDisplay] passes a missing one over: with
+     * auto-translate off, a removed display (a monitor unplugged) stays in
+     * both fields, since the display listener that repairs them runs only
+     * while live, and the capture and game-language hotkeys, the in-app
+     * one-shot and the translation-error pill would otherwise target it.
+     * Until 2026-10-14 the test was bare existence, which a private display
+     * passes.
      *
      * On the MediaProjection backend this is always [Display.DEFAULT_DISPLAY] —
      * MediaProjection can only mirror that display, so it is the only one the
@@ -199,18 +201,12 @@ class CaptureService : Service() {
         if (!CaptureBackendResolver.active().requiresAccessibilityService) {
             return android.view.Display.DEFAULT_DISPLAY
         }
-        val displays = getSystemService(DisplayManager::class.java)
-        val exists = { id: Int -> displays?.getDisplay(id) != null }
-        return lastInteractedDisplayId?.takeIf(exists)
-            ?: gameDisplayIds.firstOrNull(exists)
+        val backend = CaptureBackendResolver.active()
+        val capturable = { id: Int -> backend.canCapture(this, id) }
+        return lastInteractedDisplayId?.takeIf(capturable)
+            ?: gameDisplayIds.firstOrNull(capturable)
             ?: android.view.Display.DEFAULT_DISPLAY
     }
-    /** Always returns the current source-language translation code from Prefs.
-     *  Single source of truth for the language pair — callers don't need to
-     *  notify the service when prefs change; [ensureLanguageManagersFor]
-     *  picks up drift at each capture entry point. */
-    internal val sourceLang: String
-        get() = SourceLanguageProfiles[Prefs(this).sourceLangId].translationCode
     /** Tracks whether [configureSaved] has populated capture-time state
      *  (displayIds). Keeping this distinct from manager presence means
      *  a translation-only path that constructs translators via
@@ -314,16 +310,19 @@ class CaptureService : Service() {
 
     internal fun emitResult(result: TranslationResult) {
         _panelState.value = PanelState.Result(result)
-        // Deliberately NO livePanelRecord.committed here: only screen-derived
-        // deliveries ([translateAndSendToPanel]) commit. A deliberate flow
-        // (re-translate, deferred history) emitting through this writer shows
-        // text that is NOT the live screen — recording it would make the
-        // screen's unchanged text look new and let the live loop stomp the
-        // user's requested result one settled cycle later ([LivePanelRecord]).
+        // Deliberately NO commit to either record ([livePanelRecord],
+        // [panelEmissions]) here: only screen-derived deliveries
+        // ([translateAndSendToPanel], [emitPanelResult]) record. A deliberate
+        // flow (re-translate, deferred history) emitting through this writer
+        // shows text that is NOT the live screen — recording it would make
+        // the screen's unchanged text look new and let the live loop stomp
+        // the user's requested result one settled cycle later
+        // ([LivePanelRecord]).
     }
     internal fun emitError(message: String) {
         _panelState.value = PanelState.Error(message)
         livePanelRecord.clear()
+        panelEmissions.clear()
     }
     /**
      * The panel's "a live cycle looked at [displayId] and found nothing"
@@ -351,6 +350,7 @@ class CaptureService : Service() {
         // The recorded text is no longer what the panel shows — identical
         // text REAPPEARING after a no-text gap must deliver again.
         livePanelRecord.clear()
+        panelEmissions.clear()
     }
     /** Reset the sticky panel stream to [PanelState.Idle] so its replay can't re-show a
      *  stale result after the activity returns (e.g. from the language picker). Idle is a
@@ -359,6 +359,7 @@ class CaptureService : Service() {
     internal fun clearPanel() {
         _panelState.value = PanelState.Idle
         livePanelRecord.clear()
+        panelEmissions.clear()
     }
 
     /** Observable translation-degradation state — one [DegradedWarningKind]
@@ -538,8 +539,33 @@ class CaptureService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.i(TAG, "onStartCommand action=${intent?.action}")
-        // Android requires startForeground() within 5s of startForegroundService()
+        Log.i(
+            TAG,
+            if (intent == null) "onStartCommand sticky restart"
+            else "onStartCommand action=${intent.action}"
+        )
+        // Android requires startForeground() within 5s of startForegroundService(),
+        // and every starter of this service calls startForegroundService, so a
+        // non-null intent always carries that obligation.
+        //
+        // A null intent is the platform's START_STICKY restart after our
+        // process died. It carries no such obligation, and none of the
+        // background-start allowance a starter's call brings: the restart
+        // runs with the app in the background, where API 31+ refuses
+        // startForeground() with ForegroundServiceStartNotAllowedException
+        // unless an exemption applies. At targetSdk 35+ on API 35+,
+        // SYSTEM_ALERT_WINDOW only exempts an app with a visible overlay
+        // window, and the fresh process has none (field crashes 2026-09-27
+        // and 09-30, Android 16, MediaProjection backend). Nothing that needs
+        // the foreground survives the death either: consent,
+        // mediaProjectionActivated, live mode and the overlay windows are
+        // in memory, and the accessibility icon stays suppressed until a
+        // user summon. So a restart leaves promotion to updateForegroundState
+        // below, which finds nothing to hold unless the exempted restore
+        // below put the icon back. START_STICKY stays: the restart is what
+        // re-wires the accessibility backend's hotkeys after a process death
+        // (registerHotkeyCallbacks needs this service's instance), and what
+        // carries that restore.
         //
         // ACTION_MP_ACTIVATE entry: on a cold-start tile click, enterForeground
         // below is invoked synchronously with no live overlay window and no
@@ -549,7 +575,43 @@ class CaptureService : Service() {
         // succeeds under the tile-onclick tempAllowList grant; the
         // SPECIAL_USE → SPECIAL_USE|MEDIA_PROJECTION promotion happens later
         // in ensureMediaProjectionForegroundType once the user has granted.
-        enterForeground()
+        // Every starter but one calls startForegroundService from a context
+        // the platform credits (a foreground activity, the tile's temporary
+        // allowance), which both obliges and allows this promotion.
+        // ACTION_PLAIN_START is a plain start from the accessibility side: no
+        // obligation, and an allowance that depends on the device being
+        // awake, so it goes through the gate in updateForegroundState.
+        if (intent != null && intent.action != ACTION_PLAIN_START) enterForeground()
+        // A process that replaced one killed with the controls on comes
+        // back activated at MainActivity's start (a plain intent, no
+        // action): before the evaluation below, so the promotion holds.
+        // The sticky restart restores too, with no app open, but only for
+        // an app the user has exempted from battery optimisation. That
+        // exemption (the device-idle user allowlist; AOSP read 2026-10-06)
+        // is what lets a background process promote
+        // (ActiveServices.isAllowlistedForFgsStartLOSP) and what keeps a
+        // restarted started service from the app-idle stop
+        // (appServicesRestrictedInBackgroundLOSP) that ended the Moto's
+        // restarted process at +60 s. Without it the icon would come up
+        // behind the keyguard, the promotion would be refused, and the idle
+        // stop would take the icon down and erase the record, losing the
+        // app-open restore as well; so the restart leaves it alone.
+        //
+        // The exemption is a prediction of the platform's answer, and the
+        // restore commits everything (the record consumed, the icon up and
+        // stamped with this process) before that answer is heard, so the
+        // restart asks first: promote with nothing yet to hold, and restore
+        // only once promoted. A ROM that refuses despite the allowlist
+        // (Codex 2026-10-06) then leaves the restart as it was: nothing
+        // held, demoted below, the record intact for the app-open restore.
+        if (intent != null && intent.action == null) {
+            CaptureLifecycle.restoreMediaProjectionSessionIfCutShort(this)
+        } else if (intent == null && isBatteryExempt() &&
+            CaptureLifecycle.mediaProjectionRestorePending()
+        ) {
+            promoteOrDefer()
+            if (promoted) CaptureLifecycle.restoreMediaProjectionSessionIfCutShort(this)
+        }
         // Immediately evaluate — may stopForeground if no game-screen presence yet
         updateForegroundState()
         if (intent?.action == ACTION_MP_ACTIVATE) {
@@ -571,6 +633,7 @@ class CaptureService : Service() {
     override fun onDestroy() {
         Log.w(TAG, "onDestroy")
         if (BuildConfig.DEBUG) runCatching { unregisterReceiver(mpProbeReceiver) }
+        cancelDeferredPromotion()
         // Tear down live modes FIRST — while [instance] is still set, so
         // CaptureBackendResolver.activeOverlayUi can still resolve to this
         // service's MediaProjection overlay UI and the cleanup chain (each
@@ -709,7 +772,8 @@ class CaptureService : Service() {
         // refresh/flash to a display whose region map has no entry
         // (full-screen fallback, which the indicator silently skips) instead
         // of the display the picker wrote and live mode actually captures.
-        // Identity on the accessibility backend for any non-empty set.
+        // On the accessibility backend: the selection's connected displays,
+        // else the default display.
         //
         // gameDisplayIds deliberately keeps the RAW selection: its
         // cardinality is load-bearing. shouldSkipDisplay's foreground gate
@@ -719,7 +783,7 @@ class CaptureService : Service() {
         // to the MediaProjection fallback — storing the collapsed set would
         // disarm that guard and let a fan-out one-shot OCR the app's own
         // foregrounded UI (Codex review find).
-        val resolvedIds = CaptureBackendResolver.active().capturableTargets(displayIds)
+        val resolvedIds = CaptureBackendResolver.active().capturableTargets(this, displayIds)
 
         // Hide overlays for displays leaving the selection — the wasLive
         // path tears them down via setLiveDisplays(emptySet)→mode.stop, but
@@ -752,6 +816,12 @@ class CaptureService : Service() {
         hasCaptureStateConfigured = true
         ensureLanguageManagersFor(snapshotTranslationTarget())
         _statusUpdates.tryEmit(getString(R.string.status_idle))
+        // The activity flips the panel to Idle on that signal: it leaves its
+        // Result state, so both delivery records clear (identical text read
+        // after this must deliver again). livePanelRecord was not cleared
+        // here before: a furigana-tier gap of the same shape.
+        livePanelRecord.clear()
+        panelEmissions.clear()
         // Treat saved-region reconfig as a region change for the running
         // pipeline: refreshes live modes' cached boxes/cleanRef/dedup so
         // the next cycle reads the new region instead of replaying stale
@@ -773,6 +843,33 @@ class CaptureService : Service() {
             displayIds = Prefs(this).captureDisplayIds.ifEmpty { setOf(displayId) },
             primaryDisplayId = displayId,
         )
+    }
+
+    /** The saved configuration for a hold that arrives before any configurer
+     *  has run. [configureSaved] is otherwise MainActivity's, the live
+     *  toggle's and the one-shot tap's; a service the Quick Settings tile
+     *  cold-started has had none of them, and the hold cycle refuses an
+     *  unconfigured service ([OneShotManager] runCycleStages), which the
+     *  Moto painted as "Screenshot failed" four times on 2026-10-09 with
+     *  no screenshot attempted. Each hold trigger calls this on entry,
+     *  ahead of the fan-out's target selection (which reads
+     *  [gameDisplayIds]), so the first hold captures the saved displays
+     *  and regions exactly as every later one does. A no-op once
+     *  configured: a reconfigure would clear the per-display overrides
+     *  and cancel the one-shots in flight.
+     *
+     *  An override already applied to the cold service (the floating
+     *  menu's region pick, the region editor's drawn region) is the user's
+     *  latest word on the region and is carried across: [configureSaved]
+     *  resets overrides to the persisted selection, right for a fresh
+     *  configure from Settings, wrong here, where the hold would OCR the
+     *  saved region instead of the one just chosen (Codex review). */
+    private fun configureSavedIfNeeded(primaryDisplayId: Int? = null) {
+        if (isConfigured) return
+        val pending = overrideRegions.toMap()
+        if (primaryDisplayId != null) configureSaved(primaryDisplayId)
+        else configureSaved(displayIds = Prefs(this).captureDisplayIds)
+        for ((id, region) in pending) configureOverride(id, region)
     }
 
     /** Immutable snapshot of the translation pair + DeepL key at the moment
@@ -1059,9 +1156,7 @@ class CaptureService : Service() {
                 }
             }
             state.value = CaptureState.InProgress(getString(R.string.status_ocr))
-            val ocrResult = ocrManager.recognise(
-                bitmap, SourceLanguageProfiles[srcId].translationCode, screenshotWidth = raw.width,
-            )
+            val ocrResult = ocrManager.recognise(bitmap, srcId, screenshotWidth = raw.width)
             if (BuildConfig.DEBUG && Prefs(this@CaptureService).debugSaveOcrSeed) {
                 OcrSeedWriter.writeSeed(this@CaptureService, bitmap, ocrResult)
             }
@@ -1132,7 +1227,7 @@ class CaptureService : Service() {
                 ocrResult.groups.forEachIndexed { i, g ->
                     val tr = perGroup?.getOrNull(i)?.text.orEmpty()
                     if (deferTranslation || tr.isNotEmpty()) translationLogRecorder.onCaptureShown(
-                        token, g.text, tr.takeIf { it.isNotEmpty() }, g.bounds, recordSrc, recordTgt,
+                        token, g.text, tr.takeIf { it.isNotEmpty() }, g.bounds, srcId, recordTgt,
                         com.playtranslate.translationlog.TranslationHistoryStore.PROVENANCE_ONE_SHOT,
                         perGroup?.getOrNull(i)?.backendDisplayName,
                         captureImage = screenshotPath?.let {
@@ -1478,7 +1573,15 @@ class CaptureService : Service() {
             reconcileLiveModes("displayAdded($displayId)")
         }
         override fun onDisplayChanged(displayId: Int) {
-            if (displayId !in gameDisplayIds) return
+            // A selected display, or one a live mode runs on: the two differ
+            // when the selection names nothing connected and the shim put
+            // live mode on the fallback display ([CaptureBackend.fallbackDisplay]),
+            // which [gameDisplayIds], the raw selection, never names. Gated on
+            // the selection alone until 2026-10-14, so a rotation of the
+            // fallback display reached neither the mode's rotation pass nor
+            // the reconcile, and its overlays came down only when the next
+            // capture tripped the dims guard (Codex adversarial review).
+            if (displayId !in gameDisplayIds && displayId !in liveModes) return
             val display = getSystemService(DisplayManager::class.java)
                 ?.getDisplay(displayId)
             val st = display?.state
@@ -1506,12 +1609,14 @@ class CaptureService : Service() {
             // setLiveDisplays() / stopLive() that follow see the pruned state.
             val pruned = gameDisplayIds - displayId
             gameDisplayIds = pruned
-            if (pruned.isEmpty()) {
-                Log.w(TAG, "All capture displays disconnected, stopping live mode")
-                // stopLive() routes through setLiveDisplays(emptySet()) and
-                // runs the full teardown (setDegraded, belt-and-suspenders
-                // cleanup). Toast fires AFTER the teardown so the user-visible
-                // message lines up with the actual stopped state.
+            val backend = CaptureBackendResolver.active()
+            val remainder = liveSelectionAfterUnplug(this@CaptureService, backend, pruned)
+            if (remainder == null) {
+                Log.w(TAG, "No capturable display left in the selection ($pruned), stopping live mode")
+                // stopLive() runs the full teardown (tearDownAllLiveModes,
+                // setDegraded, belt-and-suspenders cleanup). Toast fires
+                // AFTER the teardown so the user-visible message lines up
+                // with the actual stopped state.
                 stopLive()
                 Toast.makeText(
                     this@CaptureService,
@@ -1524,10 +1629,13 @@ class CaptureService : Service() {
                 // The display the user was focused on went away — pick
                 // a still-connected one as the new primary so the in-app
                 // panel UI and hotkey routing keep working.
-                Log.w(TAG, "Primary capture display $displayId disconnected; switching primary to ${pruned.first()}")
-                lastInteractedDisplayId = pruned.first()
+                val next = remainder.first { backend.canCapture(this@CaptureService, it) }
+                Log.w(TAG, "Primary capture display $displayId disconnected; switching primary to $next")
+                lastInteractedDisplayId = next
             }
-            setLiveDisplays(pruned.filterNot { shouldSkipDisplay(it) }.toSet())
+            // Unfiltered, like the other reconcile callers: setLiveDisplays
+            // applies the shim and the skip in the right order.
+            setLiveDisplays(remainder)
         }
     }
 
@@ -1557,7 +1665,7 @@ class CaptureService : Service() {
         liveFeedback?.dispose()
         dismissSlowOcrPrompt()
         liveFeedback = LiveSessionFeedback(
-            serviceScope, mediaProjectionController, sourceLang = { sourceLang },
+            serviceScope, mediaProjectionController, sourceLang = { Prefs(this@CaptureService).sourceLangId },
             onSlowPass = { slowDisplayId -> maybeShowSlowOcrPrompt(slowDisplayId) },
         )
 
@@ -1927,6 +2035,7 @@ class CaptureService : Service() {
         // result lingering until the first cycle lands).
         _panelState.value = PanelState.Searching
         livePanelRecord.clear()
+        panelEmissions.clear()
 
         val prefs = Prefs(this)
         val activeIds = gameDisplayIds.ifEmpty { setOf(primaryGameDisplayId()) }
@@ -2060,17 +2169,23 @@ class CaptureService : Service() {
 
         // Resolve through the backend shim — capturable subset of [target]
         // with the backend's fallback display substituted when nothing in
-        // [target] is capturable (stale-selection collapse). Then drop
+        // [target] is capturable (stale-selection collapse). THEN drop
         // displays currently off / app-occluded. This is THE canonical
         // resolution: every non-stop caller (start, reconcile, multi-window,
-        // the display listener after a state change) gets the same result
-        // without needing to remember to apply the shim itself. Stop bypasses
-        // this path entirely via [tearDownAllLiveModes] — passing ∅ here
-        // would resolve to the backend's fallback (MediaProjection always
-        // reaches default), which is right for "selection filtered to
-        // nothing" but wrong for "user pressed stop."
+        // the display listener after a state change) passes the selection
+        // UNFILTERED and gets the same result. The order matters: the shim
+        // first, so a selection whose displays are all gone collapses to the
+        // fallback; the skip after, so a selected display that is merely off
+        // pauses capture instead of handing it to a display that was never
+        // selected. Until 2026-10-14 the reconcile callers skipped first and
+        // passed the remainder, and an empty remainder resolved to the
+        // fallback: harmless on MediaProjection, whose fallback is its only
+        // display, but on the accessibility backend, once it gained a
+        // fallback, a Thor whose chosen second screen went off would have
+        // moved live capture onto the app's own screen. Stop bypasses this
+        // path entirely via [tearDownAllLiveModes]; ∅ resolves to ∅ here.
         val backend = CaptureBackendResolver.active()
-        val capturable = backend.capturableTargets(target)
+        val capturable = backend.capturableTargets(this, target)
             .filterNot { shouldSkipDisplay(it) }
             .toSet()
         // IN_APP_ONLY is single-display by design — collapse to the primary
@@ -2276,9 +2391,12 @@ class CaptureService : Service() {
             Log.v(TAG, "reconcileLiveModes($reason): InAppOnly active, no-op")
             return
         }
-        val target = gameDisplayIds.filterNot { shouldSkipDisplay(it) }.toSet()
-        Log.d(TAG, "reconcileLiveModes($reason): gameDisplayIds=$gameDisplayIds liveModes=${liveModes.keys} → target=$target")
-        setLiveDisplays(target)
+        // The selection unfiltered: setLiveDisplays resolves it through the
+        // backend shim and then skips the displays that are off or
+        // app-occluded, in that order (its doc says why the order matters).
+        val activeIds = gameDisplayIds.ifEmpty { setOf(primaryGameDisplayId()) }
+        Log.d(TAG, "reconcileLiveModes($reason): gameDisplayIds=$gameDisplayIds liveModes=${liveModes.keys}")
+        setLiveDisplays(activeIds)
     }
 
     /** True when any active live mode is In-App Only. By design all modes
@@ -2354,14 +2472,15 @@ class CaptureService : Service() {
      */
     fun onMultiWindowChanged() {
         if (!isLive) return
+        // Unfiltered, like reconcileLiveModes: setLiveDisplays applies the
+        // shim and the skip in the right order.
         val activeIds = gameDisplayIds.ifEmpty { setOf(primaryGameDisplayId()) }
-        val target = activeIds.filterNot { shouldSkipDisplay(it) }.toSet()
-        val structuralChanged = setLiveDisplays(target)
+        val structuralChanged = setLiveDisplays(activeIds)
         if (!structuralChanged) {
             Log.d(TAG, "onMultiWindowChanged: no structural change, refreshing ${liveModes.size} mode(s)")
             liveModes.values.forEach { it.refresh() }
         } else {
-            Log.d(TAG, "onMultiWindowChanged: structural change applied (target=$target)")
+            Log.d(TAG, "onMultiWindowChanged: structural change applied (liveModes=${liveModes.keys})")
         }
     }
 
@@ -2378,10 +2497,11 @@ class CaptureService : Service() {
      */
     fun onHideGameOverlaysChanged() {
         if (!isLive) return
+        // Unfiltered, like reconcileLiveModes: setLiveDisplays applies the
+        // shim and the skip in the right order.
         val activeIds = gameDisplayIds.ifEmpty { setOf(primaryGameDisplayId()) }
-        val target = activeIds.filterNot { shouldSkipDisplay(it) }.toSet()
-        Log.d(TAG, "onHideGameOverlaysChanged: hideGameOverlays=${Prefs(this).hideGameOverlays} → target=$target")
-        setLiveDisplays(target)
+        Log.d(TAG, "onHideGameOverlaysChanged: hideGameOverlays=${Prefs(this).hideGameOverlays} activeIds=$activeIds")
+        setLiveDisplays(activeIds)
     }
 
     /** The game language [observeSourceLanguage] last saw. Main-confined. */
@@ -2432,6 +2552,10 @@ class CaptureService : Service() {
     private fun onSourceLanguageChanged(prefs: Prefs, id: SourceLangId) {
         Log.i(TAG, "game language changed to ${id.code} (isLive=$isLive)")
         dropOverlayModeNotOffered(prefs, id)
+        // The sentence cache is keyed by text alone: the same text under the
+        // other Chinese variant would otherwise serve the rows built for the
+        // old one (the target picker clears it for the same reason).
+        com.playtranslate.ui.LastSentenceCache.clear()
         if (isLive) {
             stopLive()
             startLive()
@@ -2599,12 +2723,15 @@ class CaptureService : Service() {
      *  Routed through [CaptureBackend.capturableTargets] — the same shim
      *  live start and icon placement use — so a stale non-default
      *  selection carried over from an accessibility session collapses to
-     *  the MediaProjection backend's only capturable display. Without it
-     *  a fan-out one-shot would request a display MediaProjection can't
-     *  mirror and silently get default-display pixels back. */
+     *  the MediaProjection backend's only capturable display (without it a
+     *  fan-out one-shot would request a display MediaProjection can't
+     *  mirror and silently get default-display pixels back), and a
+     *  selection naming a display that no longer exists collapses to the
+     *  default display on the accessibility backend too (until 2026-10-14
+     *  it requested the dead display and the capture returned nothing). */
     internal fun oneShotFanoutDisplayIds(): Set<Int> {
         val all = CaptureBackendResolver.active()
-            .capturableTargets(gameDisplayIds.ifEmpty { setOf(primaryGameDisplayId()) })
+            .capturableTargets(this, gameDisplayIds.ifEmpty { setOf(primaryGameDisplayId()) })
         val filtered = all.filter { !shouldSkipDisplay(it) }
         if (filtered.isNotEmpty()) return filtered.toSet()
         // Single-display exception is keyed on gameDisplayIds — the field
@@ -2657,6 +2784,7 @@ class CaptureService : Service() {
      */
     fun holdStart(displayId: Int) {
         lastInteractedDisplayId = displayId
+        configureSavedIfNeeded(displayId)
         // If the floating menu is up, tear it down outright instead of
         // letting the capture path alpha-cycle it. Avoids a class of
         // post-capture layout glitches on the MediaProjection backend where
@@ -2694,6 +2822,7 @@ class CaptureService : Service() {
      * panel.
      */
     fun holdStartFanout() {
+        configureSavedIfNeeded()
         // Same rationale as holdStart: if the floating menu is up, tear it
         // down outright so prepareForCleanCapture has nothing to restore.
         CaptureBackendResolver.activeOverlayUi
@@ -2751,6 +2880,7 @@ class CaptureService : Service() {
         Log.d("HotkeyDbg", "hotkeyHoldStart: mode=$mode isConfigured=$isConfigured isLive=$isLive")
         if (hotkeyActive) return
         hotkeyActive = true
+        configureSavedIfNeeded()
         val targets = oneShotFanoutDisplayIds()
         // No fan-out target (multi-display + every selected display is
         // skip-eligible). hotkeyActive is still set so the matching
@@ -2856,7 +2986,7 @@ class CaptureService : Service() {
             val result = OverlayToolkit.runOcrPipeline(
                 raw,
                 activeRegionForDisplay(displayId),
-                sourceLang,
+                prefs.sourceLangId,
                 ocrManager,
                 statusBarHeight,
                 seedWriter = seedWriter,
@@ -2944,8 +3074,11 @@ class CaptureService : Service() {
         )
         // COMMIT ON DELIVERY: every caller of THIS function delivers what
         // the capture display currently shows (live furigana offers,
-        // one-shot holds), so the record keeps mirroring the screen.
+        // one-shot holds), so both records keep mirroring the screen — a
+        // hold that delivered other text makes a live tier's next
+        // identical emission new again.
         livePanelRecord.committed(displayId, ocrResult.fullText, livePanelStamp())
+        panelEmissions.committed(displayId, ocrResult.fullText, translated, backendDisplayName)
         return perGroup
     }
 
@@ -2957,6 +3090,11 @@ class CaptureService : Service() {
     /** What the panel currently shows, owned HERE at the delivery layer —
      *  see [LivePanelRecord] for the rules and the bug history. */
     private val livePanelRecord = LivePanelRecord()
+
+    /** The overlay tiers' twin of [livePanelRecord]: the exact key of what
+     *  [emitPanelResult] last delivered per display — see
+     *  [PanelEmissionDedup]. Cleared wherever livePanelRecord is. */
+    private val panelEmissions = PanelEmissionDedup()
 
     /** Language key for [livePanelRecord]: same text under a new
      *  source/target pair is new content. */
@@ -2973,18 +3111,23 @@ class CaptureService : Service() {
     internal fun livePanelWouldAccept(displayId: Int, text: String): Boolean =
         appPanelVisible() && livePanelRecord.isNew(displayId, text, livePanelStamp())
 
-    /** Emit a live tier's displayed state to the in-app panel — the ONE
-     *  emission shape shared by the pinhole tier and the reconciler
-     *  presenters (build [texts] via [OverlayToolkit.panelTexts]; gating
-     *  and ordering policy stay with the caller, where they genuinely
-     *  differ). [screenshotPath] is a synchronous JPEG write — callers
-     *  invoke it (lazily) only on paths that actually emit. */
+    /** Emit a live tier's displayed state from [displayId] to the in-app
+     *  panel — the ONE emission shape shared by the pinhole tier and the
+     *  reconciler presenters (build [texts] via [OverlayToolkit.panelTexts];
+     *  visibility gating and ordering policy stay with the caller, where
+     *  they genuinely differ). Deduped HERE against what the panel shows
+     *  ([panelEmissions]): an identical delivery is dropped. [screenshotPath]
+     *  is a synchronous JPEG write, invoked only past the dedup. */
     internal fun emitPanelResult(
+        displayId: Int,
         texts: OverlayToolkit.PanelTexts,
-        screenshotPath: String?,
+        screenshotPath: () -> String?,
         ocrProvenance: OcrProvenance? = null,
         backendDisplayName: String? = null,
     ) {
+        if (!panelEmissions.isNew(displayId, texts, backendDisplayName)) return
+        // The JPEG write runs only past the dedup.
+        val shot = screenshotPath()
         val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
             .format(java.util.Date())
         emitResult(TranslationResult(
@@ -2992,7 +3135,7 @@ class CaptureService : Service() {
             segments = texts.segments,
             translatedText = texts.translatedText,
             timestamp = timestamp,
-            screenshotPath = screenshotPath,
+            screenshotPath = shot,
             backendDisplayName = backendDisplayName,
             ocrProvenance = ocrProvenance,
             langContext = Prefs(this).langContext(),
@@ -3117,6 +3260,29 @@ class CaptureService : Service() {
 
     companion object {
 
+        /**
+         * What a live session keeps capturing after a display unplugged:
+         * [pruned] is the selection without that display. The remainder
+         * itself, unfiltered, for [setLiveDisplays] to resolve through the
+         * backend shim and the skip predicate like every other caller; or
+         * null when [backend] can capture nothing in it
+         * ([CaptureBackend.canCapture]: on accessibility a connected,
+         * non-private display; on MediaProjection the default display),
+         * which ends the session the way an empty remainder always did
+         * (stop, and the toast). The decision is made BEFORE the shim's
+         * fallback, which is right at a start (the user asked for live mode
+         * and nothing else can serve) and wrong after an unplug (the chosen
+         * screen is gone, and the fallback is the app's own screen on a
+         * dual-screen device). So an id the backend rejects, a dead one or
+         * this app's own private projection display, must neither keep the
+         * session alive on the fallback nor end it silently, which the
+         * skip-then-resolve order did until 2026-10-14 (Codex review); a
+         * first cut asked whether the id existed, which a private display
+         * does (second Codex review).
+         */
+        internal fun liveSelectionAfterUnplug(context: Context, backend: CaptureBackend, pruned: Set<Int>): Set<Int>? =
+            if (pruned.any { backend.canCapture(context, it) }) pruned else null
+
         /** Process-scoped reference for in-process callers (e.g. DragLookupController). */
         @Volatile
         var instance: CaptureService? = null
@@ -3206,6 +3372,15 @@ class CaptureService : Service() {
          *  which can't assume the service is already alive. */
         const val ACTION_MP_ACTIVATE = "com.playtranslate.action.MP_ACTIVATE"
 
+        /** A PLAIN start (Context.startService, never startForegroundService)
+         *  from the accessibility-hosted side: the re-bind restore, and a
+         *  floating-icon gesture that finds no service. It carries no
+         *  obligation to promote, so onStartCommand leaves the promotion to
+         *  the gate in [updateForegroundState] instead of promoting
+         *  unconditionally. See
+         *  [com.playtranslate.capture.CaptureLifecycle.startCaptureServicePlain]. */
+        const val ACTION_PLAIN_START = "com.playtranslate.action.PLAIN_START"
+
         /** Debug-build-only broadcast that dumps one raw MediaProjection
          *  frame — see [mpProbeReceiver]. */
         const val ACTION_DEBUG_MP_PROBE = "com.playtranslate.debug.MP_PROBE"
@@ -3228,6 +3403,12 @@ class CaptureService : Service() {
         overrideRegions.clear()
         hasCaptureStateConfigured = false
         _statusUpdates.tryEmit(getString(R.string.status_idle))
+        // The activity flips the panel to Idle on that signal: it leaves its
+        // Result state, so both delivery records clear (identical text read
+        // after this must deliver again). livePanelRecord was not cleared
+        // here before: a furigana-tier gap of the same shape.
+        livePanelRecord.clear()
+        panelEmissions.clear()
     }
 
     /** True iff [configureSaved] has run (display + region set). Explicitly
@@ -3328,9 +3509,10 @@ class CaptureService : Service() {
                     bitmap = blacked
                 }
             }
-            // Snapshot the exact source language (variant included) once for provenance.
+            // Snapshot the exact source language (variant included) once: it keys
+            // the engine selection and the provenance alike.
             val srcId = Prefs(this@CaptureService).sourceLangId
-            val ocrResult = ocrManager.recognise(bitmap, sourceLang, screenshotWidth = raw.width)
+            val ocrResult = ocrManager.recognise(bitmap, srcId, screenshotWidth = raw.width)
             if (BuildConfig.DEBUG && Prefs(this@CaptureService).debugSaveOcrSeed) {
                 OcrSeedWriter.writeSeed(this@CaptureService, bitmap, ocrResult)
             }
@@ -3391,7 +3573,7 @@ class CaptureService : Service() {
             ocrResult.groups.forEachIndexed { i, g ->
                 val tr = perGroup?.getOrNull(i)?.text.orEmpty()
                 if (deferTranslation || tr.isNotEmpty()) translationLogRecorder.onCaptureShown(
-                    token, g.text, tr.takeIf { it.isNotEmpty() }, g.bounds, recordSrc, recordTgt,
+                    token, g.text, tr.takeIf { it.isNotEmpty() }, g.bounds, srcId, recordTgt,
                     com.playtranslate.translationlog.TranslationHistoryStore.PROVENANCE_ONE_SHOT,
                     perGroup?.getOrNull(i)?.backendDisplayName,
                     captureImage = screenshotPath?.let {
@@ -3817,7 +3999,7 @@ class CaptureService : Service() {
         if (pending.historySessionId != null || pending.contextEligible) {
             deferredAttachPlan(pending.groupTexts, perGroup, recordSrc).forEach { (source, tr, backend) ->
                 translationLogRecorder.onCaptureTranslated(
-                    pending.historySessionId, source, tr, recordSrc, recordTgt,
+                    pending.historySessionId, source, tr, pending.sourceLangId, recordTgt,
                     pending.contextEligible, backend,
                 )
             }
@@ -4066,10 +4248,107 @@ class CaptureService : Service() {
         if (iconShowing || isLive || mediaProjectionController.hasConsent ||
             mediaProjectionActivated
         ) {
-            enterForeground()
+            promoteOrDefer()
         } else {
             stopForeground(STOP_FOREGROUND_REMOVE)
+            promoted = false
+            cancelDeferredPromotion()
         }
+    }
+
+    /** True from a successful startForeground until the next
+     *  stopForeground: the ratchet. The platform keeps the allowance it
+     *  granted that first call for every later startForeground on the same
+     *  foreground run (ActiveServices.setFgsRestrictionLocked recomputes
+     *  only when the stored allowance is DENIED, and resets it on
+     *  stopForeground and on the service's destruction, AOSP), so a
+     *  promoted service may change type or re-promote from anywhere. */
+    private var promoted = false
+
+    /** A promotion the platform refused is retried at the next signal that
+     *  can change its answer: the screen turning on, a screensaver ending,
+     *  any later [updateForegroundState], or MainActivity's next start,
+     *  whose credited startForegroundService promotes outright. */
+    private var promotionDeferred = false
+
+    private val deferredPromotionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (!promotionDeferred) return
+            Log.i(TAG, "deferred promotion: re-evaluating on ${intent.action}")
+            updateForegroundState()
+        }
+    }
+
+    /** Whether the user has set this app's battery usage to Unrestricted
+     *  (the Fix disappearing icon page's request), which puts it on the
+     *  device-idle user allowlist: see [onStartCommand]. */
+    private fun isBatteryExempt(): Boolean =
+        getSystemService(PowerManager::class.java)
+            ?.isIgnoringBatteryOptimizations(packageName) == true
+
+    /**
+     * The one uncredited promotion path, for calls to [updateForegroundState]
+     * that no startForegroundService obliges: a sticky restart that finds an
+     * icon up (the accessibility re-bind restore, or the exempted
+     * MediaProjection restore in [onStartCommand]), a projection-loss
+     * reinstall, a window being added or removed, the type change before a
+     * capture. Android 12+ refuses startForeground from the background
+     * unless an exemption applies, and the refusal is
+     * ForegroundServiceStartNotAllowedException (field crashes 2026-07-15,
+     * 2026-09-27/30).
+     *
+     * The call is MADE, and the platform's answer is the signal. Predicting
+     * the answer was tried and under-counted the allowed cases (Codex
+     * 2026-10-06: the tile's MediaProjection activation promotes after the
+     * consent activity has finished, allowed by the five-second activity
+     * grace period and the tile's temporary allowance, neither of which a
+     * local rule modelled, so the session ran without its foreground
+     * service). The allowed set is the platform's: top state, a recently
+     * visible activity, the tile's allowance, a visible app overlay on
+     * Android 15+, the accessibility binding while awake, the battery
+     * exemption, and whatever a ROM adds; the set that refuses is the
+     * complement, and both differ by version and vendor. A refusal costs a
+     * deferral, never the process: the promotion is retried at the next
+     * signal that can change the answer (the screen turning on, a
+     * screensaver ending, any later call here, or MainActivity's next
+     * start, whose credited startForegroundService promotes outright).
+     */
+    private fun promoteOrDefer() {
+        try {
+            enterForeground()
+            cancelDeferredPromotion()
+        } catch (e: IllegalStateException) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                e is android.app.ForegroundServiceStartNotAllowedException
+            ) {
+                Log.w(TAG, "promotion refused by the platform, deferring", e)
+                deferPromotion("refused")
+            } else {
+                throw e
+            }
+        }
+    }
+
+    private fun deferPromotion(why: String) {
+        if (promotionDeferred) return
+        promotionDeferred = true
+        Log.i(TAG, "promotion deferred ($why)")
+        // Protected system broadcasts: no export flag needed for a filter
+        // that holds only those (the accessibility service's SCREEN_OFF
+        // receiver is the precedent).
+        registerReceiver(
+            deferredPromotionReceiver,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_DREAMING_STOPPED)
+            },
+        )
+    }
+
+    private fun cancelDeferredPromotion() {
+        if (!promotionDeferred) return
+        promotionDeferred = false
+        runCatching { unregisterReceiver(deferredPromotionReceiver) }
     }
 
     /** Promote the foreground service to include the mediaProjection type.
@@ -4077,9 +4356,12 @@ class CaptureService : Service() {
      *  34+. Routes through [enterForeground], which derives the type from
      *  [MediaProjectionController.hasConsent] — the call carries the
      *  mediaProjection type whenever consent is held, and drops it back to
-     *  SPECIAL_USE only once consent goes away. */
+     *  SPECIAL_USE only once consent goes away. A refusal (an uncredited
+     *  call from the background) is deferred rather than thrown, and the
+     *  getMediaProjection that follows then fails as a lost projection
+     *  instead of this crashing. */
     internal fun ensureMediaProjectionForegroundType() {
-        enterForeground()
+        promoteOrDefer()
     }
 
     /** startForeground with the correct service type(s).
@@ -4103,6 +4385,7 @@ class CaptureService : Service() {
         // Pre-34 has none of the FGS-type machinery below — one proven call.
         if (Build.VERSION.SDK_INT < 34) {
             startForeground(NOTIF_ID, buildNotification())
+            promoted = true
             return
         }
         if (mediaProjectionController.hasConsent) {
@@ -4112,15 +4395,19 @@ class CaptureService : Service() {
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
                 )
+                promoted = true
                 return
-            } catch (e: Exception) {
+            } catch (e: SecurityException) {
                 // The mediaProjection FGS type is only valid while a live
                 // screen-record token is held. The token can lapse out from
                 // under us (single-use on API 34+, or the system stopping
                 // the projection) and the platform then rejects this start
                 // with a SecurityException. Invalidate the consent so
                 // hasConsent reflects reality; the SPECIAL_USE fall-through
-                // below still gets the service to the foreground.
+                // below still gets the service to the foreground. Only that
+                // exception: a background-start refusal is an
+                // IllegalStateException, which must reach the caller's
+                // deferral (promoteOrDefer) with the consent intact.
                 Log.w(TAG, "enterForeground: mediaProjection FGS type rejected, " +
                     "falling back to SPECIAL_USE — ${e.message}")
                 mediaProjectionController.invalidateConsent()
@@ -4131,6 +4418,7 @@ class CaptureService : Service() {
             NOTIF_ID, buildNotification(),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
         )
+        promoted = true
     }
 
     private fun createNotificationChannel() {

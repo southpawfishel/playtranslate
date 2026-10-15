@@ -59,13 +59,21 @@ class TranslationResultFragment : Fragment() {
          *  stays set and the next trigger retries. Must tolerate repeat calls
          *  while a completion is already in flight. */
         fun completeDeferredTranslation()
+        /** Open [word]'s detail. [surface] is the text it was tapped as, for
+         *  the detail header's conjugation line; null for a lemma.
+         *  [lookupForm] and [lookupReading] are the key the detail page
+         *  resolves with ([WordDetailBinder.Args.lookupForm]); a caller with
+         *  no key of its own leaves them at [word] and [reading]. */
         fun onWordTapped(
             word: String,
             reading: String?,
+            surface: String?,
             screenshotPath: String?,
             sentenceOriginal: String?,
             sentenceTranslation: String?,
-            wordResults: Map<String, Triple<String, String, Int>>
+            wordResults: Map<String, Triple<String, String, Int>>,
+            lookupForm: String = word,
+            lookupReading: String? = reading,
         )
         fun onInteraction()
         fun getAnkiPermissionLauncher(): androidx.activity.result.ActivityResultLauncher<String>?
@@ -155,6 +163,13 @@ class TranslationResultFragment : Fragment() {
          *  running live mode's flavor in place. Only called while
          *  [liveShowOnScreenState] is non-null. */
         fun setLiveShowOnScreen(on: Boolean)
+
+        /** Whether a live session is running right now. Seeds the Words
+         *  card's live auto-hide when the page's view is (re)created
+         *  ([WordRowsBinder.setLiveMode]); later start/stop edges arrive
+         *  through [onLiveModeChanged]. False for a host that never runs
+         *  live mode. */
+        fun isLiveModeRunning(): Boolean
     }
 
     /** The page content — sections, Words card, lens, popovers and the
@@ -213,6 +228,9 @@ class TranslationResultFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         val c = TranslationResultContent(view, requireContext(), prefs, vm, ContentHost(requireActivity()))
         content = c
+        // The Words card's live flag is per view: a view created during live
+        // mode starts auto-hidden, whatever an earlier view's eye did.
+        c.wordRows.setLiveMode(host?.isLiveModeRunning() == true)
         // Back closes an open popover (the size picker, a header's ⋯ menu)
         // before it can leave the page. Enabled exactly while one is up (the
         // open/close event is synchronous with the state); added with the
@@ -306,6 +324,15 @@ class TranslationResultFragment : Fragment() {
     fun onScreenBoxesDismissed() {
         if (view == null) return
         refreshShowOnScreen()
+    }
+
+    /** The host's live-mode start/stop edge: the Words card auto-hides for
+     *  the session and drops the auto-hide on stop
+     *  ([WordRowsBinder.setLiveMode], which ignores a repeat of the current
+     *  state). Before the view exists the seed in [onViewCreated] covers it. */
+    fun onLiveModeChanged(running: Boolean) {
+        if (view == null) return
+        content.wordRows.setLiveMode(running)
     }
 
     /** Recompute the toggle's visibility + accent from the current mode.
@@ -713,33 +740,34 @@ class TranslationResultFragment : Fragment() {
     private fun wireLensActions(lens: MagnifierLens, resolvedAt: SourceWordLookup.ResolvedAt) {
         val activity = activity ?: return
         val resolved = resolvedAt.word
-        val phrase = resolvedAt.phrase
-        val secondaries = phrase?.let { listOf(it) } ?: resolvedAt.members
+        val secondaries = resolvedAt.secondaries()
         val word = resolved.word
         val popupReading = resolved.reading
         val displayEntry = resolved.entry
         val displayEntries = resolved.entries
-        fun openDetail(w: String, reading: String?) {
+        fun openDetail(unit: SourceWordLookup.Resolved) {
             dismissWordPopup()
             host?.onInteraction()
             val ready = currentReady()
             host?.onWordTapped(
-                w, reading,
+                unit.word, unit.reading, unit.surface,
                 ready?.screenshotPath,
                 ready?.originalText,
                 ready?.translatedText,
                 currentSettledRows()?.toLegacyMap() ?: emptyMap(),
+                unit.lookupForm, unit.lookupReading,
             )
         }
         if (displayEntry != null) {
-            lens.onOpenTap = { openDetail(word, popupReading) }
+            lens.onOpenTap = { openDetail(resolved) }
         }
         if (secondaries.isNotEmpty()) {
-            // Secondary-section drill-in (containing phrase or member words):
-            // same detail route as the tapped unit — the sheet re-looks the
-            // string up, and a multi-word key round-trips it unchanged.
+            // Secondary-section drill-in (containing phrase, member words or
+            // alternative entries): same detail route as the tapped unit.
+            // The sheet looks the unit up again under the unit's own key,
+            // and a multi-word key round-trips unchanged.
             lens.onSecondaryOpenTap = { i ->
-                secondaries.getOrNull(i)?.let { sec -> openDetail(sec.word, sec.reading) }
+                secondaries.getOrNull(i)?.let { sec -> openDetail(sec) }
             }
         }
         lens.onAnkiTap = {
@@ -796,14 +824,21 @@ class TranslationResultFragment : Fragment() {
         override fun wireLensActions(lens: MagnifierLens, resolved: SourceWordLookup.ResolvedAt) =
             this@TranslationResultFragment.wireLensActions(lens, resolved)
 
-        override fun onWordTapped(word: String, reading: String?) {
+        override fun onWordTapped(
+            word: String,
+            reading: String?,
+            surface: String?,
+            lookupForm: String,
+            lookupReading: String?,
+        ) {
             val ready = currentReady()
             host?.onWordTapped(
-                word, reading,
+                word, reading, surface,
                 ready?.screenshotPath,
                 ready?.originalText,
                 ready?.translatedText,
                 currentSettledRows()?.toLegacyMap() ?: emptyMap(),
+                lookupForm, lookupReading,
             )
         }
 
