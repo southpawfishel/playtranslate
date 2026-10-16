@@ -1,15 +1,15 @@
 package com.playtranslate.ui
 
-import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.view.View
 import android.widget.EditText
 import android.widget.Toast
 import android.widget.ProgressBar
 import android.widget.TextView
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.isGone
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
@@ -30,7 +30,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 
 /**
- * Settings sub-screen for the Bunpro SRS integration: session token + an
+ * Settings sub-screen for the Bunpro SRS integration: account API token + an
  * on/off switch.
  *
  * UX contract (mirrors [LlmBackendSettingsActivity], the only other screen
@@ -47,16 +47,14 @@ import kotlinx.coroutines.Job
  * token presence, so the user can silence Bunpro without discarding a working
  * token (the LLM/DeepL screens derive `enabled` from key presence instead).
  *
- * A successful save also clears [Prefs.bunproTokenRejected] — the flag exists
- * because Bunpro session tokens expire with no refresh path, and a freshly
- * validated token is by definition not stale. See
- * `docs/features/bunpro-integration.md`.
+ * A successful save also clears [Prefs.bunproTokenRejected], which records a
+ * 401 from a later call — a revoked token, or Bunpro withdrawing the
+ * experimental API-token access [BunproClient] relies on.
  *
- * That same expiry is why the field has a [BunproLoginActivity] button beside
- * it: re-entry is a recurring chore, and reading the cookie by hand needs
- * desktop DevTools. The button only *fills* the field — Save still validates and
- * commits — so a capture behaves exactly like a paste, and the toolbar X
- * discards it like any other edit.
+ * The button beside the field opens Bunpro's API settings page in the
+ * browser, where the token is shown; the user copies it and pastes it here.
+ * The account token doesn't expire the way the old session cookie did, so
+ * this is a one-time step rather than a recurring login.
  */
 class BunproSettingsActivity : SettingsSubPageActivity() {
 
@@ -68,19 +66,6 @@ class BunproSettingsActivity : SettingsSubPageActivity() {
     private lateinit var progressSave: ProgressBar
     private lateinit var switchEnabled: MaterialSwitch
 
-    /** Receives a freshly captured token and drops it in the field. Treated as
-     *  a paste, not a save: the user still commits it, so a bad capture can't
-     *  silently replace a working token. */
-    private val bunproLogin = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode != Activity.RESULT_OK) return@registerForActivityResult
-        val token = result.data?.getStringExtra(BunproLoginActivity.EXTRA_TOKEN).orEmpty()
-        if (token.isBlank()) return@registerForActivityResult
-        etToken.setText(token)
-        etToken.setSelection(etToken.text.length)
-    }
-
     override fun onContentCreated(savedInstanceState: Bundle?) {
         prefs = Prefs(this)
 
@@ -88,8 +73,8 @@ class BunproSettingsActivity : SettingsSubPageActivity() {
         etToken.setText(prefs.bunproToken)
         etToken.setSelection(etToken.text.length)
 
-        findViewById<MaterialButton>(R.id.btnBunproLogin).setOnClickListener {
-            bunproLogin.launch(BunproLoginActivity.newIntent(this))
+        findViewById<MaterialButton>(R.id.btnBunproOpenApiSettings).setOnClickListener {
+            openApiSettingsPage()
         }
 
         wireEnabledRow(findViewById(R.id.rowBunproEnabled))
@@ -100,6 +85,16 @@ class BunproSettingsActivity : SettingsSubPageActivity() {
         btnSave = findViewById(R.id.btnSave)
         progressSave = findViewById(R.id.progressSave)
         btnSave.setOnClickListener { onSave() }
+    }
+
+    /** Opens the page that shows the user's API token. In the browser rather
+     *  than a WebView: the user is likely already logged in there. */
+    private fun openApiSettingsPage() {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(API_SETTINGS_URL)))
+        } catch (e: ActivityNotFoundException) {
+            Toast.makeText(this, R.string.bunpro_no_browser, Toast.LENGTH_LONG).show()
+        }
     }
 
     /** The enable switch. Reflects the pref on entry but does NOT write on
@@ -369,6 +364,9 @@ class BunproSettingsActivity : SettingsSubPageActivity() {
     }
 
     companion object {
+        /** Bunpro's Settings → API page, where the account API token lives. */
+        private const val API_SETTINGS_URL = "https://bunpro.jp/settings/api"
+
         fun newIntent(context: Context): Intent =
             Intent(context, BunproSettingsActivity::class.java)
     }

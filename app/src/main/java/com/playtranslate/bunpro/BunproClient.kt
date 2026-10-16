@@ -16,6 +16,8 @@ import kotlinx.serialization.json.addJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
+import androidx.annotation.VisibleForTesting
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -23,14 +25,18 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
 /**
- * Read-only client for the Bunpro frontend API. Stateless — the caller passes
- * the user's frontend session token (see [com.playtranslate.Prefs]) per call.
+ * Client for the Bunpro frontend API. Stateless — the caller passes the
+ * user's API token (see [com.playtranslate.Prefs]) per call.
  *
- * Auth: the token is the `frontend_api_token` cookie from a logged-in
- * bunpro.jp session, sent as a plain `Authorization: Bearer`. It EXPIRES and
- * has no refresh path, so callers must treat a 401 as "token needs
- * re-entry", not a hard failure. The account API key from settings does NOT
- * work against this API. See `docs/features/bunpro-integration.md`.
+ * Auth: the account API token from Bunpro's Settings → API page, sent as
+ * `Authorization: Bearer` on every request, together with the
+ * [API_TOKEN_PARAM] query flag. The flag is Bunpro's experimental opt-in that
+ * makes the frontend API accept the account token in place of the
+ * `frontend_api_token` session cookie, which expired every two weeks and
+ * could only be renewed by logging in again. It is unofficial: Bunpro may
+ * change or withdraw it, so a 401 still means "token needs re-entry" rather
+ * than a hard failure. Every request is built by [authedRequest], so the flag
+ * can't be forgotten on one route.
  *
  * Best-effort throughout: every failure mode collapses to `null`
  * ([searchVocab]) or [KeyStatus.Unreachable] ([validateToken]) so the UI can
@@ -44,6 +50,10 @@ object BunproClient {
 
     private const val TAG = "BunproClient"
     private const val BASE_URL = "https://api.bunpro.jp/api/frontend"
+
+    /** Query flag that switches a frontend-API request to account-API-token
+     *  auth. Bunpro's own (deliberately alarming) name for it. */
+    internal const val API_TOKEN_PARAM = "dangerously_authenticate_using_api_token"
 
     /**
      * Path for the add/remove-reviews call, relative to [BASE_URL] — verified
@@ -65,12 +75,32 @@ object BunproClient {
      */
     private val requestJson = Json { encodeDefaults = true }
 
-    private val client: OkHttpClient by lazy {
+    private val defaultClient: OkHttpClient by lazy {
         PtHttp.clientBuilder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
             .build()
     }
+
+    /** Replaces the HTTP client in unit tests, which answer requests from an
+     *  interceptor instead of the network. Null in production. */
+    @VisibleForTesting
+    internal var clientOverride: OkHttpClient? = null
+
+    private val client: OkHttpClient get() = clientOverride ?: defaultClient
+
+    /** A request to [path] (relative to [BASE_URL], query allowed) carrying
+     *  [token] and the [API_TOKEN_PARAM] flag. The only way requests here are
+     *  built. */
+    internal fun authedRequest(token: String, path: String): Request.Builder =
+        Request.Builder()
+            .url(
+                "$BASE_URL/$path".toHttpUrl().newBuilder()
+                    .addQueryParameter(API_TOKEN_PARAM, "true")
+                    .build()
+            )
+            .addHeader("Authorization", "Bearer $token")
+            .addHeader("Accept", "application/json")
 
     /**
      * Checks a token against `GET /user`. [KeyStatus.Ok] on 200,
@@ -80,10 +110,7 @@ object BunproClient {
      */
     suspend fun validateToken(token: String): KeyStatus = withContext(Dispatchers.IO) {
         if (token.isBlank()) return@withContext KeyStatus.Invalid("Token blank")
-        val req = Request.Builder()
-            .url("$BASE_URL/user")
-            .addHeader("Authorization", "Bearer $token")
-            .addHeader("Accept", "application/json")
+        val req = authedRequest(token, "user")
             .get()
             .build()
         try {
@@ -107,16 +134,13 @@ object BunproClient {
      * here (`is_searching_grammar = false`).
      *
      * A 401/403 returns [BunproResult.Unauthorized] rather than a generic
-     * failure so the caller can flag the stored token as expired — see
+     * failure so the caller can flag the stored token as rejected — see
      * `Prefs.bunproTokenRejected`.
      */
     suspend fun searchVocab(token: String, query: String): BunproResult<BunproSection> =
         withContext(Dispatchers.IO) {
             if (token.isBlank() || query.isBlank()) return@withContext BunproResult.Failed
-            val req = Request.Builder()
-                .url("$BASE_URL/search/reviewables_v1_1")
-                .addHeader("Authorization", "Bearer $token")
-                .addHeader("Accept", "application/json")
+            val req = authedRequest(token, "search/reviewables_v1_1")
                 .post(searchRequestBody(query).toRequestBody(JSON))
                 .build()
             try {
@@ -154,7 +178,7 @@ object BunproClient {
      *
      * Returns the created [BunproReview] so the caller can render the new SRS
      * standing without a re-search. A 401 yields [BunproResult.Unauthorized] so
-     * the expired-token path stays uniform with the reads.
+     * the rejected-token path stays uniform with the reads.
      */
     suspend fun addToReviews(
         token: String,
@@ -163,10 +187,7 @@ object BunproClient {
     ): BunproResult<BunproReview> =
         withContext(Dispatchers.IO) {
             if (token.isBlank()) return@withContext BunproResult.Failed
-            val req = Request.Builder()
-                .url("$BASE_URL/$ADD_TO_REVIEWS_PATH")
-                .addHeader("Authorization", "Bearer $token")
-                .addHeader("Accept", "application/json")
+            val req = authedRequest(token, ADD_TO_REVIEWS_PATH)
                 .patch(addToReviewsBody(listOf(id), type).toRequestBody(JSON))
                 .build()
             try {
@@ -208,10 +229,7 @@ object BunproClient {
     suspend fun studiedGrammar(token: String): BunproResult<List<BunproReview>> =
         withContext(Dispatchers.IO) {
             if (token.isBlank()) return@withContext BunproResult.Failed
-            val req = Request.Builder()
-                .url("$BASE_URL/reviews/hydrate_reviewable_index?reviewable_type=GrammarPoint")
-                .addHeader("Authorization", "Bearer $token")
-                .addHeader("Accept", "application/json")
+            val req = authedRequest(token, "reviews/hydrate_reviewable_index?reviewable_type=GrammarPoint")
                 .get()
                 .build()
             try {

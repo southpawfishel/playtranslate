@@ -108,11 +108,11 @@ class RootSettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Bunpro CONFIGURE cell: no-token → expired → on/off. Unlike [AnkiCell]
      *  none of these need a permission or an installed app — the whole gate is
-     *  the stored session token. */
+     *  the stored API token. */
     sealed interface BunproCell {
         /** No token saved — tapping opens the sub-page to add one. */
         object NotConnected : BunproCell
-        /** A call came back 401/403: the session token expired. Surfaced from
+        /** A call came back 401/403: the API token was rejected. Surfaced from
          *  the persisted flag rather than a probe — see `Prefs.bunproTokenRejected`. */
         object Expired : BunproCell
         /** Token present and not known-stale; [enabled] is the user's toggle. */
@@ -337,8 +337,8 @@ class RootSettingsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Pure pref read — no network. The Bunpro session token expires, but the
-     *  app learns that from a real 401 (recorded in `bunproTokenRejected`)
+    /** Pure pref read — no network. The app learns that the Bunpro token
+     *  stopped working from a real 401 (recorded in `bunproTokenRejected`)
      *  rather than probing on every settings open. */
     private fun resolveBunproCell(): BunproCell = when {
         prefs.bunproToken.isBlank() -> BunproCell.NotConnected

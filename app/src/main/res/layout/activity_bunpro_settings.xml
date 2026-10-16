@@ -81,17 +81,17 @@
                             android:padding="10dp"
                             android:importantForAutofill="no" />
 
-                        <!-- Fills the field above from a real Bunpro session
-                             (BunproLoginActivity). Outlined, not filled: the
+                        <!-- Opens bunpro.jp's API settings page in the browser,
+                             where the token is shown. Outlined, not filled: the
                              page's one primary action is still Save, which is
                              what actually commits the token. -->
                         <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnBunproLogin"
+                            android:id="@+id/btnBunproOpenApiSettings"
                             style="@style/Widget.Material3.Button.OutlinedButton"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="10dp"
-                            android:text="@string/bunpro_login_button"
+                            android:text="@string/bunpro_open_api_settings_button"
                             android:textAllCaps="false"
                             android:textSize="14sp"
                             app:cornerRadius="12dp" />

@@ -145,14 +145,15 @@ data class BunproAddResponse(
 
 /**
  * Result of a Bunpro read. [Unauthorized] is kept distinct from [Failed]
- * because the frontend session token expires with no refresh path: a 401 is
- * the app's only signal that the stored token has gone stale, and it drives
- * `Prefs.bunproTokenRejected` (and the "token expired" settings cell). Folding
+ * because a 401 is the app's only signal that the stored token stopped
+ * working (revoked, or Bunpro withdrew the experimental API-token access), and
+ * it drives `Prefs.bunproTokenRejected` (and the "token not accepted" settings
+ * cell). Folding
  * it into a generic failure would make that state unreachable.
  */
 sealed interface BunproResult<out T> {
     data class Ok<T>(val value: T) : BunproResult<T>
-    /** 401/403 — the stored token is expired or revoked; prompt for a new one. */
+    /** 401/403 — the stored token was rejected; prompt for a new one. */
     data object Unauthorized : BunproResult<Nothing>
     /** Anything else: offline, 5xx, parse error. Not the token's fault. */
     data object Failed : BunproResult<Nothing>

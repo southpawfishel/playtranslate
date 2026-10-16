@@ -917,9 +917,12 @@ class Prefs internal constructor(
     // user's own SRS standing. See docs/features/bunpro-integration.md.
 
     /**
-     * Bunpro **frontend session token** — the `frontend_api_token` cookie from
-     * a logged-in bunpro.jp session, NOT the account API key in Bunpro's
-     * settings (that key is rejected by this API). Encrypted, like every other
+     * Bunpro **account API token**, from https://bunpro.jp/settings/api. The
+     * frontend API accepts it through Bunpro's experimental opt-in flag (see
+     * [com.playtranslate.bunpro.BunproClient]). Before that, this held the
+     * `frontend_api_token` session cookie, which expired every two weeks; a
+     * cookie still stored here from then is simply rejected (401) and the
+     * user is asked for a new token. Encrypted, like every other
      * credential. Deliberately absent from [migrateSecretsToEncrypted]: that is
      * a one-time upgrade path for keys older versions wrote in plaintext, and
      * this one never had a plaintext form.
@@ -936,12 +939,11 @@ class Prefs internal constructor(
         set(v) = sp.edit { putBoolean(KEY_BUNPRO_ENABLED, v) }
 
     /**
-     * Set when a Bunpro call came back 401/403 — the session token expired.
-     * Unlike every other credential here the Bunpro token is ephemeral with no
-     * refresh path, so validity decays after a successful save. Rather than
-     * ping on every settings open, the app reacts to a real rejection: this
-     * flag drives the "token expired" settings cell and is cleared when a fresh
-     * token validates.
+     * Set when a Bunpro call came back 401/403 — the token was revoked, or
+     * Bunpro withdrew the experimental API-token access, so validity can decay
+     * after a successful save. Rather than ping on every settings open, the
+     * app reacts to a real rejection: this flag drives the "token not
+     * accepted" settings cell and is cleared when a fresh token validates.
      */
     var bunproTokenRejected: Boolean
         get() = sp.getBoolean(KEY_BUNPRO_TOKEN_REJECTED, false)
