@@ -154,7 +154,10 @@ class DragLookupController(
     private var currentAnkiDecks: List<String> = emptyList()
     /** The primary's Bunpro standing and the line's grammar once the Bunpro
      *  fill resolved them. */
-    private var currentBunpro: BunproLookup.Outcome = BunproLookup.Outcome.Unavailable
+    /** Bunpro standing per headword the lens is showing (primary and
+     *  secondaries). A map rather than one outcome because each section is a
+     *  different word with its own standing and its own drill-in. */
+    private val currentBunpro = HashMap<String, BunproLookup.Outcome>()
     private var currentGrammar: List<GrammarMatch> = emptyList()
     /** True while [loadSecondaries] resolves the pending sections. */
     private var secondaryLoading = false
@@ -1055,7 +1058,7 @@ class DragLookupController(
                 // behind the "Load more" row for [loadSecondaries].
                 currentResolution = resolved
                 currentAnkiDecks = emptyList()
-                currentBunpro = BunproLookup.Outcome.Unavailable
+                currentBunpro.clear()
                 currentGrammar = emptyList()
                 secondaryLoading = false
                 var sentenceToRecord: String? = null
@@ -1110,7 +1113,14 @@ class DragLookupController(
                 // and joining the lens's current state under the same identity
                 // guard. One word per lift, so no fan-out concern here.
                 try {
-                    val outcome = BunproLookup.outcomeFor(context, popupData.word)
+                    // Every section the lens shows is its own drill-in, so the
+                    // secondaries earn a pill on the same terms as the primary
+                    // — the lifted word is not the only word on screen.
+                    val words = listOf(popupData.word) +
+                        (currentResolution?.secondaries()?.map { it.word }.orEmpty())
+                    val outcomes = words.distinct().associateWith {
+                        BunproLookup.outcomeFor(context, it)
+                    }.filterValues { it != BunproLookup.Outcome.Unavailable }
                     // Grammar is sentence-scoped: matched against the whole OCR
                     // line under the finger, not just the lifted word. Word
                     // scoping covers only ~10% of characters on real game text,
@@ -1118,10 +1128,10 @@ class DragLookupController(
                     val grammar = currentLineText
                         ?.let { BunproGrammarLookup.forSentence(context, it) }
                         .orEmpty()
-                    if (outcome != BunproLookup.Outcome.Unavailable || grammar.isNotEmpty()) {
+                    if (outcomes.isNotEmpty() || grammar.isNotEmpty()) {
                         withContext(Dispatchers.Main) {
                             if (currentResolution?.word === popupData) {
-                                currentBunpro = outcome
+                                currentBunpro.putAll(outcomes)
                                 currentGrammar = grammar
                                 publishCurrent(LensScroll.Keep)
                             }
@@ -1764,11 +1774,17 @@ class DragLookupController(
         ankiDecks: List<String> = emptyList(),
         loadMoreLoading: Boolean = false,
         scroll: LensScroll = LensScroll.Top,
-        bunpro: BunproLookup.Outcome = BunproLookup.Outcome.Unavailable,
+        bunpro: Map<String, BunproLookup.Outcome> = emptyMap(),
         grammar: List<GrammarMatch> = emptyList(),
     ) {
+        /** This section's standing, or the data unchanged while its lookup is
+         *  still in flight. */
+        fun WordDefinitionData.withBunpro(word: String): WordDefinitionData =
+            bunpro[word]?.let { copy(bunpro = it) } ?: this
+
         val wordData = res.word.toLensData()
-            .copy(ankiDecks = ankiDecks, bunpro = bunpro, grammar = grammar)
+            .copy(ankiDecks = ankiDecks, grammar = grammar)
+            .withBunpro(res.word.word)
         val wordLabel = res.word.machineTranslatedLabel()
         val secondaries = res.secondaries()
         val loadMore = res.pending.takeIf { it.isNotEmpty() }?.let { LensLoadMore(it.size, loadMoreLoading) }
@@ -1776,7 +1792,10 @@ class DragLookupController(
             magnifier.setSplitDefinitions(
                 LensSection(wordData, wordLabel, opens = true),
                 secondaries.map {
-                    LensSection(it.toLensData(), it.machineTranslatedLabel(), opens = true, caption = it.caption)
+                    LensSection(
+                        it.toLensData().withBunpro(it.word), it.machineTranslatedLabel(),
+                        opens = true, caption = it.caption,
+                    )
                 },
                 secondariesOnTop = res.phrase != null,
                 loadMore = loadMore,
@@ -1860,7 +1879,7 @@ class DragLookupController(
         secondaryLoadJob = null
         currentResolution = null
         currentAnkiDecks = emptyList()
-        currentBunpro = BunproLookup.Outcome.Unavailable
+        currentBunpro.clear()
         currentGrammar = emptyList()
         secondaryLoading = false
     }

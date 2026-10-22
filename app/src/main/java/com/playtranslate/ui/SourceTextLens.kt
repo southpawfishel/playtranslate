@@ -5,6 +5,7 @@ import android.graphics.Point
 import android.graphics.Rect
 import android.view.WindowManager
 import com.playtranslate.Prefs
+import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.overlay.OverlayHost
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -107,6 +108,12 @@ class SourceTextLens(
     private var currentAt: SourceWordLookup.ResolvedAt? = null
     /** The primary's Anki decks once the back-fill found any; null until. */
     private var currentDecks: List<String>? = null
+    /** Bunpro standing per headword, filled asynchronously and applied in
+     *  [bindBody] to the primary AND every secondary section. Keyed by word
+     *  rather than held as one outcome because each section is a different
+     *  headword with its own standing, and each is its own drill-in — a
+     *  section the user can open is a word they can ask about. */
+    private val currentBunpro = HashMap<String, BunproLookup.Outcome>()
     /** True while [loadMore] resolves the pending sections. */
     private var loadingMore = false
     private var loadJob: Job? = null
@@ -149,6 +156,7 @@ class SourceTextLens(
         // After dismiss(): the previous lens's onDismiss clears these.
         currentAt = resolvedAt
         currentDecks = null
+        currentBunpro.clear()
         loadingMore = false
         presentedText = tappedText
         val lens = MagnifierLens(
@@ -168,6 +176,7 @@ class SourceTextLens(
                 loadJob = null
                 currentAt = null
                 currentDecks = null
+                currentBunpro.clear()
                 loadingMore = false
                 presentedText = null
             }
@@ -187,6 +196,7 @@ class SourceTextLens(
             currentDecks = updated.ankiDecks
             bindBody(lens, LensScroll.Keep)
         }
+        backfillBunpro(lens, resolvedAt)
         lens.makeInteractive()
         if (fromController) lens.focusPillForController()
     }
@@ -206,20 +216,55 @@ class SourceTextLens(
     private fun bindBody(lens: MagnifierLens, scroll: LensScroll) {
         val at = currentAt ?: return
         val resolved = at.word
-        val data = currentDecks?.let { resolved.data.copy(ankiDecks = it) } ?: resolved.data
+        val data = (currentDecks?.let { resolved.data.copy(ankiDecks = it) } ?: resolved.data)
+            .withBunpro(resolved.word)
         val canOpen = resolved.entry != null || opensWithoutEntry
         val secondaries = at.secondaries()
         val loadMore = SourceWordLookup.loadMoreFor(at, loadingMore)
         if (secondaries.isNotEmpty() || loadMore != null) {
             lens.setSplitDefinitions(
                 LensSection(data, resolved.label, opens = canOpen),
-                secondaries.map { LensSection(it.data, it.label, opens = true, caption = it.caption) },
+                secondaries.map {
+                    LensSection(
+                        it.data.withBunpro(it.word), it.label,
+                        opens = true, caption = it.caption,
+                    )
+                },
                 secondariesOnTop = at.phrase != null,
                 loadMore,
                 scroll,
             )
         } else {
             lens.setDefinitions(data, resolved.label, opens = canOpen)
+        }
+    }
+
+    /** This section's resolved Bunpro standing, or the data unchanged while
+     *  the lookup is still in flight (or had nothing to say). */
+    private fun WordDefinitionData.withBunpro(word: String): WordDefinitionData =
+        currentBunpro[word]?.let { copy(bunpro = it) } ?: this
+
+    /**
+     * Resolves Bunpro for every headword the lens is showing and rebinds as
+     * the answers land.
+     *
+     * Every section is its own drill-in, so every section is a word the user
+     * is being invited to ask about — the primary and the secondaries alike.
+     * Distinct headwords only, and [BunproPills] caches, so the usual cost of
+     * a tap is one request and the cost of a re-tap is none.
+     *
+     * Runs after the body is already up, like the deck back-fill: a network
+     * round trip must never delay the definitions.
+     */
+    private fun backfillBunpro(lens: MagnifierLens, at: SourceWordLookup.ResolvedAt) {
+        val words = listOf(at.word.word) + at.secondaries().map { it.word }
+        BunproPills.fill(
+            ctx, scope, words,
+            isAlive = { this.lens === lens },
+        ) { word, outcome ->
+            currentBunpro[word] = outcome
+            // Keep the viewport: these arrive while the user is reading.
+            bindBody(lens, LensScroll.Keep)
         }
     }
 
@@ -248,6 +293,9 @@ class SourceTextLens(
                 wireActions(lens, filled)
                 val firstLoaded = firstLoadedIndex(filled.keys, at.pending)
                 bindBody(lens, firstLoaded?.let(LensScroll::Reveal) ?: LensScroll.Keep)
+                // The sections that just arrived are new headwords; they get
+                // pills on the same terms as the ones already showing.
+                backfillBunpro(lens, filled)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

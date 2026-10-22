@@ -1301,6 +1301,9 @@ class WordDetailBinder(
 
         addGroupHeader(content, title)
         val card = addGroupCard(content)
+        // Cells keyed by headword so the async Bunpro fill below can find
+        // them; two rows can share a headword (homographs), hence the list.
+        val cellsByWord = HashMap<String, MutableList<WordResultCell>>()
         rows.forEachIndexed { index, row ->
             if (index > 0) addInsetDivider(card, indentPx = dpRes(R.dimen.pt_row_h_padding))
             val cell = WordResultCell(ctx)
@@ -1358,6 +1361,14 @@ class WordDetailBinder(
             )
             memberStyledCells += cell
             card.addView(cell)
+            cellsByWord.getOrPut(row.displayWord) { mutableListOf() }.add(cell)
+        }
+        // These rows are drill-ins in their own right, so they carry the same
+        // pill the page's own headword does.
+        BunproPills.fill(
+            ctx, scope, rows.map { it.displayWord }, isAlive = { ui.isAlive },
+        ) { word, outcome ->
+            cellsByWord[word]?.forEach { it.updateBunpro(outcome) }
         }
     }
 

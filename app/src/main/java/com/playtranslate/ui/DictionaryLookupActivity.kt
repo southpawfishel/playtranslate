@@ -132,6 +132,16 @@ class DictionaryLookupActivity : SettingsSubPageActivity() {
         }
         cellsByWord = byWord
         loadDeckBadges(rows.map { it.displayWord }, byWord)
+        loadBunproBadges(rows.map { it.displayWord }, byWord)
+    }
+
+    /** Bunpro standing for every row — this page is a list of words the user
+     *  looked up on purpose, so it earns the pill on the same terms as the
+     *  results page's Words card. */
+    private fun loadBunproBadges(words: List<String>, cells: Map<String, List<WordResultCell>>) {
+        BunproPills.fill(this, lifecycleScope, words, isAlive = { !isFinishing }) { word, outcome ->
+            cells[word]?.forEach { it.updateBunpro(outcome) }
+        }
     }
 
     private fun bindCell(cell: WordResultCell, rowState: RowState) {

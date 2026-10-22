@@ -13,16 +13,12 @@ import androidx.core.view.isVisible
 import com.playtranslate.AnkiManager
 import com.playtranslate.Prefs
 import com.playtranslate.R
-import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.themeColor
 import com.playtranslate.vocab.HiddenWordsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 /**
@@ -421,10 +417,10 @@ class WordRowsBinder(
      * one: Anki answers a whole word list in a single local ContentProvider
      * query, whereas Bunpro's search takes ONE query string — there is no
      * batch endpoint — so this is one HTTPS request per distinct word.
-     * [BUNPRO_LOOKUP_PERMITS] bounds how many are in flight so a large capture
-     * can't open a socket per word; [BunproLookup]'s process-wide cache
-     * (including negative results) makes every repeat free, which is what
-     * keeps the steady-state cost near zero as vocabulary recurs.
+     * [BunproPills] bounds how many are in flight so a large capture can't
+     * open a socket per word, and its process-wide cache (negative results
+     * included) makes every repeat free, which is what keeps the steady-state
+     * cost near zero as vocabulary recurs.
      *
      * Cells update as each word resolves rather than after a barrier, so the
      * common words don't wait on the slowest lookup.
@@ -433,19 +429,8 @@ class WordRowsBinder(
         words: List<String>,
         cellsByWord: Map<String, List<WordResultCell>>,
     ) {
-        if (!BunproLookup.isEnabled(Prefs(ctx.applicationContext))) return
-        val distinct = words.distinct()
-        if (distinct.isEmpty()) return
-        host.scope.launch {
-            val gate = Semaphore(BUNPRO_LOOKUP_PERMITS)
-            distinct.map { word ->
-                async { word to gate.withPermit { BunproLookup.outcomeFor(ctx, word) } }
-            }.forEach { deferred ->
-                val (word, outcome) = deferred.await()
-                if (!host.isAlive) return@launch
-                if (outcome == BunproLookup.Outcome.Unavailable) return@forEach
-                cellsByWord[word]?.forEach { it.updateBunpro(outcome) }
-            }
+        BunproPills.fill(ctx, host.scope, words, isAlive = { host.isAlive }) { word, outcome ->
+            cellsByWord[word]?.forEach { it.updateBunpro(outcome) }
         }
     }
 
@@ -508,10 +493,5 @@ class WordRowsBinder(
          *  [WordResultCell.DEFAULT_SCALE] (the "large" factor reserved for the
          *  full-screen dictionary results page) so the rows read denser here. */
         const val WORD_CELL_SCALE = 1.0f
-
-        /** Max concurrent Bunpro lookups from the words list. Bunpro has no
-         *  batch endpoint, so a capture costs one request per distinct word;
-         *  this keeps a large capture from opening a socket per word. */
-        const val BUNPRO_LOOKUP_PERMITS = 4
     }
 }
