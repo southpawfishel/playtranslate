@@ -41,6 +41,75 @@ class DefinitionsDocumentIconTest {
         )
     }
 
+    @Test fun `the page's star path matches both star drawables`() {
+        // The Bunpro chip's filled/outline pair differ ONLY in fill, so one
+        // copied path serves both — and both must agree with it.
+        val pathOf = { name: String ->
+            val xml = listOf(
+                File("src/main/res/drawable/$name.xml"),
+                File("app/src/main/res/drawable/$name.xml"),
+            ).firstOrNull { it.isFile } ?: error("$name.xml not found")
+            Regex("""android:pathData="([^"]*)"""")
+                .find(xml.readText())?.groupValues?.get(1)
+                ?: error("no android:pathData in $name.xml")
+        }
+        for (name in listOf("ic_offline_star_filled", "ic_offline_star_outline")) {
+            assertEquals(
+                "$name.xml's path changed — copy it into " +
+                    "DefinitionsDocument.STAR_PATH so the styled meta row's Bunpro " +
+                    "chip draws the same glyph as the native pill.",
+                pathOf(name),
+                DefinitionsDocument.STAR_PATH,
+            )
+        }
+    }
+
+    @Test fun `the Bunpro chip renders its star inline`() {
+        val svg = DefinitionsDocument.contentHtml(
+            WordDefinitionData(
+                word = "猫",
+                reading = null,
+                senses = emptyList(),
+                freqScore = 0,
+                isCommon = false,
+                importedGroups = emptyList(),
+            ),
+            structured = emptyMap(),
+            localizePos = { it.joinToString("/") },
+            metaChips = listOf(
+                DefinitionsDocument.MetaChip(
+                    "Bunpro · Adept 2",
+                    icon = DefinitionsDocument.MetaChip.Icon.STAR_FILLED,
+                ),
+            ),
+        )
+        assertTrue(svg, svg.contains("<svg class=\"chip-icon\""))
+        assertTrue(svg, svg.contains(DefinitionsDocument.STAR_PATH))
+        // Studied = filled; the outline variant must differ, or the one state
+        // the glyph exists to distinguish is lost.
+        assertTrue(svg, svg.contains("fill=\"currentColor\""))
+        assertTrue(svg, !svg.contains("<img"))
+    }
+
+    @Test fun `the outline star is not filled`() {
+        val svg = DefinitionsDocument.contentHtml(
+            WordDefinitionData(
+                word = "猫", reading = null, senses = emptyList(),
+                freqScore = 0, isCommon = false, importedGroups = emptyList(),
+            ),
+            structured = emptyMap(),
+            localizePos = { it.joinToString("/") },
+            metaChips = listOf(
+                DefinitionsDocument.MetaChip(
+                    "Bunpro · Not studied",
+                    icon = DefinitionsDocument.MetaChip.Icon.STAR_OUTLINE,
+                ),
+            ),
+        )
+        assertTrue(svg, svg.contains("fill=\"none\""))
+        assertTrue(svg, svg.contains("stroke=\"currentColor\""))
+    }
+
     @Test fun `the glyph is inline SVG, which the shell's CSP admits`() {
         // An <img> would need a data: URI, and the shell allows images only
         // from the media origin — the chip would render icon-less again, the

@@ -93,8 +93,14 @@ internal fun importedGroupsFromSenses(
 }
 
 /** The styled document's meta row, mirroring [WordDefinitionsView]'s
- *  Common pill / ★ run / frequency chips / deck badge so switching a panel
- *  to the WebView renderer never costs the meta row. */
+ *  Common pill / ★ run / frequency chips / deck badge / Bunpro pill so
+ *  switching a panel to the WebView renderer never costs the meta row.
+ *
+ *  The mirror is NOT automatic: the styled renderer hides the flat body
+ *  outright, so a chip added there and forgotten here disappears on exactly
+ *  the surfaces an imported dictionary styles — which is how the Bunpro pill
+ *  went missing from the word lens while the word list kept it.
+ *  `StyledMetaRowParityTest` is what holds the two in step. */
 internal fun styledMetaChips(
     ctx: Context,
     data: WordDefinitionData,
@@ -132,6 +138,10 @@ internal fun styledMetaChips(
     // The whole badge from its owner, never [AnkiDeckBadge.label] alone —
     // the label-only assembly this replaced is what dropped the icon.
     AnkiDeckBadge.metaChip(ctx, data.ankiDecks)?.let { add(it) }
+    // Likewise from its owner. Omitting this is what made the Bunpro pill
+    // disappear from every word a Yomitan dictionary styled, while the same
+    // word kept its pill in the flat word list — see [BunproBadge.metaChip].
+    BunproBadge.metaChip(ctx, data.bunpro)?.let { add(it) }
 }
 
 /**

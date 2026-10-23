@@ -164,6 +164,31 @@ object BunproBadge {
         )
     }
 
+    /**
+     * The pill as a styled-document chip — the HTML counterpart of
+     * [buildPill], for the Yomitan WebView renderer.
+     *
+     * This exists because the styled renderer REPLACES the flat body
+     * (`body.visibility = GONE`) and rebuilds the meta row from
+     * [styledMetaChips]. That builder mirrored the Common pill, the stars,
+     * the frequency chips and the deck badge, but never learned about Bunpro
+     * — so on any word a Yomitan dictionary styled, the pill silently
+     * vanished while every other chip survived. Null for
+     * [BunproLookup.Outcome.Unavailable], exactly as [buildPill] returns
+     * null, so "nothing to say" stays one decision.
+     */
+    internal fun metaChip(
+        ctx: Context,
+        outcome: BunproLookup.Outcome,
+    ): DefinitionsDocument.MetaChip? {
+        val text = label(ctx, outcome) ?: return null
+        return DefinitionsDocument.MetaChip(
+            text,
+            icon = if (isStudied(outcome)) DefinitionsDocument.MetaChip.Icon.STAR_FILLED
+            else DefinitionsDocument.MetaChip.Icon.STAR_OUTLINE,
+        )
+    }
+
     /** The one place the pill's visuals are defined. */
     private fun pill(
         ctx: Context,

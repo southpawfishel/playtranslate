@@ -397,8 +397,9 @@ ruby > rt { font-size: .5em; }
 
         /** Glyphs the meta row can draw. Each has a native counterpart the
          *  flat renderer draws for the SAME chip — add one only alongside
-         *  the builder that owns both mediums (see [AnkiDeckBadge]). */
-        enum class Icon { NONE, CARD_STACK }
+         *  the builder that owns both mediums (see [AnkiDeckBadge],
+         *  [BunproBadge]). */
+        enum class Icon { NONE, CARD_STACK, STAR_FILLED, STAR_OUTLINE }
     }
 
     fun contentHtml(
@@ -504,7 +505,29 @@ ruby > rt { font-size: .5em; }
         MetaChip.Icon.CARD_STACK ->
             "<svg class=\"chip-icon\" viewBox=\"0 -960 960 960\" aria-hidden=\"true\">" +
                 "<path fill=\"currentColor\" d=\"$CARD_STACK_PATH\"/></svg>"
+        // One path, two fills — exactly how ic_offline_star_filled and
+        // ic_offline_star_outline differ, so the Bunpro chip reads the same
+        // "studied / not" distinction here as it does natively.
+        MetaChip.Icon.STAR_FILLED -> starSvg(filled = true)
+        MetaChip.Icon.STAR_OUTLINE -> starSvg(filled = false)
     }
+
+    private fun starSvg(filled: Boolean): String =
+        "<svg class=\"chip-icon\" viewBox=\"0 0 16 16\" aria-hidden=\"true\">" +
+            "<path fill=\"${if (filled) "currentColor" else "none"}\" " +
+            "stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linejoin=\"round\" " +
+            "d=\"$STAR_PATH\"/></svg>"
+
+    /**
+     * The Bunpro pill's star, shared by both star icons — the geometry
+     * `R.drawable.ic_offline_star_filled` and `ic_offline_star_outline` carry
+     * (they differ only in fill). Copied for the same reason as
+     * [CARD_STACK_PATH], and guarded the same way by
+     * `DefinitionsDocumentIconTest`.
+     */
+    internal const val STAR_PATH =
+        "M8,1.5 L9.94,5.8 L14.5,6.26 L11.07,9.44 L12.06,14 L8,11.6 " +
+            "L3.94,14 L4.93,9.44 L1.5,6.26 L6.06,5.8 Z"
 
     /**
      * The `cards_stack` glyph, in the Material source SVG's own negative-Y
