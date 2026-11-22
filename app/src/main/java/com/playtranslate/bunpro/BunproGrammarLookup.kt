@@ -78,7 +78,7 @@ object BunproGrammarLookup {
         if (sentence.isBlank() || spanEnd <= spanBegin) return emptyList()
         if (!BunproLookup.isEnabled(Prefs(ctx.applicationContext))) return emptyList()
         val idx = index(ctx) ?: return emptyList()
-        val tokens = tokenize(sentence)
+        val tokens = tokenize(sentence).ifEmpty { return emptyList() }
         return try {
             idx.match(sentence, tokens, srsOf = { studied[it] })
                 .filter { it.begin < spanEnd && spanBegin < it.end }
@@ -93,8 +93,9 @@ object BunproGrammarLookup {
         if (sentence.isBlank()) return emptyList()
         if (!BunproLookup.isEnabled(Prefs(ctx.applicationContext))) return emptyList()
         val idx = index(ctx) ?: return emptyList()
+        val tokens = tokenize(sentence).ifEmpty { return emptyList() }
         return try {
-            idx.match(sentence, tokenize(sentence), srsOf = { studied[it] })
+            idx.match(sentence, tokens, srsOf = { studied[it] })
         } catch (e: Exception) {
             emptyList()
         }
@@ -131,8 +132,11 @@ object BunproGrammarLookup {
         null
     }
 
-    /** Tokenization powers the lemma arm; without it only literal surface
-     *  patterns match. Degrades to empty, matching the Provider contract. */
+    /** Tokenization powers the lemma arm AND the morpheme-boundary check.
+     *  Degrades to empty, matching the Provider contract — and callers then
+     *  return nothing rather than match without it: with no tokens the
+     *  matcher cannot reject fragments (でも inside なんでもない), so a
+     *  tokenizer failure would otherwise show up as a burst of false hits. */
     private fun tokenize(text: String): List<JaToken> = try {
         SudachiJapaneseTokenizer.Provider.analyze(text)
     } catch (e: Exception) {
