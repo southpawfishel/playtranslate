@@ -209,6 +209,77 @@ class BunproGrammarMatcherTest {
     }
 
     @Test
+    fun `mastering a long pattern does not unmask the fragments inside it`() {
+        // なければならない is mastered, so it is not shown — but it still
+        // OCCUPIES its span. The trailing ない is part of that pattern, not a
+        // separate occurrence of the ない point.
+        val mustDo = BunproGrammarPoint(
+            id = 100, title = "なければならない", level = "JLPT4",
+            metadata = "なければならない, nakerebanaranai",
+        )
+        val nai = BunproGrammarPoint(
+            id = 101, title = "ない", level = "JLPT5", metadata = "ない, nai",
+        )
+        val idx = BunproGrammarIndex(listOf(mustDo, nai))
+        val text = "行かなければならない"
+        assertEquals(
+            "unmastered, the long pattern wins the span",
+            listOf(100L), idx.match(text).map { it.primary.pointId },
+        )
+        assertTrue(
+            "mastered, the span goes quiet rather than surfacing ない",
+            idx.match(text, srsOf = { if (it == 100L) 12 else null }).isEmpty(),
+        )
+    }
+
+    @Test
+    fun `a conjugated auxiliary matches by lemma`() {
+        // 食べたかった — たい is an auxiliary (助動詞) in UniDic, and it
+        // inflects. The lemma arm used to consider content words only.
+        val tai = BunproGrammarPoint(
+            id = 50, title = "たい", level = "JLPT5", metadata = "たい, tai",
+        )
+        val text = "食べたかった"
+        val tokens = listOf(
+            token("食べ", begin = 0, lemma = "食べる", category = JaCategory.VERB),
+            token("たかっ", begin = 2, lemma = "たい", category = JaCategory.AUX),
+            token("た", begin = 5, lemma = "た", category = JaCategory.AUX),
+        )
+        val hit = BunproGrammarIndex(listOf(tai)).match(text, tokens).single()
+        assertEquals(GrammarMatch.Via.LEMMA, hit.via)
+        assertEquals("たかっ", text.substring(hit.begin, hit.end))
+    }
+
+    @Test
+    fun `a particle is still not matched by lemma`() {
+        val kara = BunproGrammarPoint(
+            id = 60, title = "から", level = "JLPT5", metadata = "から, kara",
+        )
+        // Contrived surface ≠ lemma so only the category gate can reject it.
+        val tokens = listOf(
+            token("からっ", begin = 0, lemma = "から", category = JaCategory.PARTICLE),
+        )
+        assertTrue(BunproGrammarIndex(listOf(kara)).match("からっ", tokens).isEmpty())
+    }
+
+    @Test
+    fun `surface and lemma hits on one span pool their candidates`() {
+        // よかった is a structure form of いい only; its lemma よい is claimed
+        // by a second point too. Both arms hit the same span, and neither
+        // point may be dropped.
+        val yoi = BunproGrammarPoint(
+            id = 8, title = "よい", level = "JLPT3", metadata = "よい, yoi",
+        )
+        val idx = BunproGrammarIndex(
+            listOf(ii, yoi), extraForms = mapOf(7L to listOf("よかった")),
+        )
+        val text = "昨日はよかった。"
+        val tokens = listOf(token("よかった", begin = 3, lemma = "よい"))
+        val hit = idx.match(text, tokens).single()
+        assertEquals(setOf(7L, 8L), hit.candidates.map { it.pointId }.toSet())
+    }
+
+    @Test
     fun `lemma hits do not duplicate a surface hit for the same span`() {
         // Uninflected いい: the surface arm sees it, and the lemma arm must not
         // add a second identical match.

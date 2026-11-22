@@ -1,5 +1,6 @@
 package com.playtranslate.bunpro
 
+import com.playtranslate.dictionary.JaCategory
 import com.playtranslate.dictionary.JaToken
 
 /**
@@ -151,10 +152,13 @@ class BunproGrammarIndex(
         }
 
         // ── Lemma arm ──────────────────────────────────────────────────
-        // Only content words: a particle's dictionary form is the particle,
+        // Content words and auxiliaries. Auxiliaries inflect just like content
+        // words do (たかった → たい, なかった → ない, ません → ます), so leaving
+        // them out missed every conjugated occurrence of those points.
+        // Particles stay out: a particle's dictionary form is the particle,
         // which the surface arm already gates on length for a reason.
         for (t in tokens) {
-            if (!t.category.isContent) continue
+            if (!t.category.isContent && t.category != JaCategory.AUX) continue
             if (t.dictionaryForm.length < minLength) continue
             if (t.dictionaryForm == t.surface) continue // surface arm has it
             if (byAlias.containsKey(t.dictionaryForm)) {
@@ -164,37 +168,56 @@ class BunproGrammarIndex(
             }
         }
 
-        val matches = bySpan.mapNotNull { (span, via) ->
+        val hits = bySpan.mapNotNull { (span, via) ->
             val (begin, end, form) = span
             val all = byAlias[form].orEmpty().mapNotNull { pointsById[it] }
             if (all.isEmpty()) return@mapNotNull null
+            val candidates = all.map { p ->
+                GrammarMatch.GrammarCandidate(
+                    pointId = p.id, title = p.title, level = p.level, slug = p.slug,
+                    meaning = p.meaning,
+                    isPrimaryForm = form == p.title || form == p.titleBase(),
+                    streak = srsOf(p.id),
+                )
+            }
+            GrammarMatch(begin, end, form, via, candidates)
+        }
 
+        // The STRUCTURE of the sentence is settled on every hit, mastered or
+        // not, and relevance is applied only afterwards. Filtering first let a
+        // mastered long pattern vanish before de-overlap, which unmasked the
+        // fragments inside it: master なければならない and its trailing ない
+        // surfaced as a separate grammar point that isn't there.
+        return deOverlap(mergeSameSpan(hits)).mapNotNull { m ->
             // Relevance: drop points the user has MASTERED. Anything below
             // Master survives — studied-but-forgotten is a case worth showing,
             // and it is why this is a streak threshold rather than a boolean.
-            val unmastered = all.filterNot {
-                (srsOf(it.id) ?: -1) >= BunproLevel.MASTER_STREAK
+            val unmastered = m.candidates.filterNot {
+                (it.streak ?: -1) >= BunproLevel.MASTER_STREAK
             }
             if (unmastered.isEmpty()) return@mapNotNull null
-
-            val ranked = unmastered
-                .map { p ->
-                    GrammarMatch.GrammarCandidate(
-                        pointId = p.id, title = p.title, level = p.level, slug = p.slug,
-                        meaning = p.meaning,
-                        isPrimaryForm = form == p.title || form == p.titleBase(),
-                        streak = srsOf(p.id),
-                    )
-                }
-                // Primary forms first; the rest keep catalogue order so the
-                // ordering is at least stable rather than arbitrary.
-                .sortedByDescending { it.isPrimaryForm }
-
-            GrammarMatch(begin, end, form, via, ranked)
+            // Primary forms first; the rest keep catalogue order so the
+            // ordering is at least stable rather than arbitrary.
+            m.copy(candidates = unmastered.sortedByDescending { it.isPrimaryForm })
         }
-
-        return deOverlap(matches)
     }
+
+    /**
+     * Folds hits on the SAME span into one, pooling their candidates.
+     *
+     * The two arms can both claim a span under different forms — よかった as a
+     * structure-table surface form and よい as its lemma — and those forms do
+     * not always map to the same points. Left separate, de-overlap kept
+     * whichever came first and silently discarded the other's candidates.
+     */
+    private fun mergeSameSpan(hits: List<GrammarMatch>): List<GrammarMatch> =
+        hits.groupBy { it.begin to it.end }.values.map { group ->
+            if (group.size == 1) return@map group.first()
+            val pooled = group.flatMap { it.candidates }
+                .groupBy { it.pointId }.values
+                .map { same -> same.firstOrNull { it.isPrimaryForm } ?: same.first() }
+            group.first().copy(candidates = pooled)
+        }
 
     /**
      * Longest-match-wins. ということは and ということ both match the same run;
