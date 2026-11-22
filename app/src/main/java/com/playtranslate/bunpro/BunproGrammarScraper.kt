@@ -201,6 +201,35 @@ object BunproGrammarScraper {
         }
     }
 
+    /**
+     * TEMPORARY — for [BunproDebugExport] only. The RAW structure HTML for one
+     * point (polite, casual), which the store never keeps: it holds only the
+     * forms extracted from it. One request; null on any failure. Remove with
+     * the export.
+     */
+    internal suspend fun fetchStructureHtmlForDebugExport(
+        ctx: Context,
+        slug: String,
+    ): Pair<String?, String?>? {
+        if (Prefs(ctx.applicationContext).bunproToken.isBlank()) return null
+        var buildId = BunproGrammarStore.buildId(ctx) ?: fetchBuildId() ?: return null
+        var body = get(detailUrl(buildId, slug))
+        if (body == null) {
+            // Stale build id — same one-shot recovery as fetchWriteup.
+            fetchBuildId()?.takeIf { it != buildId }?.let {
+                buildId = it
+                body = get(detailUrl(buildId, slug))
+            }
+        }
+        val json = body ?: return null
+        return try {
+            PtJson.lenient.decodeFromString<BunproGrammarDetailResponse>(json)
+                .pageProps.reviewable?.let { it.politeStructure to it.casualStructure }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun detailUrl(buildId: String, slug: String): String {
         val enc = java.net.URLEncoder.encode(slug, "UTF-8")
         return "$SITE/_next/data/$buildId/en/grammar_points/$enc.json?slug=$enc"

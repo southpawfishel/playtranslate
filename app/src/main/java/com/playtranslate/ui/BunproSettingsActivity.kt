@@ -19,6 +19,7 @@ import com.playtranslate.Prefs
 import com.playtranslate.R
 import com.playtranslate.themeColor
 import com.playtranslate.bunpro.BunproClient
+import com.playtranslate.bunpro.BunproDebugExport
 import com.playtranslate.bunpro.BunproGrammarLookup
 import com.playtranslate.bunpro.BunproGrammarScraper
 import com.playtranslate.bunpro.BunproGrammarStore
@@ -81,6 +82,7 @@ class BunproSettingsActivity : SettingsSubPageActivity() {
         wireSyncRow(findViewById(R.id.rowBunproSync))
         wireDetailsRow(findViewById(R.id.rowBunproDetails))
         wireSelfCheckRow(findViewById(R.id.rowBunproSelfCheck))
+        wireDebugExportRow(findViewById(R.id.rowBunproDebugExport))
 
         btnSave = findViewById(R.id.btnSave)
         progressSave = findViewById(R.id.progressSave)
@@ -285,6 +287,38 @@ class BunproSettingsActivity : SettingsSubPageActivity() {
                 OverlayAlert.Builder(this@BunproSettingsActivity)
                     .setTitle(getString(R.string.bunpro_selfcheck_title))
                     .setMessage(report.summary + "\n\n" + report.asText())
+                    .addCancelButton(getString(R.string.bunpro_selfcheck_close))
+                    .show()
+            }
+        }
+    }
+
+    /**
+     * TEMPORARY — DO NOT SHIP. Runs [BunproDebugExport] and shows what it
+     * wrote. Strings are hardcoded on purpose: this row is not meant to reach
+     * translators or a release.
+     */
+    private fun wireDebugExportRow(row: View) {
+        row.findViewById<TextView>(R.id.tvRowTitle).text = "Export matcher data (temporary)"
+        val subtitle = row.findViewById<TextView>(R.id.tvRowSubtitle).apply {
+            text = "Catalogue, Sudachi dictionary, structure sample and logged " +
+                "sentences → Download/PlayTranslateExport"
+            isVisible = true
+        }
+        val button = row.findViewById<MaterialButton>(R.id.btnRowAction)
+        button.text = "Export"
+        button.setOnClickListener {
+            button.isEnabled = false
+            lifecycleScope.launch {
+                val report = BunproDebugExport.run(this@BunproSettingsActivity) { step ->
+                    lifecycleScope.launch { if (!isFinishing) subtitle.text = "Exporting $step…" }
+                }
+                if (isFinishing) return@launch
+                button.isEnabled = true
+                subtitle.text = "Done — see Download/PlayTranslateExport"
+                OverlayAlert.Builder(this@BunproSettingsActivity)
+                    .setTitle("Export")
+                    .setMessage(report)
                     .addCancelButton(getString(R.string.bunpro_selfcheck_close))
                     .show()
             }

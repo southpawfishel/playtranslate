@@ -117,6 +117,13 @@ class SudachiJapaneseTokenizer private constructor(
             current = null
         }
 
+        /** TEMPORARY — for [com.playtranslate.bunpro.BunproDebugExport] only.
+         *  The pack's `system_*.dic` as a plain file, or null when no pack
+         *  dir is set or it holds none. Remove with the export. */
+        fun dictionaryFileForDebugExport(): File? =
+            packDir?.listFiles { f -> f.isFile && f.name.startsWith("system") && f.name.endsWith(".dic") }
+                ?.minByOrNull { it.name }
+
         /** Build + warm now via the STRICT path, PROPAGATING any failure so
          *  JapaneseEngine.preload can map it to PreloadResult.TokenizerInitFailed.
          *  (Unlike the public [analyze], this does not swallow failures.) */

@@ -121,6 +121,10 @@
                     <include layout="@layout/settings_row_action"
                         android:id="@+id/rowBunproSelfCheck" />
 
+                    <!-- TEMPORARY, DO NOT SHIP: BunproDebugExport. -->
+                    <include layout="@layout/settings_row_action"
+                        android:id="@+id/rowBunproDebugExport" />
+
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
