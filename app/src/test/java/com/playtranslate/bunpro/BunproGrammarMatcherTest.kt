@@ -76,18 +76,25 @@ class BunproGrammarMatcherTest {
     }
 
     @Test
-    fun `structure forms would ALSO catch it — the redundancy being measured`() {
-        // Same sentence, no tokens, but with よかった folded in from the detail
-        // page's conjugation table. It matches on surface. So for this class of
-        // point the two routes overlap, and detail earns its 979 requests only
-        // where the lemma arm falls short.
-        val withStructure = BunproGrammarIndex(
-            listOf(ii, toiukoto, wa),
-            extraForms = mapOf(7L to listOf("よくない", "よかった", "よくなかった")),
+    fun `a structure form that extends an accepted alias is matched`() {
+        // かけます is かけ conjugated — the same pattern, so the table earns
+        // its keep here.
+        val kake = BunproGrammarPoint(id = 307, title = "かけ", metadata = "かけ, kake")
+        val idx = BunproGrammarIndex(listOf(kake), extraForms = mapOf(307L to listOf("かけます")))
+        assertEquals("かけます", idx.match("食べかけます").single().matchedForm)
+    }
+
+    @Test
+    fun `a structure form that is only a fragment is not indexed`() {
+        // The table for ている bolds ます and る — pieces of the conjugation,
+        // not the pattern. Indexed, they labelled every ます as ている.
+        val teiru = BunproGrammarPoint(id = 27, title = "ている①", metadata = "ている, ています")
+        val idx = BunproGrammarIndex(
+            listOf(teiru), extraForms = mapOf(27L to listOf("います", "ます", "いる", "る")),
         )
-        val hit = withStructure.match("昨日はよかった。").single { m -> m.candidates.any { it.pointId == 7L } }
-        assertEquals(GrammarMatch.Via.SURFACE, hit.via)
-        assertEquals("よかった", hit.matchedForm)
+        assertTrue(idx.match("行きます").isEmpty())
+        assertTrue(idx.match("ここにいる").isEmpty())
+        assertEquals(1, idx.match("見ている").size)
     }
 
     // ── Noise control ────────────────────────────────────────────────────
@@ -203,9 +210,32 @@ class BunproGrammarMatcherTest {
             id = 358, title = "って", level = "JLPT5", metadata = "って, tte, quotation",
         )
         val hit = BunproGrammarIndex(listOf(toiukoto, tte))
-            .match("そうだって。", srsOf = { if (it == 358L) 12 else null }).single()
+            .match("そうだって。", srsOf = { if (it == 185L) 12 else null }).single()
         assertFalse("the known candidate is gone", hit.isAmbiguous)
-        assertEquals(185L, hit.primary.pointId)
+        assertEquals(358L, hit.primary.pointId)
+    }
+
+    @Test
+    fun `mastering the point a form is named for retires the span`() {
+        // Measured: with する mastered, every する in the corpus (290 of them)
+        // was shown as "する (Have/Wear)". A point that merely lists the form
+        // is not what the form means once its namesake is known.
+        val suru = BunproGrammarPoint(id = 22, title = "する", metadata = "する, suru")
+        val wear = BunproGrammarPoint(
+            id = 1112, title = "する (Have/Wear)", metadata = "している, してる, します, する",
+        )
+        val idx = BunproGrammarIndex(listOf(suru, wear))
+        assertEquals(2, idx.match("勉強する").single().candidates.size)
+        assertTrue(idx.match("勉強する", srsOf = { if (it == 22L) 12 else null }).isEmpty())
+    }
+
+    @Test
+    fun `a second point of the same name survives the first being mastered`() {
+        val teiru1 = BunproGrammarPoint(id = 27, title = "ている①", metadata = "ている")
+        val teiru2 = BunproGrammarPoint(id = 764, title = "ている②", metadata = "ている")
+        val hit = BunproGrammarIndex(listOf(teiru1, teiru2))
+            .match("見ている", srsOf = { if (it == 27L) 12 else null }).single()
+        assertEquals(764L, hit.primary.pointId)
     }
 
     @Test
@@ -264,15 +294,14 @@ class BunproGrammarMatcherTest {
 
     @Test
     fun `surface and lemma hits on one span pool their candidates`() {
-        // よかった is a structure form of いい only; its lemma よい is claimed
+        // よかった is listed by いい only; its lemma よい is claimed
         // by a second point too. Both arms hit the same span, and neither
         // point may be dropped.
         val yoi = BunproGrammarPoint(
             id = 8, title = "よい", level = "JLPT3", metadata = "よい, yoi",
         )
-        val idx = BunproGrammarIndex(
-            listOf(ii, yoi), extraForms = mapOf(7L to listOf("よかった")),
-        )
+        val iiWithPast = ii.copy(metadata = ii.metadata + ", よかった")
+        val idx = BunproGrammarIndex(listOf(iiWithPast, yoi))
         val text = "昨日はよかった。"
         val tokens = listOf(token("よかった", begin = 3, lemma = "よい"))
         val hit = idx.match(text, tokens).single()
