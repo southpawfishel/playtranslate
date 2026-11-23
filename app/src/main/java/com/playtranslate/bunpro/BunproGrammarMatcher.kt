@@ -85,11 +85,29 @@ class BunproGrammarIndex(
 
     private val pointsById: Map<Long, BunproGrammarPoint> = points.associateBy { it.id }
 
+    /** What each point may be matched on, once the forms that would misfire
+     *  are removed — see [BunproAliasFilter] for the rules and why. */
+    private val admitted: Map<Long, PointAliases> = run {
+        val namedBy = HashMap<String, MutableSet<Long>>()
+        points.forEach { p ->
+            TitleShape.parse(p.title).alternatives.forEach { namedBy.getOrPut(it) { HashSet() } += p.id }
+        }
+        points.associate { p ->
+            p.id to BunproAliasFilter.admit(p, extraForms[p.id].orEmpty()) { form ->
+                namedBy[form]?.any { it != p.id } == true
+            }
+        }
+    }
+
+    /** The admitted forms for one point — for the corpus report. */
+    internal fun admittedFor(pointId: Long): PointAliases =
+        admitted[pointId] ?: PointAliases(emptyList())
+
     /** alias → the point ids that claim it. Aliases are shared (って belongs to
      *  both ということ and the casual-quotation point), so this is one-to-many. */
     private val byAlias: Map<String, List<Long>> = buildMap<String, MutableList<Long>> {
         points.forEach { p ->
-            (p.japaneseAliases() + extraForms[p.id].orEmpty()).distinct().forEach { alias ->
+            admitted.getValue(p.id).aliases.forEach { alias ->
                 getOrPut(alias) { mutableListOf() }.add(p.id)
             }
         }
@@ -171,6 +189,12 @@ class BunproGrammarIndex(
         val hits = bySpan.mapNotNull { (span, via) ->
             val (begin, end, form) = span
             val all = byAlias[form].orEmpty().mapNotNull { pointsById[it] }
+                // The first part of a multi-part pattern (しか of しか～ない)
+                // counts only when the rest of the pattern follows it.
+                .filter { p ->
+                    val rest = admitted[p.id]?.requiresAfter?.get(form) ?: return@filter true
+                    BunproAliasFilter.partsFollow(text, end, rest)
+                }
             if (all.isEmpty()) return@mapNotNull null
             val candidates = all.map { p ->
                 GrammarMatch.GrammarCandidate(
@@ -196,6 +220,15 @@ class BunproGrammarIndex(
                 (it.streak ?: -1) >= BunproLevel.MASTER_STREAK
             }
             if (unmastered.isEmpty()) return@mapNotNull null
+            // When the point this form is NAMED for is mastered, the span is
+            // known. What remains are points that merely list the form —
+            // specialised senses such as "する (Cost)" — and showing one of
+            // those on every する would be wrong almost every time. A second
+            // point of the same name (ている①/②) is still shown.
+            val namedMastered = m.candidates.any {
+                it.isPrimaryForm && (it.streak ?: -1) >= BunproLevel.MASTER_STREAK
+            }
+            if (namedMastered && unmastered.none { it.isPrimaryForm }) return@mapNotNull null
             // Primary forms first; the rest keep catalogue order so the
             // ordering is at least stable rather than arbitrary.
             m.copy(candidates = unmastered.sortedByDescending { it.isPrimaryForm })
