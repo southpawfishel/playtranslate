@@ -4,6 +4,8 @@ import android.content.Context
 import com.playtranslate.Prefs
 import com.playtranslate.dictionary.JaToken
 import com.playtranslate.dictionary.SudachiJapaneseTokenizer
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * "What grammar is in this sentence, and does any of it apply to the word the
@@ -48,9 +50,14 @@ object BunproGrammarLookup {
         // the lemma arm covers much of the same ground.
         val extra = BunproGrammarStore.loadStructureForms(ctx)
         val known = BunproGrammarStore.loadStudied(ctx)
+        // Building analyses every form once (~2,700 of them), so it must not
+        // run on whatever thread asked — callers are often on the main one.
+        val built = cached ?: withContext(Dispatchers.Default) {
+            BunproGrammarIndex(points, extraForms = extra, tokenize = ::tokenize)
+        }
         return synchronized(this) {
             // Another caller may have won the race; its index is equivalent.
-            cached ?: BunproGrammarIndex(points, extraForms = extra).also {
+            cached ?: built.also {
                 cached = it
                 studied = known
             }
@@ -77,8 +84,11 @@ object BunproGrammarLookup {
     ): List<GrammarMatch> {
         if (sentence.isBlank() || spanEnd <= spanBegin) return emptyList()
         if (!BunproLookup.isEnabled(Prefs(ctx.applicationContext))) return emptyList()
-        val idx = index(ctx) ?: return emptyList()
+        // Tokenize BEFORE building the index: the index analyses its own
+        // forms, and building it while the tokenizer is down would cache one
+        // that cannot match conjugated patterns for the rest of the process.
         val tokens = tokenize(sentence).ifEmpty { return emptyList() }
+        val idx = index(ctx) ?: return emptyList()
         return try {
             idx.match(sentence, tokens, srsOf = { studied[it] })
                 .filter { it.begin < spanEnd && spanBegin < it.end }
@@ -92,8 +102,8 @@ object BunproGrammarLookup {
     suspend fun forSentence(ctx: Context, sentence: String): List<GrammarMatch> {
         if (sentence.isBlank()) return emptyList()
         if (!BunproLookup.isEnabled(Prefs(ctx.applicationContext))) return emptyList()
-        val idx = index(ctx) ?: return emptyList()
         val tokens = tokenize(sentence).ifEmpty { return emptyList() }
+        val idx = index(ctx) ?: return emptyList()
         return try {
             idx.match(sentence, tokens, srsOf = { studied[it] })
         } catch (e: Exception) {
