@@ -308,6 +308,130 @@ class BunproGrammarMatcherTest {
         assertEquals(setOf(7L, 8L), hit.candidates.map { it.pointId }.toSet())
     }
 
+    // ── Sequence arm: patterns that end in a conjugating word ────────────
+
+    /** A stand-in analyser for FORMS, keyed by the form's text. */
+    private fun analyser(vararg forms: Pair<String, List<JaToken>>): (String) -> List<JaToken> {
+        val known = forms.toMap()
+        return { known[it].orEmpty() }
+    }
+
+    private val te = token("て", begin = 0, lemma = "て", category = JaCategory.PARTICLE)
+
+    @Test
+    fun `a pattern matches with its last word conjugated`() {
+        // Measured miss: てしまった was not found, because the catalogue lists
+        // てしまう and nothing in the sentence is literally that.
+        val shimau = BunproGrammarPoint(id = 140, title = "てしまう", metadata = "てしまう")
+        val idx = BunproGrammarIndex(
+            listOf(shimau),
+            tokenize = analyser(
+                "てしまう" to listOf(te, token("しまう", 1, "しまう", JaCategory.VERB)),
+            ),
+        )
+        val text = "食べてしまった"
+        val tokens = listOf(
+            token("食べ", 0, "食べる", JaCategory.VERB),
+            token("て", 2, "て", JaCategory.PARTICLE),
+            token("しまっ", 3, "しまう", JaCategory.VERB),
+            token("た", 6, "た", JaCategory.AUX),
+        )
+        val hit = idx.match(text, tokens).single()
+        assertEquals(GrammarMatch.Via.LEMMA, hit.via)
+        assertEquals("てしまっ", text.substring(hit.begin, hit.end))
+        assertEquals("てしまう", hit.matchedForm)
+    }
+
+    @Test
+    fun `the words before the last must match literally`() {
+        val shimau = BunproGrammarPoint(id = 140, title = "てしまう", metadata = "てしまう")
+        val idx = BunproGrammarIndex(
+            listOf(shimau),
+            tokenize = analyser(
+                "てしまう" to listOf(te, token("しまう", 1, "しまう", JaCategory.VERB)),
+            ),
+        )
+        // を + しまった: the verb しまう "to put away", not the pattern.
+        val tokens = listOf(
+            token("本", 0, "本", JaCategory.NOUN),
+            token("を", 1, "を", JaCategory.PARTICLE),
+            token("しまっ", 2, "しまう", JaCategory.VERB),
+            token("た", 5, "た", JaCategory.AUX),
+        )
+        assertTrue(idx.match("本をしまった", tokens).isEmpty())
+    }
+
+    @Test
+    fun `a form ending in the copula does not match by lemma`() {
+        // ものだ would otherwise claim もので, whose で is also an inflection
+        // of だ — and is a different piece of grammar.
+        val monoda = BunproGrammarPoint(id = 300, title = "ものだ", metadata = "ものだ")
+        val idx = BunproGrammarIndex(
+            listOf(monoda),
+            tokenize = analyser(
+                "ものだ" to listOf(
+                    token("もの", 0, "もの", JaCategory.NOUN), token("だ", 2, "だ", JaCategory.AUX),
+                ),
+            ),
+        )
+        val tokens = listOf(
+            token("もの", 0, "もの", JaCategory.NOUN), token("で", 2, "だ", JaCategory.AUX),
+        )
+        assertTrue(idx.match("もので", tokens).isEmpty())
+    }
+
+    @Test
+    fun `a form that is another form conjugated is folded into it`() {
+        // している is する + ている. As its own longer form it outranked the
+        // する hit, so mastering する never retired it: every している was
+        // shown as "する (Have/Wear)".
+        val suru = BunproGrammarPoint(id = 22, title = "する", metadata = "する")
+        val wear = BunproGrammarPoint(
+            id = 1112, title = "する (Have/Wear)", metadata = "している, する",
+        )
+        val shi = token("し", 0, "する", JaCategory.VERB)
+        val iru = token("いる", 2, "いる", JaCategory.VERB).copy(isAuxiliaryCapable = true)
+        val idx = BunproGrammarIndex(
+            listOf(suru, wear),
+            tokenize = analyser(
+                "する" to listOf(token("する", 0, "する", JaCategory.VERB)),
+                "している" to listOf(shi, token("て", 1, "て", JaCategory.PARTICLE), iru),
+            ),
+        )
+        val text = "勉強している"
+        val tokens = listOf(
+            token("勉強", 0, "勉強", JaCategory.NOUN),
+            token("し", 2, "する", JaCategory.VERB),
+            token("て", 3, "て", JaCategory.PARTICLE),
+            token("いる", 4, "いる", JaCategory.VERB),
+        )
+        val hit = idx.match(text, tokens).single()
+        assertEquals("し", text.substring(hit.begin, hit.end))
+        assertEquals(22L, hit.primary.pointId)
+        assertTrue(idx.match(text, tokens, srsOf = { if (it == 22L) 12 else null }).isEmpty())
+    }
+
+    @Test
+    fun `literal text outranks a dictionary form on the same span`() {
+        // にせよ is its own point; it is also にする conjugated. The literal
+        // reading goes first.
+        val niseyo = BunproGrammarPoint(id = 500, title = "にせよ・にしろ", metadata = "にせよ, にしろ")
+        val nisuru = BunproGrammarPoint(id = 84, title = "にする", metadata = "にする")
+        val idx = BunproGrammarIndex(
+            listOf(nisuru, niseyo),
+            tokenize = analyser(
+                "にする" to listOf(
+                    token("に", 0, "に", JaCategory.PARTICLE), token("する", 1, "する", JaCategory.VERB),
+                ),
+            ),
+        )
+        val tokens = listOf(
+            token("に", 0, "に", JaCategory.PARTICLE), token("せよ", 1, "する", JaCategory.VERB),
+        )
+        val hit = idx.match("にせよ", tokens).single()
+        assertEquals(listOf(500L, 84L), hit.candidates.map { it.pointId })
+    }
+
     @Test
     fun `lemma hits do not duplicate a surface hit for the same span`() {
         // Uninflected いい: the surface arm sees it, and the lemma arm must not

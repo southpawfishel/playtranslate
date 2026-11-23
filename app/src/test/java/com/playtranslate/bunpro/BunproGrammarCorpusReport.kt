@@ -52,7 +52,14 @@ class BunproGrammarCorpusReport {
         val studied = rows("studied.tsv").associate { r -> r[0].toLong() to r[1].toInt() }
         val sentences = File(dir, "sentences_ja.txt").readLines().filter { it.isNotBlank() }
 
-        val index = BunproGrammarIndex(points, extraForms = forms)
+        val tok = SudachiJapaneseTokenizer.create(dic!!)
+        // BUNPRO_EVAL_NO_SEQ=1 builds the index without form analysis, to
+        // measure what the sequence arm contributes.
+        val index = if (System.getenv("BUNPRO_EVAL_NO_SEQ") == "1") {
+            BunproGrammarIndex(points, extraForms = forms)
+        } else {
+            BunproGrammarIndex(points, extraForms = forms, tokenize = tok::analyze)
+        }
         // What the alias filter removed, for eyeballing the rules themselves.
         File(dir, "aliases_dropped.txt").writeText(
             points.mapNotNull { p ->
@@ -77,7 +84,25 @@ class BunproGrammarCorpusReport {
         var ambiguous = 0
         var total = 0
 
-        SudachiJapaneseTokenizer.create(dic!!).use { tok ->
+        val label = System.getenv("BUNPRO_EVAL_LABEL")?.takeIf { it.isNotBlank() }
+        fun named(base: String) = File(dir, if (label == null) "$base.txt" else "${base}_$label.txt")
+
+        tok.use {
+            // Gold set: draft one if none exists yet, score against it if one
+            // does. See [BunproGoldSet] for the file format.
+            val unfiltered = { s: String -> index.match(s, tok.analyze(s)) }
+            val gold = File(dir, "gold.txt")
+            if (gold.isFile) {
+                val titles = points.associate { it.id to it.title.trim() }
+                named("score").writeText(
+                    BunproGoldSet.score(BunproGoldSet.read(gold), unfiltered) { titles[it] ?: "#$it" },
+                )
+            } else {
+                File(dir, "gold_draft.txt").writeText(
+                    BunproGoldSet.draft(BunproGoldSet.sample(sentences, GOLD_SAMPLE), unfiltered),
+                )
+            }
+
             for (s in sentences) {
                 val tokens = tok.analyze(s)
                 val everything = index.match(s, tokens)
@@ -118,9 +143,12 @@ class BunproGrammarCorpusReport {
         }
         head.append("== per sentence (* = shown after studied filter) ==\n")
 
-        val label = System.getenv("BUNPRO_EVAL_LABEL")?.takeIf { it.isNotBlank() }
-        File(dir, if (label == null) "report.txt" else "report_$label.txt")
-            .writeText(head.toString() + out)
+        named("report").writeText(head.toString() + out)
+    }
+
+    private companion object {
+        /** Sentences in a drafted gold set. */
+        const val GOLD_SAMPLE = 150
     }
 
     private fun key(m: GrammarMatch): String =

@@ -53,8 +53,9 @@ data class GrammarMatch(
          *  multi-token patterns (ということ, なければならない). */
         SURFACE,
 
-        /** A token's dictionary form matched an alias — catches conjugated
-         *  single words (よかった → いい) without needing a conjugation table. */
+        /** A dictionary form matched an alias — catches conjugated single
+         *  words (よかった → いい) and conjugated patterns (てしまった →
+         *  てしまう) without needing a conjugation table. */
         LEMMA,
     }
 }
@@ -62,10 +63,11 @@ data class GrammarMatch(
 /**
  * Finds Bunpro grammar points in a tokenized sentence.
  *
- * Two arms, because grammar comes in two shapes. Lexical patterns span several
- * morphemes and are matched against the raw text; single-word points appear
- * conjugated and are matched against [JaToken.dictionaryForm]. Neither arm
- * alone is sufficient.
+ * Three arms, because grammar comes in three shapes. Fixed patterns span
+ * several morphemes and are matched against the raw text; single-word points
+ * appear conjugated and are matched against [JaToken.dictionaryForm]; and
+ * patterns that END in a conjugating word (てしまう, なければならない) appear
+ * with that last word conjugated, which needs both at once — see [tokenize].
  *
  * [extraForms] folds in surface forms sourced from somewhere other than the
  * catalogue index — specifically [BunproGrammarDetail.structureForms], the
@@ -81,6 +83,18 @@ data class GrammarMatch(
 class BunproGrammarIndex(
     points: List<BunproGrammarPoint>,
     extraForms: Map<Long, List<String>> = emptyMap(),
+    /**
+     * Analyses a FORM (not a sentence), so a multi-token pattern can be
+     * matched with its last word conjugated: てしまう is て + しまう, and
+     * て + しまっ(しまう) in a sentence is the same pattern.
+     *
+     * Optional. Without it the index still works from literal text and
+     * single-word dictionary forms; with it, on 150 hand-labelled sentences,
+     * conjugated てしまう / ておく / ねばならない stop being missed. Pass the
+     * same analyser that tokenizes the sentences, or the two will disagree
+     * about where morphemes end.
+     */
+    tokenize: ((String) -> List<JaToken>)? = null,
 ) {
 
     private val pointsById: Map<Long, BunproGrammarPoint> = points.associateBy { it.id }
@@ -103,15 +117,84 @@ class BunproGrammarIndex(
     internal fun admittedFor(pointId: Long): PointAliases =
         admitted[pointId] ?: PointAliases(emptyList())
 
+    /**
+     * A multi-token form whose last token is in dictionary form, ready to be
+     * matched against sentence tokens: every token but the last by surface,
+     * the last by dictionary form.
+     */
+    private class Sequence(val alias: String, val head: List<String>, val lastLemma: String) {
+        val size: Int get() = head.size + 1
+    }
+
+    /** Each admitted form analysed once. Empty when no analyser was given, or
+     *  when it produced nothing for that form. */
+    private val formTokens: Map<String, List<JaToken>> =
+        if (tokenize == null) emptyMap()
+        else admitted.values.flatMap { it.aliases }.distinct().associateWith { form ->
+            // An analysis that does not tile the form exactly cannot be
+            // trusted to say where its morphemes are.
+            tokenize(form).takeIf { toks ->
+                toks.isNotEmpty() && toks.first().begin == 0 && toks.last().end == form.length &&
+                    toks.zipWithNext().all { (a, b) -> a.end == b.begin }
+            }.orEmpty()
+        }
+
+    private fun sequenceOf(form: String): Sequence? {
+        val toks = formTokens[form].orEmpty()
+        if (toks.size < 2) return null
+        val last = toks.last()
+        // Only a form that ENDS in a dictionary form may match conjugated.
+        // なら analyses as an inflection of だ; letting its lemma match would
+        // turn every だ, な and で in the language into a hit for なら.
+        if (last.surface != last.dictionaryForm || !last.conjugates) return null
+        // The copula and た are excluded even in dictionary form. Their
+        // inflections are grammar points of their own (でしょう, なら, な, で,
+        // たら), so matching by lemma relabelled those: もので became ものだ,
+        // いたら became the past tense, and のでしょう swallowed でしょう.
+        if (last.dictionaryForm.length < 2 || last.dictionaryForm in COPULAS) return null
+        return Sequence(form, toks.dropLast(1).map { it.surface }, last.dictionaryForm)
+    }
+
+    /**
+     * True when [form] is just [base] conjugated: している is する + ている,
+     * ています is ている + ます. Such a form adds nothing the base does not
+     * already match by lemma — but as a LONGER span it used to win de-overlap
+     * and hide the base, which is how every している came to be labelled
+     * "する (Have/Wear)" even with する mastered.
+     */
+    private fun isConjugationOf(form: String, base: String): Boolean {
+        if (form == base) return false
+        val toks = formTokens[form].orEmpty()
+        val seq = sequenceOf(base)
+        val used = when {
+            seq != null ->
+                if (toks.size > seq.size &&
+                    seq.head.indices.all { toks[it].surface == seq.head[it] } &&
+                    toks[seq.size - 1].dictionaryForm == seq.lastLemma
+                ) seq.size else return false
+            toks.isNotEmpty() && toks[0].dictionaryForm == base && toks[0].surface != base &&
+                toks[0].conjugates -> 1
+            else -> return false
+        }
+        return toks.size > used && toks.drop(used).all {
+            it.category.isConjugationGlue || it.isAuxiliaryCapable
+        }
+    }
+
     /** alias → the point ids that claim it. Aliases are shared (って belongs to
      *  both ということ and the casual-quotation point), so this is one-to-many. */
     private val byAlias: Map<String, List<Long>> = buildMap<String, MutableList<Long>> {
         points.forEach { p ->
-            admitted.getValue(p.id).aliases.forEach { alias ->
-                getOrPut(alias) { mutableListOf() }.add(p.id)
-            }
+            val forms = admitted.getValue(p.id).aliases
+            forms.filterNot { form -> forms.any { base -> isConjugationOf(form, base) } }
+                .forEach { alias -> getOrPut(alias) { mutableListOf() }.add(p.id) }
         }
     }
+
+    /** Sequences by the surface of their first token, so a sentence token
+     *  looks up only the patterns that could start at it. */
+    private val sequencesByFirst: Map<String, List<Sequence>> =
+        byAlias.keys.mapNotNull(::sequenceOf).groupBy { it.head.first() }
 
     /** Every distinct matchable form, longest first so longest-match-wins falls
      *  out of iteration order. */
@@ -176,7 +259,7 @@ class BunproGrammarIndex(
         // Particles stay out: a particle's dictionary form is the particle,
         // which the surface arm already gates on length for a reason.
         for (t in tokens) {
-            if (!t.category.isContent && t.category != JaCategory.AUX) continue
+            if (!t.conjugates) continue
             if (t.dictionaryForm.length < minLength) continue
             if (t.dictionaryForm == t.surface) continue // surface arm has it
             if (byAlias.containsKey(t.dictionaryForm)) {
@@ -186,9 +269,30 @@ class BunproGrammarIndex(
             }
         }
 
+        // ── Sequence arm ───────────────────────────────────────────────
+        // A pattern ending in a conjugating word, found with that word
+        // conjugated: て + しまっ(しまう) is てしまう. The uninflected case is
+        // left to the surface arm, which reports the same span.
+        for (i in tokens.indices) {
+            for (seq in sequencesByFirst[tokens[i].surface].orEmpty()) {
+                if (seq.alias.length < minLength || i + seq.size > tokens.size) continue
+                val run = tokens.subList(i, i + seq.size)
+                val last = run.last()
+                if (last.dictionaryForm != seq.lastLemma || last.surface == seq.lastLemma) continue
+                if (run.zipWithNext().any { (x, y) -> x.end != y.begin }) continue
+                if (seq.head.indices.any { run[it].surface != seq.head[it] }) continue
+                bySpan.putIfAbsent(
+                    Triple(run.first().begin, last.end, seq.alias), GrammarMatch.Via.LEMMA,
+                )
+            }
+        }
+
         val hits = bySpan.mapNotNull { (span, via) ->
             val (begin, end, form) = span
             val all = byAlias[form].orEmpty().mapNotNull { pointsById[it] }
+                // A point whose whole title is this form goes ahead of one
+                // that names it as an alternative (ように before ように・ような).
+                .sortedByDescending { it.titleBase() == form }
                 // The first part of a multi-part pattern (しか of しか～ない)
                 // counts only when the rest of the pattern follows it.
                 .filter { p ->
@@ -200,7 +304,7 @@ class BunproGrammarIndex(
                 GrammarMatch.GrammarCandidate(
                     pointId = p.id, title = p.title, level = p.level, slug = p.slug,
                     meaning = p.meaning,
-                    isPrimaryForm = form == p.title || form == p.titleBase(),
+                    isPrimaryForm = form in namesOf(p),
                     streak = srsOf(p.id),
                 )
             }
@@ -246,10 +350,17 @@ class BunproGrammarIndex(
     private fun mergeSameSpan(hits: List<GrammarMatch>): List<GrammarMatch> =
         hits.groupBy { it.begin to it.end }.values.map { group ->
             if (group.size == 1) return@map group.first()
-            val pooled = group.flatMap { it.candidates }
+            // Literal text is stronger evidence than a dictionary form, so
+            // when both arms hit, the points the literal form belongs to go
+            // first: にせよ is にせよ・にしろ before it is にする conjugated.
+            val literal = group.filter { it.via == GrammarMatch.Via.SURFACE }
+            val ordered = if (literal.isEmpty()) group else literal + (group - literal.toSet()).map { m ->
+                m.copy(candidates = m.candidates.map { it.copy(isPrimaryForm = false) })
+            }
+            val pooled = ordered.flatMap { it.candidates }
                 .groupBy { it.pointId }.values
-                .map { same -> same.firstOrNull { it.isPrimaryForm } ?: same.first() }
-            group.first().copy(candidates = pooled)
+                .map { same -> same.first() }
+            ordered.first().copy(candidates = pooled)
         }
 
     /**
@@ -267,11 +378,36 @@ class BunproGrammarIndex(
         return taken.sortedBy { it.begin }
     }
 
+    /**
+     * The forms a point is NAMED for: `ている①` → ている, and each side of
+     * `にせよ・にしろ`. Only a title that is nothing but its name counts. Any
+     * qualifier — "する (Cost)", "Noun + まで", "ている ⇒ てる" — marks a
+     * specialised use of a form that some plainer point is named for, and
+     * ranking those as equals put the special case first.
+     */
+    private val names = HashMap<Long, Set<String>>()
+
+    private fun namesOf(p: BunproGrammarPoint): Set<String> = names.getOrPut(p.id) {
+        val bare = p.title.trim().trimEnd('①', '②', '③', '④', '⑤').trim()
+        if (bare.isEmpty() || !bare.all { it in '぀'..'ゟ' || it in '゠'..'ヿ' || it in '一'..'鿿' }) {
+            emptySet()
+        } else {
+            bare.split('・').filter { it.isNotEmpty() }.toSet()
+        }
+    }
+
     /** Title with Bunpro's sense markers stripped: `ている①` → `ている`. */
     private fun BunproGrammarPoint.titleBase(): String =
-        title.trimEnd(' ', '①', '②', '③', '④', '⑤')
+        title.trim().trimEnd('①', '②', '③', '④', '⑤').trim()
+
+    /** A word that conjugates, so its dictionary form is worth matching:
+     *  content words and auxiliaries, never particles. */
+    private val JaToken.conjugates: Boolean
+        get() = category.isContent || category == JaCategory.AUX
 
     companion object {
+        private val COPULAS = setOf("だ", "です")
+
         /** Below this, a "pattern" is a bare particle. See the class doc. */
         const val DEFAULT_MIN_LENGTH = 2
     }
