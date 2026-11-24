@@ -289,7 +289,7 @@ internal class DefinitionDocument(
         is DefRow.Word -> row.data.importedGroups
         is DefRow.Imported -> row.groups
         is DefRow.SheetWord -> row.importedGroups
-        is DefRow.More, is DefRow.Sense -> emptyList()
+        is DefRow.More, is DefRow.Sense, is DefRow.Grammar -> emptyList()
     }
 
     /**
@@ -323,6 +323,7 @@ internal class DefinitionDocument(
                 is DefRow.Word -> it.opens || it.speak != null || it.trailing != null ||
                     it.data.importedGroups.isNotEmpty()
                 is DefRow.More -> true
+                is DefRow.Grammar -> false
                 is DefRow.Imported -> it.curation?.removable == true ||
                     (it.links && targets.any { t -> t.rowId == it.id && t.act.isNotEmpty() })
                 is DefRow.Sense -> it.removable || it.examples.any { e -> e.removeIndex != null }
@@ -894,10 +895,11 @@ internal class DefinitionDocument(
             val act = when (row) {
                 is DefRow.Word -> if (row.opens) DefAction.OPEN else ""
                 is DefRow.More -> DefAction.MORE
-                is DefRow.Imported, is DefRow.Sense -> ""
+                is DefRow.Imported, is DefRow.Sense, is DefRow.Grammar -> ""
                 is DefRow.SheetWord -> if (row.hidden) "" else DefAction.TARGET
             }
-            out += DocTarget(row.id, act, 0, top, 300, rowHeightCssPx)
+            // The grammar row is no `data-row`: the page reports nothing for it.
+            if (row !is DefRow.Grammar) out += DocTarget(row.id, act, 0, top, 300, rowHeightCssPx)
             if (row is DefRow.Word) {
                 val stub = row.trailing == DefRow.Trailing.SHOW
                 // A head that pins, as tall as its buttons, at the row's top.

@@ -173,6 +173,38 @@ class MagnifierLensLoadMoreTest {
         assertEquals(2, loadMoreTaps)
     }
 
+    private fun grammarMatch(title: String) = com.playtranslate.bunpro.GrammarMatch(
+        begin = 0, end = title.length, matchedForm = title,
+        via = com.playtranslate.bunpro.GrammarMatch.Via.SURFACE,
+        candidates = listOf(
+            com.playtranslate.bunpro.GrammarMatch.GrammarCandidate(
+                pointId = 1, title = title, level = "JLPT4", slug = null,
+                meaning = "to do completely", isPrimaryForm = true, streak = null,
+            ),
+        ),
+    )
+
+    @Test fun `the sentence's grammar is a row under the words and over Load more, and no nav target`() {
+        lens.setSplitDefinitions(primary, listOf(sec1), false, LensLoadMore(2))
+        lens.setGrammar(listOf(grammarMatch("てしまう")))
+
+        val rows = lens.shownRowsForTest()
+        assertEquals(
+            listOf(DefRow.Word::class, DefRow.Word::class, DefRow.Grammar::class, DefRow.More::class),
+            rows.map { it::class },
+        )
+        assertEquals("てしまう", (rows[2] as DefRow.Grammar).lines.single().title)
+        assertFalse("the cursor passes the grammar row by", WordRowList.GRAMMAR_ID in laidOut())
+
+        // A rebind of the same lookup (a deck pill, the footer) keeps it.
+        lens.setSplitDefinitions(primary, listOf(sec1), false, LensLoadMore(2, loading = true), LensScroll.Keep)
+        assertTrue(lens.shownRowsForTest().any { it is DefRow.Grammar })
+
+        // The owner clears it for a new lookup.
+        lens.setGrammar(emptyList())
+        assertFalse(lens.shownRowsForTest().any { it is DefRow.Grammar })
+    }
+
     @Test fun `row is the last nav target`() {
         lens.setSplitDefinitions(primary, emptyList(), false, LensLoadMore(2))
         val nav = laidOut()

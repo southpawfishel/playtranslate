@@ -657,6 +657,15 @@ button.act:active, .act.cur { background: var(--pt-press); }
   font-size: .985em; color: var(--pt-link); white-space: nowrap;
 }
 .more:active { background: var(--pt-press); }
+/* The sentence's Bunpro grammar under the rows (the lens): a small heading,
+   then a line per point, its name in the text colour and its meaning muted. */
+.gram { padding: 10px 16px 12px 16px; }
+.gram-h {
+  font-size: .72em; font-weight: 500; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--pt-hint); margin-bottom: 2px;
+}
+.gram-l { font-size: .86em; line-height: 1.35; color: var(--pt-secondary); margin-top: 3px; }
+.gram-l > b { font-weight: 600; color: var(--pt-fg); }
 /* Two columns on a page at least 560px wide (a landscape screen), for the
    surface whose theme asks (the results' Words card: ptTheme sets and
    clears `cols`). The columns are equal, and a long word cannot widen one.

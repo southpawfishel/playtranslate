@@ -147,6 +147,9 @@ internal class WordRowList<T>(
     private var entries: List<Entry> = emptyList()
     private var ids: List<String> = emptyList()
     private var footer: String? = null
+
+    /** The sentence's Bunpro grammar ([setGrammar]); null for none. */
+    private var grammar: DefRow.Grammar? = null
     private var lang: String = ""
 
     /** word to its Anki decks, as far as they have been asked for. */
@@ -271,7 +274,23 @@ internal class WordRowList<T>(
         entries = emptyList()
         ids = emptyList()
         footer = null
+        grammar = null
         publish()
+    }
+
+    /**
+     * The Bunpro grammar of the sentence these words were read in, drawn as
+     * one read-only row under the words and over the footer
+     * ([DefRow.Grammar]); no [lines], no row. It is the sentence's and not a
+     * word's, so it stands through [setRows] (a list rebinds the same words
+     * for a deck pill or its footer) and goes with [clear] or an empty call
+     * here: the owner says when the sentence has changed.
+     */
+    fun setGrammar(heading: String, lines: List<DefRow.Grammar.Line>) {
+        val next = if (lines.isEmpty()) null else DefRow.Grammar(GRAMMAR_ID, heading, lines)
+        if (grammar == next) return
+        grammar = next
+        if (rows.isNotEmpty()) publish()
     }
 
     /**
@@ -300,7 +319,10 @@ internal class WordRowList<T>(
                 explain = host.explainSubject(row)?.let { explainOf(ids[i]) },
             )
         }
-        document.setRows(words + listOfNotNull(footer?.let { DefRow.More(FOOTER_ID, it) }), lang)
+        document.setRows(
+            words + listOfNotNull(grammar, footer?.let { DefRow.More(FOOTER_ID, it) }),
+            lang,
+        )
     }
 
     /** Terminal: the page and its shell go, nothing draws afterwards. */
@@ -318,6 +340,7 @@ internal class WordRowList<T>(
     }
 
     private fun onRowAction(row: DefRow, action: String) {
+        if (row is DefRow.Grammar) return
         if (row is DefRow.More) {
             host.onInteraction()
             host.onFooter()
@@ -623,6 +646,9 @@ internal class WordRowList<T>(
 
         /** The footer's row id. */
         const val FOOTER_ID = "footer"
+
+        /** The grammar row's id ([setGrammar]). */
+        const val GRAMMAR_ID = "grammar"
 
         /** A document id per row: the word and its reading, which a rebind
          *  of the same lookup repeats (so it patches), with a counter for a

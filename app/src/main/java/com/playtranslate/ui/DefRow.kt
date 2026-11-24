@@ -101,6 +101,24 @@ internal sealed class DefRow {
     data class More(override val id: String, val text: String) : DefRow()
 
     /**
+     * The Bunpro grammar found in the sentence a list's words were read in:
+     * a [heading], then one line per point. Read only, with no action of
+     * its own. The lens shows it under its word rows, where room is short:
+     * a point's title, level and meaning on one wrapped line answers "is
+     * there grammar here worth studying?", and the results page's Grammar
+     * card has the rest.
+     */
+    data class Grammar(
+        override val id: String,
+        val heading: String,
+        val lines: List<Line>,
+    ) : DefRow() {
+        /** One point: its [title], its JLPT [level] and its [meaning], the
+         *  last two null when Bunpro gives none. */
+        data class Line(val title: String, val level: String?, val meaning: String?)
+    }
+
+    /**
      * The imported dictionaries' definitions of a word's own page: one
      * labelled block per dictionary, in full, with live links. Under a
      * [curation] (the Anki word sheet) the definitions taken off the card

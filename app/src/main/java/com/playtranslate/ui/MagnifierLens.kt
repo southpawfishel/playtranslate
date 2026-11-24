@@ -45,6 +45,8 @@ import android.widget.TextView
 import androidx.annotation.VisibleForTesting
 import androidx.appcompat.content.res.AppCompatResources
 import androidx.core.graphics.drawable.DrawableCompat
+import com.playtranslate.bunpro.BunproHtml
+import com.playtranslate.bunpro.GrammarMatch
 import com.playtranslate.ask.Explanation
 import com.playtranslate.ask.WordInSentence
 import com.playtranslate.dictionary.Deinflector
@@ -481,6 +483,16 @@ class MagnifierLens(
         scroll: LensScroll = LensScroll.Top,
     ) {
         lensView?.setSplitDefinitions(primary, secondaries, secondariesOnTop, loadMore, scroll)
+        if (isInteractive) fitHeightToContent()
+    }
+
+    /** The Bunpro grammar of the sentence the lens's word was read in, as
+     *  one read-only row under its sections ([WordRowList.setGrammar]): each
+     *  match's first point, a line each. It stays through a rebind of the
+     *  same lookup and goes when the lens returns to the magnifier; the
+     *  owner clears it (an empty list) when it binds a new lookup. */
+    fun setGrammar(matches: List<GrammarMatch>) {
+        lensView?.setGrammar(matches)
         if (isInteractive) fitHeightToContent()
     }
 
@@ -2525,6 +2537,21 @@ class MagnifierLens(
             val state = (b.loadMore ?: return).copy(loading = loading)
             bind = Bind(b.primary, b.secondaries, b.secondariesOnTop, state)
             list.setFooter(loadMoreText(state))
+        }
+
+        /** See [MagnifierLens.setGrammar]. */
+        fun setGrammar(matches: List<GrammarMatch>) {
+            list.setGrammar(
+                context.getString(R.string.word_detail_group_grammar),
+                matches.map { m ->
+                    val point = m.primary
+                    DefRow.Grammar.Line(
+                        title = point.title.trim(),
+                        level = GrammarResultCell.jlptLabel(point.level)?.takeIf { it.isNotBlank() },
+                        meaning = BunproHtml.toPlainTextOrNull(point.meaning),
+                    )
+                },
+            )
         }
 
         /** The "Load more" row's text as bound, null when there is none. */

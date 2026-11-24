@@ -686,6 +686,26 @@ class DefRowHtmlTest {
         assertFalse(flat, flat.contains("flat cat"))
     }
 
+    @Test fun `the grammar row lists each point on a line and is no target`() {
+        val h = DefRowHtml.html(
+            ctx,
+            DefRow.Grammar(
+                "grammar", "Grammar",
+                listOf(
+                    DefRow.Grammar.Line("てしまう", "N4", "to do completely"),
+                    DefRow.Grammar.Line("a<b", null, null),
+                ),
+            ),
+            "g1", emptyMap(), "ja",
+        )
+        assertTrue(h, h.contains("id=\"g1\""))
+        // Read only: the page reports no row and no action for it.
+        assertFalse(h, h.contains("data-row") || h.contains("data-act"))
+        assertTrue(h, h.contains("<b>てしまう · N4</b> — to do completely"))
+        // A point with no level and no meaning is its title alone, escaped.
+        assertTrue(h, h.contains("<b>a&lt;b</b></div>"))
+    }
+
     @Test fun `text is escaped`() {
         val h = html(data(word = "a<b>", reading = "x&y", senses = listOf(SenseDisplay(emptyList(), "1 < 2", emptyList()))))
         assertTrue(h, h.contains("a&lt;b&gt;") && h.contains("x&amp;y") && h.contains("1 &lt; 2"))

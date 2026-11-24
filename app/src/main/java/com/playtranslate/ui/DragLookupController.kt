@@ -13,6 +13,7 @@ import android.util.TypedValue
 import com.playtranslate.CaptureService
 import com.playtranslate.R
 import com.playtranslate.ask.WordInSentence
+import com.playtranslate.bunpro.BunproGrammarLookup
 import com.playtranslate.displaySizePx
 import com.playtranslate.DisplayGeometry
 import com.playtranslate.displayGeometryOf
@@ -1126,6 +1127,8 @@ class DragLookupController(
                 handOffDragBitmap()
                 return@withContext false
             }
+            // The last lookup's grammar belongs to its sentence, not this one.
+            magnifier.setGrammar(emptyList())
             publishCurrent(LensScroll.Top)
             val interactive = magnifier.makeInteractive()
             if (!interactive) {
@@ -1139,6 +1142,24 @@ class DragLookupController(
             interactive
         }
         if (!shown) return
+        // The sentence's Bunpro grammar, under the word's rows. Matched after
+        // the definitions are up so it never delays them, inside this
+        // lookupJob so a new lookup cancels it, and isolated so a failure
+        // cannot take down a lens already showing. The whole sentence is
+        // matched, not the lifted word: grammar is the sentence's. A lens
+        // that has moved on to another word meanwhile takes nothing.
+        try {
+            val grammar = currentSentence
+                ?.let { BunproGrammarLookup.forSentence(context, it) }
+                .orEmpty()
+            if (grammar.isNotEmpty()) withContext(Dispatchers.Main) {
+                if (currentResolution?.word === popupData) magnifier.setGrammar(grammar)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Lens grammar fill failed: ${e.message}")
+        }
     }
 
     /**

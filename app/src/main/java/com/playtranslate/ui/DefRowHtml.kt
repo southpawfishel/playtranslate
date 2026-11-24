@@ -41,6 +41,7 @@ internal object DefRowHtml {
     ): String = when (row) {
         is DefRow.Word -> word(ctx, row, domId, structured, sourceLang)
         is DefRow.More -> more(row, domId)
+        is DefRow.Grammar -> grammar(row, domId)
         is DefRow.Imported -> imported(ctx, row, domId, structured)
         is DefRow.Sense -> sense(ctx, row, domId, sourceLang)
         is DefRow.SheetWord -> sheetWord(ctx, row, domId, structured, sourceLang)
@@ -292,6 +293,23 @@ internal object DefRowHtml {
         sb.append("<div class=\"row more\" id=\"").append(domId).append("\" data-row data-act=\"")
             .append(DefAction.MORE).append("\">")
         return sb.append(htmlEscape(row.text)).append("</div>").toString()
+    }
+
+    /** The sentence's grammar ([DefRow.Grammar]): no `data-row` and no
+     *  action, so a tap on it reports nothing and the controller's cursor
+     *  passes it by. */
+    private fun grammar(row: DefRow.Grammar, domId: String): String {
+        val sb = StringBuilder()
+        sb.append("<div class=\"row gram\" id=\"").append(domId).append("\">")
+        sb.append("<div class=\"gram-h\">").append(htmlEscape(row.heading)).append("</div>")
+        for (line in row.lines) {
+            sb.append("<div class=\"gram-l\"><b>").append(htmlEscape(line.title))
+            line.level?.let { sb.append(" · ").append(htmlEscape(it)) }
+            sb.append("</b>")
+            line.meaning?.let { sb.append(" — ").append(htmlEscape(it)) }
+            sb.append("</div>")
+        }
+        return sb.append("</div>").toString()
     }
 
     private fun word(
