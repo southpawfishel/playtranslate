@@ -965,6 +965,7 @@
 
     <!-- Header above the per-word tokenization list. -->
     <string name="section_words">Words</string>
+    <string name="section_grammar">Grammar</string>
 
     <!-- The same header once the list's rows are on screen: the section
          name followed by how many words the list holds. %1$d = the number
@@ -1960,6 +1961,145 @@
 
     <!-- Description cell explaining the DeepL service. -->
     <string name="deepl_settings_about"><xliff:g id="brand_deepl" example="DeepL">DeepL</xliff:g> is a translation service known for high-quality output, especially in European languages.</string>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         BUNPRO — Japanese SRS integration settings sub-page.
+         ═══════════════════════════════════════════════════════════════ -->
+
+    <!-- Toolbar title.  Brand name, not translated. -->
+    <string name="bunpro_settings_title" translatable="false">Bunpro</string>
+
+    <!-- Content description for the toolbar X (discards edits). -->
+    <string name="bunpro_settings_close_cd">Close without saving</string>
+
+    <!-- Label above the API-token entry field. -->
+    <string name="bunpro_token_field_label">API token</string>
+
+    <!-- Placeholder in the empty API-token field. -->
+    <string name="hint_bunpro_token">Paste your Bunpro API token</string>
+
+    <!-- Button that opens bunpro.jp's Settings → API page in the browser,
+         where the user copies their token from. -->
+    <string name="bunpro_open_api_settings_button">Get your token from Bunpro</string>
+
+    <!-- Toast when no app can open the Bunpro settings link. -->
+    <string name="bunpro_no_browser">No browser available. Open bunpro.jp/settings/api to find your token.</string>
+
+    <!-- Switch turning the Bunpro integration on/off, independent of whether
+         a token is saved. -->
+    <string name="bunpro_enabled_row_title">Show Bunpro status</string>
+    <string name="bunpro_enabled_row_subtitle">Look up your SRS progress for Japanese words</string>
+
+    <!-- Description cell explaining the integration and the token caveat. -->
+    <string name="bunpro_settings_about"><xliff:g id="brand_bunpro" example="Bunpro">Bunpro</xliff:g> is a Japanese grammar and vocabulary SRS. This uses your account API token through an experimental, unofficial Bunpro option. Bunpro may change or remove it at any time, so the integration could stop working without notice. Use it at your own risk.</string>
+
+    <!-- Alert shown when the entered token is rejected by Bunpro. -->
+    <string name="bunpro_invalid_token_alert_title">Token not accepted</string>
+    <string name="bunpro_invalid_token_alert_message">Bunpro rejected this token. Check that you copied the whole token from Settings → API on bunpro.jp, then try again.</string>
+    <string name="bunpro_invalid_token_alert_button">OK</string>
+
+    <!-- Bunpro word badge: shown beside the Common pill when the user has
+         this word in their Bunpro reviews. -->
+    <!-- Bunpro's own SRS stage names; brand terminology, left untranslated. -->
+    <string name="word_bunpro_stage_beginner" translatable="false">Beginner</string>
+    <string name="word_bunpro_stage_adept" translatable="false">Adept</string>
+    <string name="word_bunpro_stage_seasoned" translatable="false">Seasoned</string>
+    <string name="word_bunpro_stage_expert" translatable="false">Expert</string>
+    <string name="word_bunpro_stage_master" translatable="false">Master</string>
+    <!-- Stage plus its step, e.g. "Adept 2". -->
+    <string name="word_bunpro_stage_step_fmt" translatable="false"><xliff:g id="stage" example="Adept">%1$s</xliff:g> <xliff:g id="step" example="2">%2$d</xliff:g></string>
+    <!-- Badge text; %1$s is the resolved stage, e.g. "Adept 2" or "Master". -->
+    <string name="word_bunpro_level_fmt">Bunpro · <xliff:g id="level" example="Adept 2">%1$s</xliff:g></string>
+    <string name="word_bunpro_studied" translatable="false">Bunpro</string>
+    <!-- Word exists in Bunpro but the user hasn't started studying it. -->
+    <string name="word_bunpro_not_studied">Bunpro · Not studied</string>
+    <!-- Word has no Bunpro vocab entry at all. -->
+    <string name="word_bunpro_absent">Not in Bunpro</string>
+    <!-- Bunpro returned near-misses but no exact match; tap to see them. -->
+    <string name="word_bunpro_maybe">Maybe in Bunpro</string>
+    <string name="word_bunpro_maybe_dialog_title">Possible Bunpro matches</string>
+    <!-- %1$s is the word the user looked up. -->
+    <string name="word_bunpro_maybe_dialog_intro">No exact match for <xliff:g id="word" example="ということ">%1$s</xliff:g>, but Bunpro returned:</string>
+    <string name="word_bunpro_maybe_dialog_close">Close</string>
+    <!-- Confirm dialog before the one write this app makes. -->
+    <string name="word_bunpro_add_title">Add to Bunpro reviews?</string>
+    <!-- %1$s is the word being added. -->
+    <string name="word_bunpro_add_message"><xliff:g id="word" example="肺">%1$s</xliff:g> will be added to your Bunpro review queue and will start appearing in your reviews.</string>
+    <!-- %1$s is the grammar point being added. -->
+    <string name="word_bunpro_add_grammar_message">The grammar point <xliff:g id="point" example="ていた">%1$s</xliff:g> will be added to your Bunpro review queue and will start appearing in your reviews.</string>
+    <string name="word_bunpro_add_confirm">Add</string>
+    <string name="word_bunpro_add_cancel">Cancel</string>
+    <string name="word_bunpro_add_done">Added to your Bunpro reviews</string>
+    <string name="word_bunpro_add_failed">Couldn\'t add to Bunpro — check your API token</string>
+    <!-- Accessibility label; %1$s is the visible badge text. -->
+    <string name="word_bunpro_badge_cd">In your Bunpro reviews: <xliff:g id="badge" example="Bunpro · Streak 5">%1$s</xliff:g></string>
+    <!-- Accessibility label for the non-studied badge states. -->
+    <string name="word_bunpro_status_cd">Bunpro status: <xliff:g id="badge" example="Not in Bunpro">%1$s</xliff:g></string>
+
+    <!-- Grammar section in the word-detail sheet. -->
+    <string name="word_detail_group_grammar">Grammar</string>
+    <!-- %1$s is the grammar point, %2$s its JLPT level, e.g. "さすが · N2". -->
+    <string name="word_grammar_title_fmt"><xliff:g id="point" example="さすが">%1$s</xliff:g> · <xliff:g id="level" example="N2">%2$s</xliff:g></string>
+    <!-- %1$s is the form as it appears in the sentence. -->
+    <string name="word_grammar_matched_fmt">Matched <xliff:g id="form" example="よかった">%1$s</xliff:g> in this sentence</string>
+    <!-- %1$s lists the other grammar points this form could be. -->
+    <string name="word_grammar_also_fmt">Could also be: <xliff:g id="others" example="ということ">%1$s</xliff:g></string>
+
+    <!-- Add-to-reviews affordance on a grammar row. -->
+    <string name="word_grammar_writeup_unavailable">Could not load the explanation. Check your connection and Bunpro API token.</string>
+    <string name="word_grammar_added">Added to your Bunpro reviews</string>
+    <string name="word_grammar_add_failed">Couldn\'t add to Bunpro — check your API token</string>
+    <string name="word_grammar_add_cd">Add this grammar point to your Bunpro reviews</string>
+
+    <!-- Inline explanation on a grammar row. -->
+    <!-- %1$s is Bunpro's caution note for the point. -->
+    <string name="word_grammar_caution_fmt">⚠ <xliff:g id="caution" example="よく can also mean frequently">%1$s</xliff:g></string>
+    <string name="word_grammar_load_explanation">Read the explanation</string>
+    <string name="word_grammar_loading_explanation">Loading explanation…</string>
+    <string name="word_grammar_show_more">Show more</string>
+    <string name="word_grammar_show_less">Show less</string>
+
+    <!-- Grammar catalogue mirror + on-device verification rows. -->
+    <string name="bunpro_sync_row_title">Grammar catalogue</string>
+    <string name="bunpro_sync_row_never">Not synced yet</string>
+    <!-- %1$d is how many grammar points are stored on this device. -->
+    <string name="bunpro_sync_row_count"><xliff:g id="count" example="979">%1$d</xliff:g> grammar points stored</string>
+    <string name="bunpro_sync_button">Sync</string>
+    <string name="bunpro_sync_working">Syncing…</string>
+    <string name="bunpro_sync_result_title">Catalogue sync</string>
+    <!-- %1$d is the number of grammar points downloaded. -->
+    <string name="bunpro_sync_ok"><xliff:g id="count" example="979">%1$d</xliff:g> grammar points downloaded and stored on this device.</string>
+    <string name="bunpro_sync_studied_ok">Your studied grammar was synced too, so points you already know are hidden.</string>
+    <string name="bunpro_sync_studied_failed">Your studied grammar could not be synced — points you already know will still be shown. Check your API token.</string>
+    <string name="bunpro_sync_not_configured">Save a Bunpro API token first.</string>
+    <!-- %1$s is a short technical reason. -->
+    <string name="bunpro_sync_failed">Sync failed: <xliff:g id="reason" example="could not read buildId">%1$s</xliff:g></string>
+
+    <string name="bunpro_details_row_title">Grammar explanations</string>
+    <string name="bunpro_details_row_none">Not downloaded — sync the catalogue first</string>
+    <!-- %1$d fetched, %2$d total grammar points. -->
+    <string name="bunpro_details_row_progress"><xliff:g id="done" example="120">%1$d</xliff:g> of <xliff:g id="total" example="979">%2$d</xliff:g> downloaded</string>
+    <string name="bunpro_details_button">Fetch</string>
+    <string name="bunpro_details_confirm_title">Download grammar details?</string>
+    <string name="bunpro_details_confirm_body">This fetches one page per grammar point, deliberately slowly so it is not a burden on Bunpro. It takes several minutes and can be stopped at any time — progress is saved, so it picks up where it left off.
+
+It is optional: grammar matching already works without it.</string>
+    <string name="bunpro_details_confirm_start">Start</string>
+    <string name="bunpro_details_done">Download complete.</string>
+    <string name="bunpro_details_stopped">Stopped — progress saved. Run it again to continue.</string>
+    <string name="bunpro_selfcheck_row_title">Run self-check</string>
+    <string name="bunpro_selfcheck_row_subtitle">Verifies the tokenizer and grammar matching on this device</string>
+    <string name="bunpro_selfcheck_button">Run</string>
+    <string name="bunpro_selfcheck_working">Running…</string>
+    <string name="bunpro_selfcheck_title">Self-check</string>
+    <string name="bunpro_selfcheck_close">Close</string>
+
+    <!-- Bunpro hub-cell digests. -->
+    <string name="settings_cell_bunpro" translatable="false">Bunpro</string>
+    <string name="settings_bunpro_not_connected_summary">Add your API token to see your SRS progress</string>
+    <string name="settings_bunpro_expired_summary">API token not accepted — tap to update</string>
+    <string name="settings_bunpro_off_summary">Off</string>
+    <string name="settings_bunpro_on_summary">Showing your SRS progress</string>
 
     <!-- ═══════════════════════════════════════════════════════════════
          OPENAI / GEMINI / DEEPSEEK — brand display names and per-backend
@@ -3421,6 +3561,7 @@
 
     <!-- contentDescription for the eye-toggle on the words section. -->
     <string name="cd_toggle_words_visibility">Toggle words visibility</string>
+    <string name="cd_toggle_grammar_visibility">Toggle grammar visibility</string>
 
     <!-- contentDescription for the × close button on the word-detail
          bottom sheet and on the translation error pill at the top of the

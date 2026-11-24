@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Grammar section (Bunpro): header + card, the grammar points found in the
+     sentence. Shared by every surface that shows the results sections, between
+     Ask and Words. Unlike the other sections it is ONE child, its header and
+     card inside it: the whole group, header included, is GONE unless the
+     sentence matched something, so a capture with no grammar shows no empty
+     scaffolding. GrammarSectionBinder owns it; ResultSectionsLayout stacks it
+     by id. Its own section rather than a block inside Words: the two lists
+     answer different questions (this one is sentence-scoped), and sharing a
+     card made grammar read as vocabulary. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/grammarSection"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:visibility="gone">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingTop="@dimen/pt_group_gap"
+        android:paddingBottom="8dp"
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp">
+
+        <TextView
+            android:id="@+id/labelGrammar"
+            style="@style/Text.PT.GroupHeader"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/section_grammar" />
+
+        <ImageButton
+            android:id="@+id/btnToggleGrammar"
+            android:layout_width="36dp"
+            android:layout_height="32dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/cd_toggle_grammar_visibility"
+            android:src="@drawable/ic_visibility"
+            app:tint="?attr/ptTextMuted" />
+
+    </LinearLayout>
+
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/cardGrammar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:cardBackgroundColor="?attr/ptCard"
+        app:cardCornerRadius="@dimen/pt_radius"
+        app:cardElevation="0dp"
+        app:strokeColor="?attr/ptDivider"
+        app:strokeWidth="1dp">
+
+        <LinearLayout
+            android:id="@+id/bunproGrammarContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+    </com.google.android.material.card.MaterialCardView>
+
+</LinearLayout>

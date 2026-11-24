@@ -6,6 +6,7 @@ import android.view.ViewGroup
 import androidx.annotation.VisibleForTesting
 import com.playtranslate.AnkiManager
 import com.playtranslate.R
+import com.playtranslate.bunpro.BunproLookup
 import com.playtranslate.ask.AskState
 import com.playtranslate.ask.Explanation
 import com.playtranslate.ask.WordExplanations
@@ -80,6 +81,11 @@ internal class WordRowList<T>(
         /** Whether rows carry the "already in Anki" deck pill. */
         val deckBadges: Boolean
 
+        /** Whether rows carry the Bunpro status pill. Every list does unless
+         *  it says otherwise: wherever a word can be opened, its Bunpro
+         *  standing is shown ([BunproPills]). */
+        val bunproBadges: Boolean get() = true
+
         /** [row]'s second button as it should draw now; null for none. */
         fun trailing(row: T): DefRow.Trailing?
 
@@ -145,6 +151,9 @@ internal class WordRowList<T>(
 
     /** word to its Anki decks, as far as they have been asked for. */
     private val decksByWord = HashMap<String, List<String>>()
+
+    /** word to its Bunpro standing, as far as it has been resolved. */
+    private val bunproByWord = HashMap<String, BunproLookup.Outcome>()
 
     /** Row ids with a speak in flight (the row draws its spinner), and the
      *  jobs, so a second tap on a speaking row does nothing. */
@@ -243,6 +252,7 @@ internal class WordRowList<T>(
         }
         publish()
         loadDeckBadges()
+        loadBunproBadges()
     }
 
     /** The footer's text alone (its loading state), the rows as they are. */
@@ -275,7 +285,10 @@ internal class WordRowList<T>(
             val entry = entries[i]
             DefRow.Word(
                 id = ids[i],
-                data = entry.data.copy(ankiDecks = decksByWord[entry.data.word].orEmpty()),
+                data = entry.data.copy(
+                    ankiDecks = decksByWord[entry.data.word].orEmpty(),
+                    bunpro = bunproByWord[entry.data.word] ?: entry.data.bunpro,
+                ),
                 opens = entry.opens,
                 speak = if (ids[i] in speaking) DefRow.Speak.LOADING else DefRow.Speak.IDLE,
                 trailing = host.trailing(row),
@@ -492,6 +505,33 @@ internal class WordRowList<T>(
             if (!host.isAlive) return@launch
             for (w in uncached) decksByWord[w] = result[w].orEmpty()
             publish()
+        }
+    }
+
+    // ── Bunpro status pills ──────────────────────────────────────────────
+
+    /** Reads every listed word's Bunpro standing again (a word was added to
+     *  reviews from its own page) and redraws the rows whose pill changed.
+     *  Free: [BunproLookup] has every one of them cached. */
+    fun refreshBunproBadges() {
+        if (rows.isNotEmpty()) loadBunproBadges()
+    }
+
+    /**
+     * The Bunpro counterpart to [loadDeckBadges], and deliberately not a
+     * batched one: Bunpro's search takes one query, so this is one request
+     * per distinct word not yet cached. [BunproPills] bounds how many are in
+     * flight and skips the answers with nothing to show. A row redraws as
+     * its word resolves, so the common words do not wait on the slowest.
+     */
+    private fun loadBunproBadges() {
+        if (!host.bunproBadges) return
+        val words = entries.map { it.data.word }
+        BunproPills.fill(ctx, scope, words, isAlive = { host.isAlive }) { word, outcome ->
+            if (bunproByWord[word] != outcome) {
+                bunproByWord[word] = outcome
+                publish()
+            }
         }
     }
 

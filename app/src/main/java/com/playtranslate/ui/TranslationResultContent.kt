@@ -242,6 +242,7 @@ class TranslationResultContent(
     val binder: TranslationSectionBinder =
         TranslationSectionBinder(root, ctx, prefs, host.scope, host.ttsAlertTarget, popovers)
     val wordRows: WordRowsBinder
+    val grammar: GrammarSectionBinder
     val sourceLens: SourceTextLens
 
     /** The Ask section, over the view-model's session. */
@@ -301,6 +302,15 @@ class TranslationResultContent(
         // The card asks for its rows whenever it is shown and may need them;
         // the VM no-ops unless an analysis is waiting for its rows.
         wordRows.onRowsWanted = { vm.requestWordRows(ctx.applicationContext) }
+        grammar = GrammarSectionBinder(
+            root, ctx, prefs,
+            object : GrammarSectionBinder.Host {
+                override val isAlive: Boolean get() = host.isAlive
+                override val scope: CoroutineScope get() = host.scope
+                override fun present(configure: (OverlayAlert.Builder) -> Unit) =
+                    host.showAlert(configure)
+            },
+        )
         sourceLens = SourceTextLens(
             ctx, host.lensWindowManager, host.lensDisplayId, host.lensOverlayHost,
             scope = host.scope,
@@ -511,6 +521,9 @@ class TranslationResultContent(
                 // so the matching Ready promotion preserves the user's scroll.
                 lastRenderedSourceText = state.originalText
                 binder.bindTranslating(state.segments, state.ocrProvenance)
+                // Grammar is sentence-scoped and the sentence isn't final yet;
+                // the Ready render is what puts the section back.
+                grammar.hide()
                 wordRows.applyWordsVisibility()
                 statusContainer.isGone = true
                 actionButtons.isVisible = host.showsClearAction
@@ -533,6 +546,7 @@ class TranslationResultContent(
                 // the new one lands); the binder shows the "Translating…"
                 // placeholder instead of an empty card.
                 binder.bindResult(result, canReOcr = host.canReOcr(), picking = isPicking(result))
+                grammar.render(result.originalText)
                 wordRows.applyWordsVisibility()
                 statusContainer.isGone = true
                 actionButtons.isVisible = host.showsClearAction
@@ -657,6 +671,7 @@ class TranslationResultContent(
         // Leaving the results view drops the scroll anchor: the next
         // translation is unrelated content and should land at the top.
         lastRenderedSourceText = null
+        grammar.hide()
         // No-text status affordances, each its own tappable span (so tapping
         // one can't trigger the other): the source-language name → source
         // picker (same as the source header); the gear → OCR picker, shown

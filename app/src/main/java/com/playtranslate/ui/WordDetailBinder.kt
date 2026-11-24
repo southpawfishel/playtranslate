@@ -36,6 +36,10 @@ import com.playtranslate.ask.explanation
 import com.playtranslate.audio.AudioRequest
 import com.playtranslate.audio.PlayOutcome
 import com.playtranslate.audio.PronunciationPlayer
+import com.playtranslate.bunpro.BunproGrammarLookup
+import com.playtranslate.bunpro.BunproHtml
+import com.playtranslate.bunpro.BunproLookup
+import com.playtranslate.bunpro.GrammarMatch
 import com.playtranslate.language.DefinitionResolver
 import com.playtranslate.language.DefinitionResult
 import com.playtranslate.language.InflectedForm
@@ -442,6 +446,7 @@ class WordDetailBinder(
      *  display. */
     private var readingHint: String? = null
     private val deckPillTag = "anki_deck_pill"
+    private val bunproPillTag = "bunpro_srs_pill"
 
     /** In-flight TTS request from the header speak chip — cancelled when the
      *  view is torn down so a tapped pronunciation doesn't outlive the page. */
@@ -1266,6 +1271,28 @@ class WordDetailBinder(
         }
         if (mtBannerText != null) addMachineTranslatedBanner(content, mtBannerText)
 
+        // Grammar leads the definitions: さすが is both a vocab word AND a
+        // JLPT2 grammar point, and "this is also a pattern you could study" is
+        // the more surprising half of the answer. Async + additive, so the
+        // page renders identically when Bunpro is off or nothing matched.
+        val grammarAnchor = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+        }
+        content.addView(grammarAnchor)
+        // Same sentence resolution the Anki/example sections use: live host
+        // context first, launch-time args second. The span is the text as the
+        // opener found it (the conjugated surface), so grammar inside the
+        // inflection matches too.
+        maybeAddGrammarSection(
+            grammarAnchor,
+            args?.surface ?: args?.word ?: display.written,
+            ui.sentenceContext()?.original ?: args?.sentenceOriginal,
+        )
+
         val definitionsSuffix = if (numSenses > 1)
             ctx.resources.getQuantityString(R.plurals.word_detail_senses_count, numSenses, numSenses) else null
         addGroupHeader(content, ctx.getString(R.string.word_detail_group_definitions), definitionsSuffix)
@@ -1870,6 +1897,7 @@ class WordDetailBinder(
         headerBadgeFlow = badgeRow
         headerWord = written
         maybeAddAnkiDeckBadge(badgeRow, written)
+        maybeAddBunproBadge(badgeRow, written)
 
         parent.addView(block)
     }
@@ -2009,6 +2037,92 @@ class WordDetailBinder(
                 }
             }
             badgeRow.isVisible = badgeRow.isNotEmpty()
+        }
+    }
+
+    /**
+     * Asynchronously resolves [word] against Bunpro and appends a status pill
+     * to [badgeRow] — studied (with streak), in-Bunpro-but-not-started, or
+     * not-in-Bunpro. Silent ONLY when we couldn't ask: feature off, no token,
+     * non-Japanese source, expired token, or a failed call.
+     * See [BunproLookup.outcomeFor].
+     */
+    private fun maybeAddBunproBadge(badgeRow: FlowLayout, word: String) {
+        if (!BunproLookup.isEnabled(Prefs(ctx.applicationContext))) return
+        scope.launch {
+            val outcome = BunproLookup.outcomeFor(ctx, word)
+            if (!ui.isAlive) return@launch
+            // Idempotent across refreshes: drop any prior pill before re-adding.
+            // Runs BEFORE the Unavailable check so a stale pill from an earlier
+            // render can't outlive a lookup that now has nothing to say.
+            for (i in badgeRow.childCount - 1 downTo 0) {
+                if (badgeRow.getChildAt(i).tag == bunproPillTag) badgeRow.removeViewAt(i)
+            }
+            val pill = BunproBadge.buildPill(
+                ctx = ctx,
+                outcome = outcome,
+                studiedColor = ctx.themeColor(R.attr.ptAccent),
+                mutedColor = ctx.themeColor(R.attr.ptTextHint),
+                background = AppCompatResources.getDrawable(ctx, R.drawable.bg_word_common_pill)
+                    ?: return@launch,
+                textSizeSp = 11f,
+                horizontalPadPx = dp(10),
+                verticalPadPx = dp(3),
+                onClick = { onBunproPillTapped(badgeRow, word, outcome) },
+            )
+            if (pill != null) {
+                pill.tag = bunproPillTag
+                pill.layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).also { it.marginStart = dp(6) }
+                badgeRow.addView(pill)
+            }
+            badgeRow.isVisible = badgeRow.isNotEmpty()
+        }
+    }
+
+    /**
+     * Pill tap: inspect the near misses, or confirm-then-add an unstudied word.
+     * The add is the app's only write to Bunpro, so it is always behind an
+     * explicit confirmation — never a single accidental tap on a badge.
+     * Alerts go through [Ui.present] so the workspace page shows them in its
+     * own window.
+     */
+    private fun onBunproPillTapped(
+        badgeRow: FlowLayout,
+        word: String,
+        outcome: BunproLookup.Outcome,
+    ) {
+        when (outcome) {
+            is BunproLookup.Outcome.Inconclusive -> {
+                val lines = BunproBadge.candidateLines(ctx, outcome)
+                if (lines.isEmpty()) return
+                ui.present(
+                    OverlayAlert.Builder(ctx)
+                        .setTitle(ctx.getString(R.string.word_bunpro_maybe_dialog_title))
+                        .setMessage(
+                            ctx.getString(R.string.word_bunpro_maybe_dialog_intro, word) +
+                                "\n\n" + lines.joinToString("\n")
+                        )
+                        .addCancelButton(ctx.getString(R.string.word_bunpro_maybe_dialog_close))
+                )
+            }
+            is BunproLookup.Outcome.Found -> {
+                if (outcome.status.srs.studied) return
+                BunproAddAction.confirmAddWord(
+                    ctx = ctx,
+                    scope = scope,
+                    word = word,
+                    status = outcome.status,
+                    present = { fill -> ui.present(OverlayAlert.Builder(ctx).also(fill)) },
+                ) { ok ->
+                    // Re-run the lookup: on success it now reads the rewritten
+                    // cache entry and renders the studied pill, no network call.
+                    if (ok && ui.isAlive) maybeAddBunproBadge(badgeRow, word)
+                }
+            }
+            else -> Unit
         }
     }
 
@@ -2167,6 +2281,108 @@ class WordDetailBinder(
         })
         parent.addView(banner)
     }
+
+    /**
+     * Appends a Bunpro grammar section to [anchor] when the tapped word sits
+     * inside a grammar pattern.
+     *
+     * Scoped to the tapped word's span rather than the whole sentence: a whole
+     * sentence yields roughly one hit per line on real game text, most of it
+     * N5 conjugation, but the user asked about ONE word — only grammar touching
+     * that word answers the question.
+     *
+     * Silent when Bunpro is off, no catalogue is synced, or nothing matched,
+     * so the page is unchanged for anyone not using the feature.
+     */
+    private fun maybeAddGrammarSection(
+        anchor: LinearLayout,
+        word: String,
+        sentence: String?,
+    ) {
+        if (!BunproLookup.isEnabled(Prefs(ctx.applicationContext))) return
+        // Without sentence context, treat the word itself as the haystack: a
+        // tapped span IS a valid one-word sentence for matching purposes.
+        val haystack = sentence?.takeIf { it.isNotBlank() && it.contains(word) } ?: word
+        val begin = haystack.indexOf(word).coerceAtLeast(0)
+
+        scope.launch {
+            val matches = BunproGrammarLookup.forSpan(
+                ctx, haystack, begin, begin + word.length,
+            )
+            if (!ui.isAlive || matches.isEmpty()) return@launch
+            anchor.removeAllViews()
+            addGroupHeader(
+                anchor,
+                ctx.getString(R.string.word_detail_group_grammar),
+                if (matches.size > 1) matches.size.toString() else null,
+            )
+            val card = addGroupCard(anchor)
+            matches.forEachIndexed { i, m ->
+                if (i > 0) addInsetDivider(card)
+                card.addView(buildGrammarRow(m))
+            }
+        }
+    }
+
+    /**
+     * One matched grammar point: the form as it appears in the sentence, the
+     * point's title and meaning, and its JLPT level.
+     *
+     * An ambiguous span names its alternatives rather than silently picking
+     * one — 37% of spans on the benchmark corpus had several candidates, and
+     * some (って as quotation vs. topic) are contextual calls this cannot make.
+     * For a learner, "one of these two" is information; a confident wrong
+     * answer is not.
+     */
+    private fun buildGrammarRow(match: GrammarMatch): View {
+        val p = match.primary
+        return LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpRes(R.dimen.pt_row_h_padding), dp(10), dpRes(R.dimen.pt_row_h_padding), dp(10))
+            addView(TextView(ctx).apply {
+                text = if (p.level.isNullOrBlank()) p.title
+                else ctx.getString(R.string.word_grammar_title_fmt, p.title, jlptLabel(p.level))
+                setTextColor(ctx.themeColor(R.attr.ptText))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            })
+            // Bunpro returns every human-facing string as HTML, the catalogue
+            // gloss included — see BunproHtml.
+            BunproHtml.toPlainTextOrNull(p.meaning)?.let { meaning ->
+                addView(TextView(ctx).apply {
+                    text = meaning
+                    setTextColor(ctx.themeColor(R.attr.ptTextMuted))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    setPadding(0, dp(2), 0, 0)
+                })
+            }
+            // The form as it appears here, when it differs from the point's own
+            // name — "matched よかった" is the useful bit for a conjugated hit.
+            if (match.matchedForm != p.title) {
+                addView(TextView(ctx).apply {
+                    text = ctx.getString(R.string.word_grammar_matched_fmt, match.matchedForm)
+                    setTextColor(ctx.themeColor(R.attr.ptTextHint))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setPadding(0, dp(4), 0, 0)
+                })
+            }
+            if (match.isAmbiguous) {
+                addView(TextView(ctx).apply {
+                    text = ctx.getString(
+                        R.string.word_grammar_also_fmt,
+                        match.candidates.drop(1).joinToString("、") { it.title },
+                    )
+                    setTextColor(ctx.themeColor(R.attr.ptTextHint))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setPadding(0, dp(4), 0, 0)
+                })
+            }
+        }
+    }
+
+    /** "JLPT5" → "N5"; anything else (Non-JLPT, 関西弁) passes through. */
+    private fun jlptLabel(level: String): String =
+        if (level.startsWith("JLPT")) "N" + level.removePrefix("JLPT") else level
 
     /**
      * Inflate [R.layout.settings_group_header] and optionally fill the

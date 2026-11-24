@@ -374,6 +374,9 @@ class SettingsBottomSheet : DialogFragment() {
                 override fun openAnkiSettings() {
                     openAnkiSettingsPage()
                 }
+                override fun openBunproSettings() {
+                    startActivity(BunproSettingsActivity.newIntent(requireContext()))
+                }
                 override fun onCheckForUpdatesTapped(onFinished: () -> Unit) {
                     this@SettingsBottomSheet.startUpdateCheck(onFinished)
                 }

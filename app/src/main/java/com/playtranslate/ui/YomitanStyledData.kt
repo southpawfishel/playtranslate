@@ -73,7 +73,8 @@ internal fun importedGroupsFromSenses(
 }
 
 /** A definitions document's meta row: the Common pill, the ★ run, the
- *  frequency chips and the deck badge, in that order. */
+ *  frequency chips, the deck badge and the Bunpro pill, in that order.
+ *  `StyledMetaRowParityTest` holds the Bunpro chip in place. */
 internal fun styledMetaChips(
     ctx: Context,
     data: WordDefinitionData,
@@ -111,6 +112,10 @@ internal fun styledMetaChips(
     // The whole badge from its owner, never [AnkiDeckBadge.label] alone —
     // the label-only assembly this replaced is what dropped the icon.
     AnkiDeckBadge.metaChip(ctx, data.ankiDecks)?.let { add(it) }
+    // Likewise from its owner. Omitting this is what made the Bunpro pill
+    // disappear from every word a Yomitan dictionary styled, while the same
+    // word kept its pill in the flat word list — see [BunproBadge.metaChip].
+    BunproBadge.metaChip(ctx, data.bunpro)?.let { add(it) }
 }
 
 /**

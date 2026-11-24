@@ -484,9 +484,15 @@ class WordRowsBinder(
         }
     }
 
-    /** Re-queries deck membership for the listed words and redraws the rows
-     *  whose badge changed. No-op until the list is built. */
-    fun refreshWordBadges() = list.refreshDeckBadges()
+    /** Re-queries deck membership and Bunpro standing for the listed words
+     *  and redraws the rows whose badge changed. No-op until the list is
+     *  built. Bunpro is re-read because a word added from its own page
+     *  rewrites the lookup cache while these rows keep their old pill; the
+     *  re-read is free, every word being cached already. */
+    fun refreshWordBadges() {
+        list.refreshDeckBadges()
+        list.refreshBunproBadges()
+    }
 
     // ── What the page shows, for its host ────────────────────────────────
 

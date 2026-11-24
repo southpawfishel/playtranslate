@@ -209,6 +209,11 @@ class ResultSectionsLayout @JvmOverloads constructor(
         ruleAbove(askHeader, askCard)
         y = stack(askHeader, inner, y)
         y = stack(askCard, inner, y)
+        // Bunpro grammar: one child holding its own header and card, GONE
+        // unless the sentence matched something ([GrammarSectionBinder]).
+        val grammar = shownChild(R.id.grammarSection)
+        ruleAbove(grammar, null)
+        y = stack(grammar, inner, y)
         ruleAbove(wordsHeader, wordsCard)
         y = stack(wordsHeader, inner, y)
         y = stack(wordsCard, inner, y)
@@ -387,6 +392,7 @@ class ResultSectionsLayout @JvmOverloads constructor(
             R.id.sourceHeaderRow, R.id.cardOriginal,
             R.id.targetHeaderRow, R.id.cardTranslation,
             R.id.askHeaderRow, R.id.cardAsk,
+            R.id.grammarSection,
             R.id.wordsHeaderRow, R.id.cardWords,
         )
     }

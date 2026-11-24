@@ -133,6 +133,19 @@ class RootSettingsViewModel(app: Application) : AndroidViewModel(app) {
         data class Navigate(val deckName: String, val cardName: String) : AnkiCell
     }
 
+    /** Bunpro CONFIGURE cell: no-token → expired → on/off. Unlike [AnkiCell]
+     *  none of these need a permission or an installed app — the whole gate is
+     *  the stored API token. */
+    sealed interface BunproCell {
+        /** No token saved — tapping opens the sub-page to add one. */
+        object NotConnected : BunproCell
+        /** A call came back 401/403: the API token was rejected. Surfaced from
+         *  the persisted flag rather than a probe — see `Prefs.bunproTokenRejected`. */
+        object Expired : BunproCell
+        /** Token present and not known-stale; [enabled] is the user's toggle. */
+        data class Configured(val enabled: Boolean) : BunproCell
+    }
+
     /** TTS CONFIGURE cell. A tap opens the voice page in every state. */
     sealed interface TtsCell {
         /** Engine availability not resolved yet (async check in flight). */
@@ -157,6 +170,7 @@ class RootSettingsViewModel(app: Application) : AndroidViewModel(app) {
         val appearanceSummary: String,
         val captureSummary: String,
         val anki: AnkiCell,
+        val bunpro: BunproCell,
         val tts: TtsCell,
         /** Whether an android.db file of recordings is loaded
          *  ([LocalAudioStore.isImported]): the TTS cell's digest says so
@@ -232,6 +246,7 @@ class RootSettingsViewModel(app: Application) : AndroidViewModel(app) {
         val (online, offline) = translationDigests()
         _state.value = _state.value.copy(
             anki = resolveAnkiCell(),
+            bunpro = resolveBunproCell(),
             translationOnline = online,
             translationOffline = offline,
             captureSummary = captureDigest(),
@@ -270,6 +285,7 @@ class RootSettingsViewModel(app: Application) : AndroidViewModel(app) {
             appearanceSummary = appearanceDigest(),
             captureSummary = captureDigest(),
             anki = resolveAnkiCell(),
+            bunpro = resolveBunproCell(),
             tts = TtsCell.Loading,
             recordingsLoaded = LocalAudioStore.isImported(getApplication()),
             cloudSummary = cloudDigest(),
@@ -439,6 +455,15 @@ class RootSettingsViewModel(app: Application) : AndroidViewModel(app) {
                 cardName = prefs.ankiModelName.ifBlank { str(R.string.settings_anki_default) },
             )
         }
+    }
+
+    /** Pure pref read — no network. The app learns that the Bunpro token
+     *  stopped working from a real 401 (recorded in `bunproTokenRejected`)
+     *  rather than probing on every settings open. */
+    private fun resolveBunproCell(): BunproCell = when {
+        prefs.bunproToken.isBlank() -> BunproCell.NotConnected
+        prefs.bunproTokenRejected -> BunproCell.Expired
+        else -> BunproCell.Configured(prefs.bunproEnabled)
     }
 
     private suspend fun resolveTtsCell(): TtsCell {
