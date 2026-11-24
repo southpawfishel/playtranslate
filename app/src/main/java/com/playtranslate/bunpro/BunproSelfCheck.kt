@@ -2,6 +2,8 @@ package com.playtranslate.bunpro
 
 import android.content.Context
 import com.playtranslate.dictionary.SudachiJapaneseTokenizer
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * On-device verification for the parts that cannot be tested in a JVM unit test.
@@ -32,6 +34,16 @@ object BunproSelfCheck {
         "食べた" to setOf("食べる"),                 // ichidan past
         "行かない" to setOf("行く"),                 // godan negative
         "見ている" to setOf("見る"),                 // te-iru
+    )
+
+    /** Sentence → the start of the title of a point that must be found in
+     *  it. Each was a measured miss before the sequence arm existed. */
+    private val SEQUENCE_CASES = listOf(
+        "食べてしまった" to "てしまう",
+        "買っておいた" to "ておく",
+        "行くことができました" to "ことができる",
+        "彼は学生であり" to "である",
+        "見てもらいました" to "てもらう",
     )
 
     data class Line(val ok: Boolean?, val text: String)
@@ -106,10 +118,40 @@ object BunproSelfCheck {
         }
         lines += Line(null, "\nCatalogue: ${catalogue.size} grammar points")
 
-        val index = BunproGrammarIndex(
-            catalogue,
-            extraForms = BunproGrammarStore.loadStructureForms(ctx),
-        )
+        // Built the way the app builds it — every form analysed once — and
+        // timed, because that analysis is the one cost here that only a real
+        // device can measure.
+        val extra = BunproGrammarStore.loadStructureForms(ctx)
+        val analyse = { s: String ->
+            try {
+                SudachiJapaneseTokenizer.Provider.analyze(s)
+            } catch (e: Exception) {
+                emptyList()
+            }
+        }
+        val started = System.nanoTime()
+        val index = withContext(Dispatchers.Default) {
+            BunproGrammarIndex(catalogue, extraForms = extra, tokenize = analyse)
+        }
+        val buildMs = (System.nanoTime() - started) / 1_000_000
+        lines += Line(null, "Index build: $buildMs ms (once per app start)")
+
+        // ── 4. Conjugated patterns ──────────────────────────────────────
+        // The sequence arm: a pattern listed in dictionary form, found with
+        // its last word conjugated. Depends on Sudachi splitting the FORM
+        // the same way it splits the sentence, which is the device's call.
+        lines += Line(null, "\nConjugated patterns:")
+        for ((text, expected) in SEQUENCE_CASES) {
+            val found = index.match(text, analyse(text))
+                .flatMap { m -> m.candidates.map { it.title.trim() } }
+            val ok = found.any { it.startsWith(expected) }
+            lines += Line(
+                ok,
+                "$text → $expected" +
+                    if (ok) "" else "  (found: ${found.distinct().joinToString("、").ifEmpty { "nothing" }})",
+            )
+        }
+
         val sentence = "昨日はよかった。"
         val tokens = try {
             SudachiJapaneseTokenizer.Provider.analyze(sentence)
