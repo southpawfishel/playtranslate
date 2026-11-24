@@ -661,4 +661,27 @@ class AskSessionTest {
         call.reply.complete(Completion("too late", online))
         assertEquals("its answer never replaces the restored one", answered, session.state.value)
     }
+
+    @Test fun `a prepared question goes out with its addition while the state keeps the one asked`() {
+        val session = newSession()
+        session.bind(sentence)
+        val prepared = AskQuestion.Preset(grammar.preset.copy(question = grammar.preset.question + " HINTS"))
+        session.prepare = { q, _ -> if (q == grammar) prepared else q }
+
+        session.ask(grammar)
+
+        assertEquals("the title and a retry are of the question asked", AskState.Asking(grammar), session.state.value)
+        assertEquals(AskPrompts.build(prepared, sentence), llm.calls.single().asked)
+        assertTrue(llm.calls.single().user.contains("HINTS"))
+    }
+
+    @Test fun `a preparer that fails costs its addition, never the question`() {
+        val session = newSession()
+        session.bind(sentence)
+        session.prepare = { _, _ -> error("no catalogue") }
+
+        session.ask(grammar)
+
+        assertEquals(AskPrompts.build(grammar, sentence), llm.calls.single().asked)
+    }
 }

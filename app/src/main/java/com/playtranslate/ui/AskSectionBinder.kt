@@ -18,6 +18,7 @@ import androidx.core.widget.doAfterTextChanged
 import com.playtranslate.Prefs
 import com.playtranslate.R
 import com.playtranslate.ask.AskPreset
+import com.playtranslate.bunpro.BunproAskContext
 import com.playtranslate.ask.AskPresets
 import com.playtranslate.ask.AskQuestion
 import com.playtranslate.ask.AskSession
@@ -376,6 +377,9 @@ class AskSectionBinder(
     // ── Asking ───────────────────────────────────────────────────────────
 
     private fun askPreset(preset: AskPreset) {
+        // The breakdown is asked with what Bunpro's matcher found in the
+        // sentence ([BunproAskContext]); set here, where there is a context.
+        if (session.prepare == null) session.prepare = BunproAskContext.preparer(ctx)
         host.onInteraction()
         if (!hasLlm()) {
             host.onLlmNeeded()

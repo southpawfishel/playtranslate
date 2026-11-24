@@ -99,6 +99,20 @@ class AskSession(
 
     private var job: Job? = null
 
+    /**
+     * What a question passes through on its way out, inside its own
+     * request: it may return the question with more in its wording (the
+     * grammar breakdown takes the Bunpro matcher's candidates this way,
+     * `BunproAskContext`). Null, the default, sends every question as
+     * asked. The state keeps the question the user asked, so its title and
+     * a retry are of that one; a retry is prepared afresh. A preparer that
+     * fails costs its addition, never the question.
+     *
+     * Set by the surface that owns a context to prepare with: the session
+     * lives where there is none (a view model).
+     */
+    var prepare: (suspend (AskQuestion, AskSentence) -> AskQuestion)? = null
+
     /** [sentence] is what the surface shows now (null: no result). Binding
      *  the sentence already bound changes nothing, so a surface may call
      *  this on every render. */
@@ -131,7 +145,14 @@ class AskSession(
         _state.value = AskState.Asking(question)
         job = scope.launch {
             val next = try {
-                val completion = complete(AskPrompts.build(question, about), pastCooldowns) { backend ->
+                val prepared = try {
+                    prepare?.invoke(question, about) ?: question
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    question
+                }
+                val completion = complete(AskPrompts.build(prepared, about), pastCooldowns) { backend ->
                     // Named only while this request is the live one, by the
                     // same promise as the write below: a pass that goes on
                     // after its cancel (a completer that returned or failed
