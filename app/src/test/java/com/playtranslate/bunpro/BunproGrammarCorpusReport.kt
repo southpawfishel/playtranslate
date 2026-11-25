@@ -75,6 +75,21 @@ class BunproGrammarCorpusReport {
                 ).joinToString("\n")
             }.joinToString("\n"),
         )
+        // What the part-of-speech checks read out of the titles, for the same
+        // reason: the rules are only as good as what they are told.
+        File(dir, "pos_contexts.txt").writeText(
+            points.mapNotNull { p ->
+                val c = StatedContext.parse(p.title)
+                val opens = index.opensClause(p.id)
+                if (c.isEmpty && !opens) null
+                else listOfNotNull(
+                    p.title.trim(),
+                    c.before.takeIf { it.isNotEmpty() }?.let { "  before: $it" },
+                    c.after.takeIf { it.isNotEmpty() }?.let { "  after: $it" },
+                    "  opens a clause".takeIf { opens },
+                ).joinToString("\n")
+            }.joinToString("\n"),
+        )
         val out = StringBuilder()
         // form → primary title, counted, for each relevance setting.
         val all = HashMap<String, Int>()

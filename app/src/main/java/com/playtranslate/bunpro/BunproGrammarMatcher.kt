@@ -39,8 +39,10 @@ data class GrammarMatch(
          *  just naming it. */
         val meaning: String?,
         /** True when the matched form IS this point's own title rather than a
-         *  keyword it merely lists. Resolves ~40% of contested spans on the
-         *  benchmark corpus — helpful, but not sufficient on its own. */
+         *  keyword it merely lists, or when the title states the word class
+         *  around the form and the sentence bears it out (`Noun + まで`
+         *  after a noun). Resolves ~40% of contested spans on the benchmark
+         *  corpus — helpful, but not sufficient on its own. */
         val isPrimaryForm: Boolean,
         /** The user's SRS streak for this point, or null when it isn't in
          *  their reviews at all. Drives whether the UI offers "add" or shows
@@ -191,6 +193,28 @@ class BunproGrammarIndex(
         }
     }
 
+    /** What each title says about the words around its pattern — see
+     *  [StatedContext]. Only points that say something are held. */
+    private val contexts: Map<Long, StatedContext> = points.mapNotNull { p ->
+        StatedContext.parse(p.title).takeIf { !it.isEmpty }?.let { p.id to it }
+    }.toMap()
+
+    /** The pattern as each such title writes it, read on first use. */
+    private val titleForms = java.util.concurrent.ConcurrentHashMap<Long, Set<String>>()
+
+    /** Points that open a clause (では・それでは・じゃあ), as opposed to
+     *  attaching to the word before them. Empty without an analyser. */
+    private val clauseOpeners: Set<Long> =
+        if (tokenize == null) emptySet()
+        else points.filter { p ->
+            BunproPosCheck.opensClause(TitleShape.parse(p.title).alternatives) { form ->
+                formTokens[form] ?: tokenize(form)
+            }
+        }.mapTo(HashSet()) { it.id }
+
+    /** For the corpus report. */
+    internal fun opensClause(pointId: Long): Boolean = pointId in clauseOpeners
+
     /** Sequences by the surface of their first token, so a sentence token
      *  looks up only the patterns that could start at it. */
     private val sequencesByFirst: Map<String, List<Sequence>> =
@@ -236,9 +260,15 @@ class BunproGrammarIndex(
         val ends = tokens.mapTo(HashSet()) { it.end }
         val aligned = { b: Int, e: Int -> tokens.isEmpty() || (b in starts && e in ends) }
 
+        // Literal hits that landed on another word inflected (つい on the
+        // stem of つく). They stand only for a point whose title says the
+        // form is that kind of word's ending; see the candidate filter.
+        val otherWord = HashSet<Triple<Int, Int, String>>()
+
         // ── Surface arm ────────────────────────────────────────────────
         for (alias in aliasesByLengthDesc) {
             if (alias.length < minLength) continue
+            val alone = formTokens[alias].orEmpty()
             var from = text.indexOf(alias)
             while (from >= 0) {
                 val to = from + alias.length
@@ -246,7 +276,16 @@ class BunproGrammarIndex(
                 // without an analysis get the old, looser behaviour rather
                 // than silently getting nothing.
                 if (aligned(from, to)) {
-                    bySpan.putIfAbsent(Triple(from, to, alias), GrammarMatch.Via.SURFACE)
+                    val place = BunproPosCheck.Place.of(tokens, from, to)
+                    if (place == null ||
+                        !BunproPosCheck.isSplitWord(alone, place, byAlias::containsKey)
+                    ) {
+                        val span = Triple(from, to, alias)
+                        bySpan.putIfAbsent(span, GrammarMatch.Via.SURFACE)
+                        if (place != null && BunproPosCheck.isOtherWordInflected(alone, place)) {
+                            otherWord += span
+                        }
+                    }
                 }
                 from = text.indexOf(alias, from + 1)
             }
@@ -289,7 +328,21 @@ class BunproGrammarIndex(
 
         val hits = bySpan.mapNotNull { (span, via) ->
             val (begin, end, form) = span
-            val all = byAlias[form].orEmpty().mapNotNull { pointsById[it] }
+            // Where the span sits among the tokens; null with no analysis,
+            // and then none of the part-of-speech checks can run.
+            val place = BunproPosCheck.Place.of(tokens, begin, end)
+            val opensClause = place?.particlesAtClauseStart
+            val listed = byAlias[form].orEmpty()
+            // Does the catalogue split this form by the class of the word
+            // before it (`Noun + まで` / `Verb + まで`)? Then the split is the
+            // reading, and the half the sentence bears out goes first. One
+            // labelled point on its own (`Verb[ないで]` beside ないで) is not
+            // a split, and its label being true of the sentence does not
+            // make it the better reading.
+            val isSplitByClass = listed.mapNotNull { contexts[it] }
+                .filter { it.after.isEmpty() }.map { it.before }.distinct().size > 1
+            val confirmed = HashSet<Long>()
+            val all = listed.mapNotNull { pointsById[it] }
                 // A point whose whole title is this form goes ahead of one
                 // that names it as an alternative (ように before ように・ような).
                 .sortedByDescending { it.titleBase() == form }
@@ -299,12 +352,36 @@ class BunproGrammarIndex(
                     val rest = admitted[p.id]?.requiresAfter?.get(form) ?: return@filter true
                     BunproAliasFilter.partsFollow(text, end, rest)
                 }
+                .filter { p ->
+                    if (place == null) return@filter true
+                    val context = contexts[p.id]
+                    if (context != null) {
+                        val named = titleForms.getOrPut(p.id) {
+                            TitleShape.parse(p.title).groups.singleOrNull().orEmpty()
+                        }
+                        if (!BunproPosCheck.admits(context, place, form, named)) return@filter false
+                        // A title that also says what FOLLOWS is about the
+                        // phrase the form sits in (`Verb［た・ている］+ Noun`,
+                        // a relative clause), not a reading of the form.
+                        if (isSplitByClass && context.after.isEmpty()) confirmed += p.id
+                    } else if (span in otherWord) {
+                        return@filter false
+                    }
+                    // A run of particles opening a clause is a conjunction
+                    // (でも "but"), so only a point used that way fits; the
+                    // same run after a word is particles, and such a point
+                    // does not (このままでは is not では "well then").
+                    opensClause == null || opensClause == (p.id in clauseOpeners)
+                }
+                // Before a noun, `Noun + まで` is a better reading of まで
+                // than the bare point that says nothing of where it goes.
+                .sortedByDescending { it.id in confirmed }
             if (all.isEmpty()) return@mapNotNull null
             val candidates = all.map { p ->
                 GrammarMatch.GrammarCandidate(
                     pointId = p.id, title = p.title, level = p.level, slug = p.slug,
                     meaning = p.meaning,
-                    isPrimaryForm = form in namesOf(p),
+                    isPrimaryForm = form in namesOf(p) || p.id in confirmed,
                     streak = srsOf(p.id),
                 )
             }
